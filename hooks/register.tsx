@@ -319,7 +319,11 @@ function learn(ledger: Ledger, path: string): void {
  */
 async function isAtForge($: EngineInterface): Promise<boolean> {
   try {
-    if (typeof origin !== 'string') origin = (await $.session.repo())?.remote ?? null
+    // In a home that is not a repository the repository is the bound run's, and is read again for each run.
+    if (await isFolderHome($)) {
+      const here = await backendOf($)
+      origin = here?.kind === 'git' ? here.remote : null
+    } else if (typeof origin !== 'string') origin = (await $.session.repo())?.remote ?? null
   } catch {
     return false
   }
@@ -1063,6 +1067,38 @@ async function workspaceFor($: EngineInterface, making: Making): Promise<{ path:
   return made
 }
 
+/**
+ * Makes a git worker's worktree in a home that is not a repository, where the
+ * engine makes none: beside the repository, never inside it, on a branch of
+ * its own, from the base branch (or the branch it builds on) as it is on
+ * origin. A worktree the mod made for this task before is reused.
+ */
+async function gitWorktreeFor(
+  $: EngineInterface,
+  at: { root: string; base: string; path: string; branch: string; start: string },
+): Promise<{ path: string; error?: undefined } | { error: string }> {
+  if (!isInside(at.base, at.path) || at.path === at.root || at.path.startsWith(`${at.root}/`)) return { error: `${at.path} is no place for a worktree: it must lie inside ${at.base}, outside ${at.root}` }
+  if (await $.fs.exists(`${at.path}/.git`).catch(() => false)) return { path: at.path }
+  if (await $.fs.exists(at.path).catch(() => true)) return { error: `${at.path} is there already and is no worktree; it is left as it is. Move it away, then start the worker again` }
+  const fetched = await runProgram($, ['git', '-C', at.root, 'fetch', 'origin', at.start], LONG_MS)
+  if (fetched.exitCode !== 0) return { error: `git could not fetch ${at.start}: ${lastLine(fetched)}` }
+  const added = await runProgram($, ['git', '-C', at.root, 'worktree', 'add', '-b', at.branch, at.path, `origin/${at.start}`], LONG_MS)
+  if (added.exitCode !== 0) return { error: lastLine(added) }
+
+  return { path: at.path }
+}
+
+/** Removes a done task's worktree the mod made, unless it holds what is not committed: git refuses then, and it is kept. */
+async function retireWorktree($: EngineInterface, ledger: Ledger, taskId: string): Promise<void> {
+  const workspace = ledger.run.workspace
+  const task = ledger.tasks.find(one => one.id === taskId)
+  if (workspace?.kind !== 'git' || task?.workspace === undefined || !(await isFolderHome($))) return
+  // Only the folder the mod derives for this task, never a path read off the ledger alone.
+  const derived = workspaceOf(workspacesOf(workspace.root, undefined), ledger.run.id, taskId)
+  if (task.workspace !== derived) return
+  await runProgram($, ['git', '-C', workspace.root, 'worktree', 'remove', derived], LONG_MS)
+}
+
 /** A worker's workspace made and not handed to the engine yet, by task. */
 const prepared = new Map<string, string>()
 /** Starts whose workspace waits for the engine's WorktreeCreate, oldest first. One is in flight at a time. */
@@ -1087,6 +1123,18 @@ function exclusive(): Promise<() => void> {
   startChain = prior.then(() => mine)
 
   return prior.then(() => unlock)
+}
+
+/**
+ * The base branch of the bound run. In a home that is not a repository it is
+ * the run's workspace's, which its place may set; elsewhere the mod's option.
+ */
+async function runBase($: EngineInterface): Promise<string> {
+  if (!(await isFolderHome($))) return config.base
+  const path = await boundLedger($).catch(() => undefined)
+  const workspace = path === undefined ? undefined : parseLedger((await textAt($, path)) ?? '').ledger?.run.workspace
+
+  return workspace?.base ?? config.base
 }
 
 /** The folder that holds the run folders: the home's root, which in a repository home is the repository's. */
@@ -1533,6 +1581,7 @@ async function lookAgain($: EngineInterface): Promise<void> {
  * verdict.
  */
 async function watchMain($: EngineInterface): Promise<void> {
+  const base = await runBase($)
   if (isWatchingMain) return
   isWatchingMain = true
   try {
@@ -1561,10 +1610,10 @@ async function watchMain($: EngineInterface): Promise<void> {
         if (main === undefined) return { isChanged: false, isError: true, text: '' }
         main.failed = line
         const recorded = reportProblem(raw, at, { kind: 'orchestrator' }, {
-          text: `The checks on ${config.base} failed for ${line}. Nothing merges onto a red ${config.base} but its repair.`,
+          text: `The checks on ${base} failed for ${line}. Nothing merges onto a red ${base} but its repair.`,
           severity: 'blocker',
         })
-        const text = `Run board: the checks on ${config.base} failed for ${line}. ${recorded.isError ? '' : recorded.text}`.trimEnd()
+        const text = `Run board: the checks on ${base} failed for ${line}. ${recorded.isError ? '' : recorded.text}`.trimEnd()
 
         return { isChanged: true, isError: false, text, wake: text, asks: `main ${line}` }
       })
@@ -1925,10 +1974,11 @@ async function checksAt($: EngineInterface, sha: string): Promise<Verdict | { er
 
 /** The base branch's head and the verdict of its checks. */
 async function lookAtBase($: EngineInterface): Promise<Look> {
-  const branch = await github($, `/branches/${encodeURIComponent(config.base)}`)
+  const base = await runBase($)
+  const branch = await github($, `/branches/${encodeURIComponent(base)}`)
   if (branch.error !== undefined) return { error: branch.error }
   const head = branch.status === 200 ? headOf(branch.json) : undefined
-  if (head === undefined) return { error: `the head of ${config.base} could not be read (HTTP ${branch.status})` }
+  if (head === undefined) return { error: `the head of ${base} could not be read (HTTP ${branch.status})` }
   const verdict = await checksAt($, head)
   if ('error' in verdict) return { error: verdict.error }
 
@@ -1937,6 +1987,7 @@ async function lookAtBase($: EngineInterface): Promise<Look> {
 
 /** What GitHub says about a pull request and about the base branch, right now. */
 async function survey($: EngineInterface, pr: number): Promise<{ facts: Facts; error?: undefined } | { error: string }> {
+  const branchName = await runBase($)
   const [pulled, base] = await Promise.all([github($, `/pulls/${pr}`), lookAtBase($)])
   if (pulled.error !== undefined) return { error: pulled.error }
   if (pulled.status === 404) return { error: `it knows no pull request ${pr} in ${repoHere() ?? 'this repository'}` }
@@ -1947,7 +1998,7 @@ async function survey($: EngineInterface, pr: number): Promise<{ facts: Facts; e
   const checks: Verdict | { error: string } = pull.isMerged ? { verdict: 'green', line: 'merged', failed: [] } : await checksAt($, pull.head)
   if ('error' in checks) return { error: checks.error }
 
-  return { facts: { pull, checks, base: config.base, baseHead: base.head, main: base.verdict } }
+  return { facts: { pull, checks, base: branchName, baseHead: base.head, main: base.verdict } }
 }
 
 /** The merges other runs of this repository have in flight. Never throws: a run that does not read is no reason to refuse. */
@@ -2274,6 +2325,7 @@ async function mergeTool(
   call: ToolCall,
   isCheckOnly: boolean,
 ): Promise<{ result: string; text: string; isError?: undefined } | { isError: true; result: string; text: string }> {
+  const base = await runBase($)
   const say = (text: string) => ({ result: text, text })
   const fail = (reason: string) => {
     const text = `${NOT_DONE} ${reason}`
@@ -2309,7 +2361,8 @@ async function mergeTool(
   if (pull.isMerged) {
     const where = pull.commit === undefined ? '' : ` as ${short(pull.commit)}`
     if (isCheckOnly) return say(`PR ${asked.pr} is merged already${where}, outside the board. ${TOOL_MERGE} takes it over and marks ${id} done.`)
-    const adopted = await settle($, path, raw => onMain(raw, iso(now), pull.commit ?? pull.head, config.base, { isAdopted: true, task: id, pr: asked.pr }))
+    const adopted = await settle($, path, raw => onMain(raw, iso(now), pull.commit ?? pull.head, base, { isAdopted: true, task: id, pr: asked.pr }))
+    await retireWorktree($, ledger, id)
     if (adopted !== undefined) await issueDone($, path, id)
 
     return adopted === undefined ? fail(`${id} could not be taken over: the board could not be written.`) : say(adopted.text)
@@ -2320,7 +2373,7 @@ async function mergeTool(
     if (blocks.length > 0) return say(`${id} cannot merge yet:\n${blocks.map(one => `- ${one}`).join('\n')}`)
 
     return say(
-      `${id} may merge now. PR ${asked.pr} is open and mergeable into ${config.base}, its checks are green on ${short(pull.head)} (${facts.checks.line}), the checks on ${config.base} are ${facts.main.verdict} for ${short(facts.baseHead)}, and ${closingLine(closes(`${pull.title}\n${pull.body}`))}. GitHub would merge it with its ${config.method} method. Before you call ${TOOL_MERGE}: tell the other sessions that may merge (ListAgents shows them) and name them in told.`,
+      `${id} may merge now. PR ${asked.pr} is open and mergeable into ${base}, its checks are green on ${short(pull.head)} (${facts.checks.line}), the checks on ${base} are ${facts.main.verdict} for ${short(facts.baseHead)}, and ${closingLine(closes(`${pull.title}\n${pull.body}`))}. GitHub would merge it with its ${config.method} method. Before you call ${TOOL_MERGE}: tell the other sessions that may merge (ListAgents shows them) and name them in told.`,
     )
   }
   if (blocks.length > 0) return fail(`Nothing was merged. ${id} cannot merge now:\n${blocks.map(one => `- ${one}`).join('\n')}`)
@@ -2345,10 +2398,11 @@ async function mergeTool(
   const settled = after.error !== undefined || after.status !== 200 ? undefined : pullOf(after.json)
   if (settled?.isMerged === true) {
     const commit = settled.commit ?? pull.head
-    const done = await settle($, path, raw => onMain(raw, now2, commit, config.base))
+    const done = await settle($, path, raw => onMain(raw, now2, commit, base))
+    await retireWorktree($, ledger, id)
     if (done !== undefined) await issueDone($, path, id)
 
-    return say(done?.text ?? `Merged: PR ${asked.pr} (${id}) is on ${config.base} as ${short(commit)}, but the board could not be written. Set it right with ${TOOL_MERGE} for ${id} again: it is taken over.`)
+    return say(done?.text ?? `Merged: PR ${asked.pr} (${id}) is on ${base} as ${short(commit)}, but the board could not be written. Set it right with ${TOOL_MERGE} for ${id} again: it is taken over.`)
   }
   if (settled !== undefined) {
     await mutate($, path, raw => {
@@ -2416,6 +2470,7 @@ async function settleStuckLore($: EngineInterface, path: string, ledger: Ledger)
 }
 
 async function watchClaim($: EngineInterface): Promise<void> {
+  const base = await runBase($)
   if (isWatching) return
   isWatching = true
   try {
@@ -2436,7 +2491,7 @@ async function watchClaim($: EngineInterface): Promise<void> {
     if (pull.isMerged) {
       // Nobody heard the merge tool's answer: the orchestrator is told now, and woken if it is idle.
       await settle($, path, raw => {
-        const done = onMain(raw, at, pull.commit ?? flight.head, config.base)
+        const done = onMain(raw, at, pull.commit ?? flight.head, base)
 
         return done.isError ? done : { ...done, wake: `Run board: PR ${flight.pr} (${flight.task}) is merged as ${short(pull.commit ?? flight.head)}, and the task is done.`, asks: `merge ${flight.task}` }
       })
@@ -3019,6 +3074,27 @@ export const register: Register = (on, options) => {
       prepared.set(taskId, workspace)
       awaitingWorktree.push({ taskId, path: workspace })
     }
+    // In a home that is not a repository the engine makes no git worktree: the mod makes it, as it does for Lore.
+    if (decided.kind === 'worker' && here?.kind === 'git' && (await isFolderHome($))) {
+      const taskId = decided.taskId
+      const runBaseBranch = read.ledger.run.workspace?.base ?? config.base
+      const workspace = workspaceOf(workspacesOf(here.root, undefined), read.ledger.run.id, taskId)
+      const made = await gitWorktreeFor($, {
+        root: here.root,
+        base: workspacesOf(here.root, undefined),
+        path: workspace,
+        branch: `${LORE_DEFAULTS.branchPrefix}${read.ledger.run.id}/${taskId}`,
+        start: decided.base?.branch ?? runBaseBranch,
+      })
+      if (made.error !== undefined) {
+        await release()
+
+        return { deny: `conductor: ${taskId}'s worktree could not be made, so no worker was started: ${made.error}.` }
+      }
+      unlock = await exclusive()
+      prepared.set(taskId, workspace)
+      awaitingWorktree.push({ taskId, path: workspace })
+    }
     const finished = (): void => {
       const waiting = awaitingWorktree.findIndex(one => decided.kind === 'worker' && one.taskId === decided.taskId)
       if (waiting >= 0) awaitingWorktree.splice(waiting, 1)
@@ -3057,7 +3133,7 @@ export const register: Register = (on, options) => {
     try {
       const here = await backendOf($)
       // In git the mod has nothing to say: the person's own hook beneath, or the engine's own worktree, answers.
-      if (here?.kind !== 'lore') return next(e)
+      if (here?.kind !== 'lore' && !(here?.kind === 'git' && (await isFolderHome($)))) return next(e)
       // The engine names the workspace after the agent: a worker it started already is found by its id, else it is the start in flight.
       const agentId = /^agent-(.+)$/.exec(e.name)?.[1]
       let taskId = agentId === undefined ? undefined : agents.get(agentId)
@@ -3103,7 +3179,8 @@ export const register: Register = (on, options) => {
     const call = e as unknown as ToolCall
     // In a run nothing reaches the base branch by hand: not a worker's command, and not the orchestrator's either.
     if (call.tool === 'Bash' && typeof call.command === 'string') {
-      const what = byHand(call.command, config.base)
+      const base = await runBase($)
+      const what = byHand(call.command, base)
       const isBound = what !== undefined && (await boundLedger($).catch(() => undefined)) !== undefined
       // A worker never merges, anywhere. The orchestrator's own merge is refused where the board merges: in a
       // repository that is not on GitHub it merges nothing, so there this is the repository's path, not a way round.
@@ -3111,8 +3188,8 @@ export const register: Register = (on, options) => {
         return {
           deny:
             call.agentId === undefined
-              ? `conductor: this command ${what} by hand. In a run a pull request reaches ${config.base} through ${TOOL_MERGE}, which merges pinned to the graded head, one at a time. ${TOOL_CHECK} says what stands in the way. /board none lets go of the run.`
-              : `conductor: this command ${what}. A worker never merges and never pushes to ${config.base}: set your task to review with its pull request and hand back. Merging is the orchestrator's.`,
+              ? `conductor: this command ${what} by hand. In a run a pull request reaches ${base} through ${TOOL_MERGE}, which merges pinned to the graded head, one at a time. ${TOOL_CHECK} says what stands in the way. /board none lets go of the run.`
+              : `conductor: this command ${what}. A worker never merges and never pushes to ${base}: set your task to review with its pull request and hand back. Merging is the orchestrator's.`,
         }
       }
     }
@@ -3145,11 +3222,16 @@ export const register: Register = (on, options) => {
       }
     }
     // A Lore worker that was not handed a workspace of its own would build in the owner's: it may not write at all.
-    if (taskId !== undefined && (WRITES.has(call.tool) || call.tool === 'Bash') && !isolated.has(taskId) && (await backendOf($))?.kind === 'lore') {
+    if (taskId !== undefined && (WRITES.has(call.tool) || call.tool === 'Bash') && !isolated.has(taskId) && ((await backendOf($))?.kind === 'lore' || (await isFolderHome($)))) {
       const path = await boundLedger($).catch(() => undefined)
       const ledger = path === undefined ? undefined : parseLedger(await textAt($, path) ?? '').ledger
       const task = ledger?.tasks.find(one => one.id === taskId)
-      if (ledger?.run.lore !== undefined && task !== undefined) {
+      if (ledger !== undefined && ledger.run.lore === undefined && ledger.run.workspace?.kind === 'git' && task !== undefined && task.workspace === undefined) {
+        return {
+          deny: `conductor: ${taskId}'s worker has no worktree of its own, so it would work outside the run's repository. It was started without isolation: "worktree". Stop and hand back; the orchestrator starts it again with isolation: "worktree".`,
+        }
+      }
+      if ((ledger?.run.lore !== undefined || ledger?.run.workspace !== undefined) && task !== undefined) {
         if (task.workspace !== undefined) {
           isolated.add(taskId)
           workspaces.set(taskId, task.workspace)
@@ -3331,8 +3413,8 @@ export const register: Register = (on, options) => {
         ? loreBullets
         : isHere
         ? [
-            `- A task with a pull request becomes done through ${TOOL_MERGE} alone, for a task you judged green: its checks green on its head, its change reviewed. The mod reads GitHub, merges into ${config.base} pinned to that head with GitHub's ${config.method} method, never two at once (across runs too), marks the task done once GitHub has merged it and tells you. ${TOOL_CHECK} says what stands in the way and changes nothing. Before each merge tell the other sessions that may merge (ListAgents) and name them in told. Workers never merge, and a merge by hand (gh pr merge, GitHub's merge call, a push to ${config.base}) is refused in a bound session.`,
-            `- When the board tells you a task is done, go on at once: start what can start and merge the next green task. After each merge the board watches the checks on ${config.base}: when they fail, find the merge that broke them and repair it before anything else merges; the repair's own merge takes onRedMain: true.`,
+            `- A task with a pull request becomes done through ${TOOL_MERGE} alone, for a task you judged green: its checks green on its head, its change reviewed. The mod reads GitHub, merges into ${await runBase($)} pinned to that head with GitHub's ${config.method} method, never two at once (across runs too), marks the task done once GitHub has merged it and tells you. ${TOOL_CHECK} says what stands in the way and changes nothing. Before each merge tell the other sessions that may merge (ListAgents) and name them in told. Workers never merge, and a merge by hand (gh pr merge, GitHub's merge call, a push to ${await runBase($)}) is refused in a bound session.`,
+            `- When the board tells you a task is done, go on at once: start what can start and merge the next green task. After each merge the board watches the checks on ${await runBase($)}: when they fail, find the merge that broke them and repair it before anything else merges; the repair's own merge takes onRedMain: true.`,
           ]
         : [
             `- This repository's origin is not on GitHub, so the mod reads no pull request and merges nothing here, and ${TOOL_MERGE} and ${TOOL_CHECK} refuse. The pull request of a task you judged green (its checks green on its head, its change reviewed) is merged by this repository's own path and rules, one at a time. A task with a pull request then becomes done on the owner's word alone: once it is merged and what this repository checks after a merge is good, tell the owner in one line to type /merged <task>. Workers never merge.`,
