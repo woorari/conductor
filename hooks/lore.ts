@@ -426,8 +426,12 @@ export function shellSegments(command: string): string[][] {
       quote = char
       inWord = true
     } else if (char === '\\' && at + 1 < command.length) {
-      word += command[(at += 1)] ?? ''
-      inWord = true
+      // A backslash before a line break continues the line: the shell joins the two, so the board does too.
+      const next = command[(at += 1)] ?? ''
+      if (next !== '\n') {
+        word += next
+        inWord = true
+      }
     } else if (char === '\n' || char === ';') endSegment()
     else if (char === '&' || char === '|') {
       endSegment()
@@ -469,8 +473,8 @@ export function loreByHand(
     if (/^(?:sh|bash|zsh|dash|ksh|fish|t?csh|python|pypy|perl|ruby|node|deno|bun|php|lua|tclsh|g?awk|mawk|osascript|pwsh|swift|R|Rscript)[0-9.]*$/.test(first.split('/').pop() ?? '')) {
       return `runs ${first}, and lore through it cannot be read`
     }
-    // A worker's lore runs where it stands, in its own workspace: a change of folder on the same line could aim it elsewhere.
-    if (ctx.caller === 'worker' && /^(?:cd|pushd|popd)$/.test(first)) return `changes folder (${first}) on a line that runs lore: run lore in your own workspace, where you stand`
+    // A worker's lore is pinned to its own workspace: no change of folder may stand on the same line, behind a wrapper or not.
+    if (ctx.caller === 'worker' && segments.some(one => one.some(word => /^(?:cd|pushd|popd)$/.test(word)))) return 'changes folder on a line that runs lore: lore runs in your own workspace'
     // Outside a lore invocation, lore may not show up at all: inside a script, behind a wrapper, as an argument.
     if (!isLore(first) && words.some(word => word.split(/[^A-Za-z0-9_./-]+/).some(part => isLore(part)))) {
       return WRAPPERS.has(first.split('/').pop() ?? '') ? `runs lore behind ${first}` : 'runs lore in a way the board cannot read'
@@ -518,8 +522,8 @@ export function loreByHand(
     const isScan = rest.some(one => one === '--scan' || one.startsWith('--scan='))
     if (ctx.caller === 'worker') {
       if (!WORKER_MAY.some(is)) return `runs lore ${name}`
-      const repository = optionValue(invocation, '--repository')
-      if (repository !== undefined && repository !== ctx.ownWorkspace) return `runs lore on ${repository || '(no path)'}, not in its own workspace`
+      // The mod pins a worker's lore to its own workspace: naming a repository is never needed, so it is never taken.
+      if (invocation.some(one => one === '--repository' || one.startsWith('--repository='))) return 'names a --repository: lore runs in your own workspace'
       const branch = optionValue(rest, '--branch') ?? optionValue(rest, '-b')
       if (branch !== undefined && branch !== ctx.ownBranch) return `names the branch ${branch || '(none)'}`
       if (is(['push'])) {

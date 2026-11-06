@@ -106,7 +106,9 @@ describe('the guard reads options the way lore does (security review after the m
     for (const command of ['lore --repository /work/Big\\ Game\\ 5.8 commit x', `lore --repository=/elsewhere push`, 'cd /work/Big\\ Game\\ 5.8 && lore commit x', 'pushd /tmp; lore push', 'lore commit x --repository /elsewhere']) {
       expect(loreByHand(command, OWN), command).toBeDefined()
     }
-    expect(loreByHand(`lore --repository "${OWN.ownWorkspace}" commit x`, OWN), 'its own workspace, named').toBeUndefined()
+    for (const command of [`lore --repository "${OWN.ownWorkspace}" commit x`, 'builtin cd /x && lore commit x', 'command pushd /x; lore push', 'lo\\\nre push x']) {
+      expect(loreByHand(command, OWN), command).toBeDefined()
+    }
     expect(loreByHand('lore commit "t1: fix" && lore push', OWN)).toBeUndefined()
   })
 })
@@ -152,6 +154,15 @@ describe('what a Lore run is told', () => {
     expect((await bash($, 'lore branch merge x')).deny).toContain('/approve-main')
     expect((await bash($, `lore push ${RUN_BRANCH}/t2`, 'a1')).deny).toContain(`${RUN_BRANCH}/t1`)
     expect((await bash($, 'lore status')).deny).toBeUndefined()
+  })
+
+  test("a worker's lore is pinned to its own workspace, wherever its shell stands", async ($, on) => {
+    const { engine } = await lored($, on, RUNNING)
+
+    expect((await bash($, 'lore commit "t1: fix"', 'a1')).deny).toBeUndefined()
+    expect(engine.bash.at(-1)).toBe(`cd -- '${BASE}/ABC-12/t1' && lore commit "t1: fix"`)
+    await bash($, 'ls -la', 'a1')
+    expect(engine.bash.at(-1), 'a command without lore is left as it is').toBe('ls -la')
   })
 
   test('the board shows a Lore task by its revision and its check', () => {

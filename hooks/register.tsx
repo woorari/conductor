@@ -2856,6 +2856,7 @@ export const register: Register = (on, options) => {
     }
     const taskId = call.agentId === undefined ? undefined : agents.get(call.agentId)
     // In a bound Lore run the mod does the Lore writes: a worker moves only its own branch, the orchestrator only reads.
+    let pinnedCommand: string | undefined
     // Every command of a bound Lore run goes through the guard, which fails closed on what it cannot read.
     if (call.tool === 'Bash' && typeof call.command === 'string' && (await backendOf($))?.kind === 'lore') {
       const path = await boundLedger($).catch(() => undefined)
@@ -2874,6 +2875,10 @@ export const register: Register = (on, options) => {
               ? `conductor: this command ${what}. A worker builds only on its own branch ${own ?? '(none yet)'}: it never merges, switches or creates branches, and never pushes another branch. Commit and push your own branch, set your task to review with the revision you pushed, and hand back.`
               : `conductor: this command ${what} by hand. In a bound Lore run the mod does the Lore writes and the owner's workspace is only read: a judged task merges with ${TOOL_MERGE}, the run branch reaches ${runLore.base} only by the owner's /approve-main, and ${runLore.base} is brought into the run branch with mcp__conductor__run_sync_base. /board none lets go of the run.`,
           }
+        }
+        // What a worker runs with lore runs in its own workspace, wherever its shell was left standing.
+        if (isWorker && ownWorkspace !== undefined && /(^|[^A-Za-z0-9_])lore($|[^A-Za-z0-9_])/i.test(call.command)) {
+          pinnedCommand = `cd -- '${ownWorkspace.replace(/'/g, "'\\''")}' && ${call.command}`
         }
       }
     }
@@ -2901,7 +2906,7 @@ export const register: Register = (on, options) => {
         changedFiles.set(taskId, set.add(relative(file, root, workspaces.get(taskId))))
       }
     }
-    const ran = await next(e)
+    const ran = await next(pinnedCommand === undefined ? e : ({ ...e, command: pinnedCommand } as typeof e))
     if (inbox.size === 0) return ran
     // A worker's subagent is not its reader: the news is for the loop that holds the task.
     const reader = call.agentId === undefined ? ORCHESTRATOR : workers.has(call.agentId) ? agents.get(call.agentId) : undefined
