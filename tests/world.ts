@@ -106,6 +106,12 @@ export type Forge = {
   asked: string[]
 }
 
+/** One scripted answer of the pretend Lore CLI. */
+export type LoreAnswer = {
+  match: (argv: readonly string[], cwd?: string) => boolean
+  answer: { exitCode: number; stdout: string; stderr?: string }
+}
+
 /** What the world hands back for the engine's side of things a test wants to steer or read. */
 export type World = {
   /** The agent ids the next spawns are given, in order. */
@@ -150,6 +156,14 @@ export type World = {
   gh: { exitCode: number; stdout: string }
   /** Every command the mod ran on the host, as its argument vector. */
   processes: string[][]
+  /** How `lore` answers: the first entry that matches a call answers it; a call none matches is a program that is not there. */
+  lore: LoreAnswer[]
+  /** Every `lore` call (any binary named lore), with the folder it ran in. */
+  loreCalls: { argv: string[]; cwd?: string }[]
+  /** Folders that exist, for `fs.exists`: a Lore workspace's `.lore`, say. */
+  dirs: string[]
+  /** The session's working directory, as `$.session.cwd()` answers it. */
+  cwd: string
   /** Every command and tool the mod registered. */
   registered: string[]
   /** What each registered tool takes, by its name: the schema the engine holds a call to before the mod sees it. */
@@ -201,6 +215,10 @@ export function world(on: On, files: Files, repo: { root: string } | null = { ro
     env: { GH_TOKEN: TOKEN },
     gh: { exitCode: 1, stdout: '' },
     processes: [],
+    lore: [],
+    loreCalls: [],
+    dirs: [],
+    cwd: repo?.root ?? ROOT,
     registered: [],
     schemas: {},
     resolve: asked => (asked === undefined ? 'claude-sonnet-5-5' : asked.startsWith('claude') ? asked : `claude-${asked}-5-5`),
@@ -228,6 +246,14 @@ export function world(on: On, files: Files, repo: { root: string } | null = { ro
   on('process.run', (_$, e) => {
     state.processes.push([...e.argv])
     const isTokenAsked = e.argv.join(' ') === 'gh auth token'
+    const cwd = e.init?.cwd
+    if (/(^|\/)lore$/.test(e.argv[0] ?? '')) {
+      state.loreCalls.push({ argv: [...e.argv], ...(cwd === undefined ? {} : { cwd }) })
+      const scripted = state.lore.find(one => one.match(e.argv, cwd))?.answer
+      if (scripted !== undefined) {
+        return { value: { exitCode: scripted.exitCode, stdout: scripted.stdout, stderr: scripted.stderr ?? '', isStdoutTruncated: false, isStderrTruncated: false } }
+      }
+    }
 
     return {
       value: isTokenAsked
@@ -336,7 +362,8 @@ export function world(on: On, files: Files, repo: { root: string } | null = { ro
     return { value: undefined }
   })
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
-  on('fs.exists', (_$, e) => ({ value: e.path.endsWith('.claude/conductor') ? state.isHome : files[e.path] !== undefined }))
+  on('fs.exists', (_$, e) => ({ value: e.path.endsWith('.claude/conductor') ? state.isHome : files[e.path] !== undefined || state.dirs.includes(e.path) }))
+  on('session.cwd', () => ({ value: state.cwd }))
   on('command.register', (_$, e) => {
     if (state.builtins.has(e.name)) return { deny: `"/${e.name}" refused: it is the built-in /${e.name}` }
     state.registered.push(`/${e.name}`)

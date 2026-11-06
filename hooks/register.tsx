@@ -33,6 +33,8 @@ import type { TaskRow } from './board'
 import { dashboardSvg } from './dashboard'
 import { KEEP, ROTATE_AT, carried, handover } from './handover'
 import { RUN_ID, STATUSES, TIERS, parseLedger } from './ledger'
+import { repositoryInfoOf } from './lore'
+import type { RepositoryInfo } from './lore'
 import { pauseRun, unpauseRun } from './pause'
 import { LOOK_AGAIN_MIN, dueForLook, isUnderway, unsettled } from './problems'
 import { APPROVED, PLANNING, conducting, newRun, planning } from './plan'
@@ -312,11 +314,116 @@ async function isAtForge($: EngineInterface): Promise<boolean> {
 /** This repository's `owner/name` on GitHub, once `isAtForge` has read its origin. */
 const repoHere = (): string | undefined => githubRepo(origin)
 
+/**
+ * Where the session works: a git repository (GitHub or elsewhere), or a Lore
+ * workspace. A Lore workspace whose `lore` could not be run, or whose
+ * repository could not be read, still has its root: the mod can then say what
+ * is missing instead of staying silent.
+ */
+type LoreBackend = { kind: 'lore'; root: string; bin?: string; info?: RepositoryInfo; problem?: string }
+type Backend = { kind: 'git'; root: string; remote: string | null } | LoreBackend
+
+let backend: Backend | null | undefined
+/** The `lore` binary that ran, once one did: kept for this module's life. */
+let loreFound: string | undefined
+
+const LORE_MISSING =
+  'lore could not be run: not as lore on the PATH, and not as ~/.local/bin/lore. Set its full path as lore.bin in .claude/conductor/config.json, for example {"lore": {"bin": "/usr/local/bin/lore"}}.'
+
+type Ran = { exitCode: number; stdout: string; stderr: string; out: string }
+
+/** The `lore` binary to run: the one that answered `--version`, tried on the PATH and then in ~/.local/bin. */
+async function loreBin($: EngineInterface, cwd: string): Promise<string | undefined> {
+  if (loreFound !== undefined) return loreFound
+  const home = await $.env.get('HOME').catch(() => undefined)
+  const candidates = ['lore', ...(home === undefined ? [] : [`${home}/.local/bin/lore`])]
+  for (const candidate of candidates) {
+    try {
+      const ran = await $.process.run([candidate, '--version'], { cwd, timeoutMs: 10_000 })
+      if (ran.exitCode === 0) {
+        loreFound = candidate
+
+        return candidate
+      }
+    } catch {
+      // Not this one.
+    }
+  }
+
+  return undefined
+}
+
+/**
+ * Runs `lore --non-interactive <args>` in a folder, without a shell. Never
+ * throws: a program that could not be run, or ran out of time, answers a
+ * non-zero exit with the reason. `out` is what it printed on both streams,
+ * which is what Lore's messages are read from.
+ */
+async function lore($: EngineInterface, args: readonly string[], cwd: string, timeoutMs = 30_000): Promise<Ran> {
+  const bin = await loreBin($, cwd)
+  if (bin === undefined) return { exitCode: 127, stdout: '', stderr: LORE_MISSING, out: LORE_MISSING }
+  try {
+    const ran = await $.process.run([bin, '--non-interactive', ...args], { cwd, timeoutMs })
+
+    return { exitCode: ran.exitCode, stdout: ran.stdout, stderr: ran.stderr, out: `${ran.stdout}${ran.stderr === '' ? '' : `\n${ran.stderr}`}` }
+  } catch (cause) {
+    const reason = because(cause)
+
+    return { exitCode: 1, stdout: '', stderr: reason, out: reason }
+  }
+}
+
+/** The nearest folder at or above the session's own that holds a `.lore` folder. */
+async function loreRoot($: EngineInterface): Promise<string | null> {
+  let dir = (await $.session.cwd().catch(() => '')).replace(/\/+$/, '')
+  while (dir !== '') {
+    if (await $.fs.exists(`${dir}/.lore`).catch(() => false)) return dir
+    dir = dir.slice(0, dir.lastIndexOf('/'))
+  }
+
+  return null
+}
+
+/** Where the session works, read once: git first, as before, then a Lore workspace. Null outside both. */
+async function backendOf($: EngineInterface): Promise<Backend | null> {
+  if (backend !== undefined) return backend
+  const repo = await $.session.repo().catch(() => null)
+  if (repo !== null && repo !== undefined) {
+    backend = { kind: 'git', root: repo.root, remote: repo.remote }
+
+    return backend
+  }
+  const found = await loreRoot($)
+  if (found === null) {
+    backend = null
+
+    return backend
+  }
+  const bin = await loreBin($, found)
+  if (bin === undefined) {
+    // Not kept: lore may be installed meanwhile, and the next look finds it.
+    return { kind: 'lore', root: found, problem: LORE_MISSING }
+  }
+  const asked = await lore($, ['repository', 'info'], found)
+  const info = asked.exitCode === 0 ? repositoryInfoOf(asked.out) : undefined
+  if (info === undefined) return { kind: 'lore', root: found, bin, problem: `lore could not read this workspace's repository: ${asked.out.trim() || `exit ${asked.exitCode}`}` }
+  backend = { kind: 'lore', root: found, bin, info }
+
+  return backend
+}
+
+/** The root of the repository or workspace the session is in, read again on a rescan; null outside both. */
+async function rootOf($: EngineInterface, rescan = false): Promise<string | null> {
+  if (rescan && backend?.kind !== 'lore') backend = undefined
+
+  return (await backendOf($))?.root ?? null
+}
+
 /** The ledger this session's signals and tools write: the bound run's, or undefined. */
 async function boundLedger($: EngineInterface): Promise<string | undefined> {
   const run = await read($, pinnedRun)
   if (run === null) return undefined
-  if (root === undefined) root = (await $.session.repo())?.root ?? null
+  if (root === undefined) root = await rootOf($)
 
   return root === null ? undefined : ledgerPath(root, run)
 }
@@ -364,7 +471,7 @@ async function rebind($: EngineInterface): Promise<void> {
       return
     }
     if (was === undefined) return
-    if (root === undefined) root = (await $.session.repo())?.root ?? null
+    if (root === undefined) root = await rootOf($)
     // A run that is gone is not one to be bound to.
     if (root === null || !(await $.fs.exists(ledgerPath(root, was)))) {
       await $.store.delete(own)
@@ -1197,9 +1304,9 @@ async function show(
 /** Reads the ledger of the run on show when its file changed; never throws. */
 async function refresh($: EngineInterface, rescan: boolean): Promise<void> {
   try {
-    if (root === undefined || rescan) root = (await $.session.repo())?.root ?? null
+    if (root === undefined || rescan) root = await rootOf($, rescan)
     if (root === null) {
-      const error = 'This session is not inside a git repository, so there is no run folder to read.'
+      const error = 'This session is not inside a git repository or a Lore workspace, so there is no run folder to read.'
 
       return await show($, `no-repo`, () => ({ runId: null, ledger: null, error }))
     }
@@ -1288,7 +1395,7 @@ async function listTool($: EngineInterface, spec: Parameters<EngineInterface['to
  */
 async function isHome($: EngineInterface): Promise<boolean> {
   try {
-    if (root === undefined) root = (await $.session.repo())?.root ?? null
+    if (root === undefined) root = await rootOf($)
 
     return root !== null && (await $.fs.exists(`${root}/.claude/conductor`))
   } catch {
@@ -1850,12 +1957,14 @@ export const register: Register = (on, options) => {
   })
 
   on('command.run', { command: 'conduct' }, async ($, e) => {
+    const here = await backendOf($)
+    if (here?.kind === 'lore' && here.problem !== undefined) return { text: `No run was started. ${here.problem}` }
     const asked = conducting(e.args)
     if ('error' in asked) return { text: asked.error }
     const { id, source, title } = asked
     if (id === UNBIND) return { text: `"${UNBIND}" is what /board takes to let go of a run, so no run can have that name: give another with id=<run id>.` }
-    if (root === undefined) root = (await $.session.repo())?.root ?? null
-    if (root === null) return { text: 'This session is not inside a git repository, so there is nowhere to keep a run.' }
+    if (root === undefined) root = await rootOf($)
+    if (root === null) return { text: 'This session is not inside a git repository or a Lore workspace, so there is nowhere to keep a run.' }
     // A spec that is not there is a mistyped path: said now, not after the orchestrator went looking for it.
     if (asked.kind === 'spec') {
       const isThere = (await $.fs.exists(source).catch(() => false)) || (!source.startsWith('/') && (await $.fs.exists(`${root}/${source}`).catch(() => false)))
