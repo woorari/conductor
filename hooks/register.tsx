@@ -561,6 +561,72 @@ async function placeRun($: EngineInterface, homeRoot: string, asked: Conducting,
   return { config: { places: places.filter(one => one.teams.includes(team)) }, candidates: found.candidates }
 }
 
+/** A workspace as the owner reads it: relative to the home, when it lies inside. */
+async function relOf($: EngineInterface, root: string): Promise<string> {
+  const found = await homeOf($)
+  if (found?.kind !== 'folder') return root
+  if (root.startsWith(`${found.root}/`)) return root.slice(found.root.length + 1)
+  const real = await (await ioOf($)).real(found.root)
+
+  return real !== undefined && root.startsWith(`${real}/`) ? root.slice(real.length + 1) : root
+}
+
+/** "It works in <workspace>." for the bound run of a home that is not a repository, or nothing. */
+async function worksIn($: EngineInterface): Promise<string> {
+  const path = await boundLedger($).catch(() => undefined)
+  const workspace = path === undefined ? undefined : parseLedger((await textAt($, path)) ?? '').ledger?.run.workspace
+
+  return workspace === undefined ? '' : `It works in ${await relOf($, workspace.root)}.`
+}
+
+/**
+ * `run_workspace`: the orchestrator picks the workspace of a run that lists
+ * several. The workspaces are looked up again in the places frozen at
+ * /conduct, never the live config; the pick is fixed once the plan is approved.
+ */
+async function pickWorkspace($: EngineInterface, call: ToolCall): Promise<{ result: string; text: string; isError?: true }> {
+  const fail = (reason: string) => ({ isError: true as const, result: `${NOT_DONE} ${reason}`, text: `${NOT_DONE} ${reason}` })
+  if (call.agentId !== undefined) return fail("Only the orchestrator picks the run's workspace.")
+  const path = await boundLedger($)
+  if (path === undefined) return fail(NOT_BOUND)
+  const found = await homeOf($)
+  if (found?.kind !== 'folder') return fail('This home is a repository, and the run works in it: there is nothing to pick.')
+  const ledger = parseLedger((await textAt($, path)) ?? '').ledger
+  if (ledger === undefined) return fail("The run's ledger could not be read.")
+  if (ledger.run.plan === 'approved') return fail("This run's workspace is fixed: the plan naming it is approved.")
+  if (ledger.run.candidates === undefined) return fail("This run's workspace was fixed when it started: there is nothing to pick.")
+  const asked = typeof call.path === 'string' ? call.path.replace(/\/+$/, '') : ''
+  const places = ledger.run.config?.places ?? []
+  const source = ledger.run.source ?? ledger.run.id
+  const team = teamOfKey(source)
+  const fresh = await candidatesFor(await ioOf($), found.root, places, team)
+  if ('error' in fresh) return fail(fresh.error)
+  const chosen = fresh.candidates.find(one => one.root === asked)
+  const place = chosen === undefined ? undefined : places.find(one => one.folder === chosen.place)
+  if (chosen === undefined || place === undefined) return fail(`${asked || 'That'} is not one of the workspaces this run lists: ${fresh.candidates.map(one => one.root).join(', ')}.`)
+  const title = ledger.run.title === `Run ${ledger.run.id}` ? undefined : ledger.run.title
+  const fixed = await fixWorkspace($, { id: ledger.run.id, source, ...(title === undefined ? {} : { title }) }, chosen, place, team)
+  if ('error' in fixed) return fail(fixed.error)
+  const written = await mutate($, path, raw => {
+    const run = raw.run as Record<string, unknown>
+    if (run.plan === 'approved') return { value: false, isChanged: false }
+    run.workspace = fixed.workspace
+    // The places stay frozen beside the place's settings, so a pick can be made again until the plan is approved.
+    run.config = { ...fixed.config, places }
+    if (fixed.lore === undefined) delete run.lore
+    else run.lore = fixed.lore
+
+    return { value: true, isChanged: true }
+  })
+  if (written.error !== undefined) return fail(written.error)
+  if (written.value !== true) return fail("This run's workspace is fixed: the plan naming it is approved.")
+  seen = undefined
+  await refresh($, false)
+  const text = `The run works in ${await relOf($, chosen.root)}, a ${chosen.kind === 'lore' ? 'Lore workspace' : 'git repository'}. Plan it there; you may pick again until the owner approves the plan.`
+
+  return { result: text, text }
+}
+
 /** How long a copy, a merge, a push or a listing of a large workspace may take: the engine's ceiling for one program. */
 const LONG_MS = 600_000
 /** Lists a copy's folders (each ending in /) and files into a file; the paths are parameters, never part of the script. */
@@ -3096,10 +3162,14 @@ export const register: Register = (on, options) => {
 
   // The mod's own tools: the one way the orchestrator and the workers change the board.
   // Matched by pattern: a tool's own name is no known tool to the types until the mod that registers it has loaded.
-  on('tool.call', { tool: /^mcp__conductor__run_plan$/ }, ($, e) =>
-    answer($, e as unknown as ToolCall, (raw, _at, caller, input) => proposePlan(raw, caller, input)),
-  ).catch(broke)
-  on('tool.call', { tool: /^mcp__conductor__run_workspace$/ }, () => ({ result: 'Nothing to pick yet.', text: 'Nothing to pick yet.' })).catch(broke)
+  on('tool.call', { tool: /^mcp__conductor__run_plan$/ }, async ($, e) => {
+    const answered = await answer($, e as unknown as ToolCall, (raw, _at, caller, input) => proposePlan(raw, caller, input))
+    // In a home that is not a repository the owner learns where the run works with the plan they approve.
+    const where = answered.isError === true ? '' : await worksIn($)
+
+    return where === '' ? answered : { ...answered, result: `${answered.result} ${where}`, text: `${answered.text} ${where}` }
+  }).catch(broke)
+  on('tool.call', { tool: /^mcp__conductor__run_workspace$/ }, ($, e) => pickWorkspace($, e as unknown as ToolCall)).catch(broke)
   on('tool.call', { tool: /^mcp__conductor__task_add$/ }, ($, e) =>
     answer($, e as unknown as ToolCall, (raw, _at, caller, input) => addTask(raw, caller, input)),
   ).catch(broke)
@@ -3182,6 +3252,13 @@ export const register: Register = (on, options) => {
       `This session is bound to run \`${run}\`. Its board is the pane "Run board"; its ledger is ${RUNS_DIR}/${run}/ledger.json.`,
       '',
       REPORTING,
+      ...(bound?.run.candidates !== undefined && bound.run.workspace === undefined
+        ? [
+            `- This run's workspace is not picked yet. Read the ticket, then pick one of these with mcp__conductor__run_workspace before you plan:`,
+            ...bound.run.candidates.map(one => `  - ${one.root} (${one.about})`),
+            `  If the work lies outside all of them, say so with ${TOOL_POST} and propose no plan.`,
+          ]
+        : []),
       `- The mod writes the ledger. Never edit ledger.json: change it with ${TOOL_ADD}, ${TOOL_UPDATE}, ${TOOL_REPORT} and ${TOOL_RESOLVE}.`,
       `- A run starts with a plan. Until you have proposed it with ${TOOL_PLAN} and the owner has approved it with /approve, no worker starts. Once they have, start the tasks that can start. ${PLANNING}`,
       `- Every worker is a task. Add it with ${TOOL_ADD}, tagged with a tier and why: opus for architecture and design, sonnet for challenging development, haiku for easy jobs. The owner may change a tier before the task starts; their choice stands.`,

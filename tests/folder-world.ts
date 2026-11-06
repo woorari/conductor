@@ -60,3 +60,10 @@ export const startAt = ($: Engine, cwd = HOME_ROOT) => $.session.start({ cwd, su
 
 export const conductIn = ($: Engine, args: string) =>
   $.command.run({ command: 'conduct', args, origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } })
+
+/** Calls a tool as the engine does, with its input beside the tool's name. */
+export const callTool = ($: Engine, input: Record<string, unknown>) =>
+  ($.tool.call as unknown as (input: Record<string, unknown>) => Promise<{ text?: string; result?: string; isError?: boolean }>)(input)
+
+export const composePrompt = ($: Engine) =>
+  $.prompt.compose({ model: 'claude-opus-5-5', promptModel: 'claude-opus-5-5', surfaces: ['terminal'], tools: [], outputStyle: null, traits: [] })
