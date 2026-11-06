@@ -2856,6 +2856,7 @@ export const register: Register = (on, options) => {
     }
     const taskId = call.agentId === undefined ? undefined : agents.get(call.agentId)
     // In a bound Lore run the mod does the Lore writes: a worker moves only its own branch, the orchestrator only reads.
+    let pinnedCommand: string | undefined
     // Every command of a bound Lore run goes through the guard, which fails closed on what it cannot read.
     if (call.tool === 'Bash' && typeof call.command === 'string' && (await backendOf($))?.kind === 'lore') {
       const path = await boundLedger($).catch(() => undefined)
@@ -2866,7 +2867,8 @@ export const register: Register = (on, options) => {
         // subagent the board does not know) gets the orchestrator's read-only rules.
         const isWorker = call.agentId !== undefined && taskId !== undefined && (isolated.has(taskId) || boundRun?.tasks.find(one => one.id === taskId)?.workspace !== undefined)
         const own = isWorker && taskId !== undefined ? taskBranchOf(runLore.branch, taskId) : undefined
-        const what = loreByHand(call.command, { base: runLore.base, runBranch: runLore.branch, ownBranch: own, caller: isWorker ? 'worker' : 'orchestrator' })
+        const ownWorkspace = isWorker && taskId !== undefined ? (workspaces.get(taskId) ?? boundRun?.tasks.find(one => one.id === taskId)?.workspace) : undefined
+        const what = loreByHand(call.command, { base: runLore.base, runBranch: runLore.branch, ownBranch: own, ownWorkspace, caller: isWorker ? 'worker' : 'orchestrator' })
         if (what !== undefined) {
           return {
             deny: isWorker
@@ -2874,6 +2876,10 @@ export const register: Register = (on, options) => {
               : `conductor: this command ${what} by hand. In a bound Lore run the mod does the Lore writes and the owner's workspace is only read: a judged task merges with ${TOOL_MERGE}, the run branch reaches ${runLore.base} only by the owner's /approve-main, and ${runLore.base} is brought into the run branch with mcp__conductor__run_sync_base. /board none lets go of the run.`,
           }
         }
+        // What a worker runs with lore runs in its own workspace, wherever its shell was left standing.
+        // Every command of a worker runs in its own workspace, wherever its shell was left standing: the folder change stands on a
+        // line of its own, so nothing in the command (a background &, a group) runs before it or outside it.
+        if (isWorker && ownWorkspace !== undefined) pinnedCommand = `cd -- '${ownWorkspace.replace(/'/g, "'\\''")}' || exit 97\n${call.command}`
       }
     }
     // A Lore worker that was not handed a workspace of its own would build in the owner's: it may not write at all.
@@ -2900,7 +2906,7 @@ export const register: Register = (on, options) => {
         changedFiles.set(taskId, set.add(relative(file, root, workspaces.get(taskId))))
       }
     }
-    const ran = await next(e)
+    const ran = await next(pinnedCommand === undefined ? e : ({ ...e, command: pinnedCommand } as typeof e))
     if (inbox.size === 0) return ran
     // A worker's subagent is not its reader: the news is for the loop that holds the task.
     const reader = call.agentId === undefined ? ORCHESTRATOR : workers.has(call.agentId) ? agents.get(call.agentId) : undefined

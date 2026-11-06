@@ -159,6 +159,8 @@ export type World = {
   isReadOnly: boolean
   /** Every tool call that reached the engine: the mod's own tools never do. */
   ran: { tool: string; agentId?: string }[]
+  /** Every Bash command that reached the engine, as it reached it. */
+  bash: string[]
   /** Every agent the engine was asked to start, as the request reached it: a refused one never does. */
   spawns: { name?: string; model?: string; subagentType: string }[]
   /** The prompt each started agent was given, in the same order. */
@@ -244,6 +246,7 @@ export function world(on: On, files: Files, repo: { root: string } | null = { ro
     noStart: undefined,
     isReadOnly: false,
     ran: [],
+    bash: [],
     spawns: [],
     briefs: [],
     woke: [],
@@ -469,8 +472,9 @@ export function world(on: On, files: Files, repo: { root: string } | null = { ro
     return { value: undefined }
   })
   on('tool.call', (_$, e) => {
-    const call = e as unknown as { tool: string; agentId?: string }
+    const call = e as unknown as { tool: string; agentId?: string; command?: string }
     state.ran.push({ tool: call.tool, agentId: call.agentId })
+    if (typeof call.command === 'string') state.bash.push(call.command)
     if (state.refuses.has(call.tool)) return { deny: `${call.tool} is not allowed here` }
 
     return { result: {}, text: 'ran' }

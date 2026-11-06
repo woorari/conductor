@@ -392,24 +392,97 @@ function commandWord(words: readonly string[]): string {
  * what the command does, or undefined. It reads the command's text, so lore
  * run from inside a script file is not seen.
  */
-export function loreByHand(command: string, ctx: { base: string; runBranch?: string; ownBranch?: string; caller: 'orchestrator' | 'worker' }): string | undefined {
+/**
+ * A command line split the way the shell splits it: segments at `&&`, `||`,
+ * `;`, `|`, `&`, `|&` and newlines; words at blanks outside quotes; quotes and
+ * escapes taken off, so `"lo""re"`, `l\\ore` and a quoted path with spaces each
+ * read as the one word the shell makes of them.
+ */
+export function shellSegments(command: string): string[][] {
+  const segments: string[][] = []
+  let words: string[] = []
+  let word = ''
+  let inWord = false
+  let quote: string | undefined
+  const endWord = () => {
+    if (inWord) words.push(word)
+    word = ''
+    inWord = false
+  }
+  const endSegment = () => {
+    endWord()
+    if (words.length > 0) segments.push(words)
+    words = []
+  }
+  for (let at = 0; at < command.length; at += 1) {
+    const char = command[at] ?? ''
+    if (quote !== undefined) {
+      if (char === quote) quote = undefined
+      else if (char === '\\' && quote === '"' && at + 1 < command.length) word += command[(at += 1)] ?? ''
+      else word += char
+      continue
+    }
+    if (char === '"' || char === "'") {
+      quote = char
+      inWord = true
+    } else if (char === '\\' && at + 1 < command.length) {
+      // A backslash before a line break continues the line: the shell joins the two, so the board does too.
+      const next = command[(at += 1)] ?? ''
+      if (next !== '\n') {
+        word += next
+        inWord = true
+      }
+    } else if (char === '\n' || char === ';') endSegment()
+    else if (char === '&' || char === '|') {
+      endSegment()
+      while (command[at + 1] === '&' || command[at + 1] === '|') at += 1
+    } else if (/\s/.test(char)) endWord()
+    else {
+      word += char
+      inWord = true
+    }
+  }
+  endSegment()
+
+  return segments
+}
+
+/** Lore's commands that take a second word: `branch merge`, `file history`. An option before that word is not read past. */
+const GROUPS = new Set(['branch', 'file', 'revision', 'repository', 'lock', 'layer', 'link', 'shared-store', 'auth', 'logfile', 'notification', 'service'])
+
+export function loreByHand(
+  command: string,
+  ctx: { base: string; runBranch?: string; ownBranch?: string; ownWorkspace?: string; caller: 'orchestrator' | 'worker' },
+): string | undefined {
+  const segments = shellSegments(command)
   // The words as the shell reads them: an escape, a quote or a bracket does not hide a name.
-  const plain = command.replace(/\\(.)/g, '$1').replace(/["']/g, '')
+  const plain = segments.map(one => one.join(' ')).join(' ; ')
   // A program named only by variables (`$L$R`) could be lore whatever the line says: refused in a bound Lore run.
-  for (const segment of plain.split(/&&|\|\||\|&|;|\||&|\n/)) {
-    const first = commandWord(tokens(segment.trim()))
+  for (const segment of segments) {
+    const first = commandWord(segment)
     if (/[$*?[{}]/.test(first)) return 'runs a program whose name the shell works out (a variable, a pattern or braces), which the board cannot read'
   }
   if (!/(^|[^A-Za-z0-9_])lore($|[^A-Za-z0-9_])/i.test(plain)) return undefined
   if (/\$\(|`|<\(|>\(/.test(command) || /(^|[\s;&|(])eval\s/.test(plain)) {
     return 'runs lore inside a substitution or another shell, which the board cannot read'
   }
-  for (const segment of plain.split(/&&|\|\||\|&|;|\||&|\n/)) {
-    const words = tokens(segment.trim()).map(one => one.replace(/^[({]+|[)}]+$/g, '')).filter(one => one !== '')
+  for (const segment of segments) {
+    const words = segment.map(one => one.replace(/^[({]+|[)}]+$/g, '')).filter(one => one !== '')
     const first = words.find(one => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(one)) ?? ''
     if (first.startsWith('$')) return 'runs a program named by a variable, which the board cannot read'
     if (/^(?:sh|bash|zsh|dash|ksh|fish|t?csh|python|pypy|perl|ruby|node|deno|bun|php|lua|tclsh|g?awk|mawk|osascript|pwsh|swift|R|Rscript)[0-9.]*$/.test(first.split('/').pop() ?? '')) {
       return `runs ${first}, and lore through it cannot be read`
+    }
+    // A worker's lore is pinned to its own workspace: no change of folder may stand on the same line, behind a wrapper or not.
+    if (ctx.caller === 'worker') {
+      const changesFolder = segments.some(one =>
+        one.some(word => {
+          const clean = word.replace(/^[({]+|[)}]+$/g, '')
+
+          return /(^|[^A-Za-z0-9_])(?:cd|pushd|popd)($|[^A-Za-z0-9_])/.test(clean) || /^(?:trap|source|\.|alias|function)$/.test(clean.split('/').pop() ?? '') || /\(\)$/.test(word)
+        }),
+      )
+      if (changesFolder) return 'changes folder, or runs code that could, on a line that runs lore: lore runs in your own workspace'
     }
     // Outside a lore invocation, lore may not show up at all: inside a script, behind a wrapper, as an argument.
     if (!isLore(first) && words.some(word => word.split(/[^A-Za-z0-9_./-]+/).some(part => isLore(part)))) {
@@ -421,6 +494,7 @@ export function loreByHand(command: string, ctx: { base: string; runBranch?: str
       if (words.some(isLore)) return WRAPPERS.has((words[at] ?? '').split('/').pop() ?? '') ? `runs lore behind ${words[at] ?? ''}` : 'runs lore in a way the board cannot read'
       continue
     }
+    const invocation = words.slice(at + 1)
     at += 1
     // Lore's own options come before the subcommand: one the board does not know is not read past.
     for (; at < words.length; at += 1) {
@@ -436,12 +510,29 @@ export function loreByHand(command: string, ctx: { base: string; runBranch?: str
       return `runs lore with an option the board does not know: ${word}`
     }
     const rest = words.slice(at)
-    const positional = rest.filter(one => !one.startsWith('-'))
+    // The command's words, read past options as lore reads them: a value option takes its value with it, and an option
+    // the board does not know, before a group's second word, is not read past.
+    const positional: string[] = []
+    for (let index = 0; index < rest.length; index += 1) {
+      const word = rest[index] ?? ''
+      if (VALUE_OPTIONS.has(word)) {
+        index += 1
+        continue
+      }
+      if (word.startsWith('-')) {
+        const isEarly = positional.length === 1 && GROUPS.has(positional[0] ?? '')
+        if (isEarly && !FLAGS.has(word) && ![...VALUE_OPTIONS].some(one => word.startsWith(`${one}=`))) return `runs lore ${positional[0] ?? ''} with an option the board does not know before its command: ${word}`
+        continue
+      }
+      positional.push(word)
+    }
     const is = (path: readonly string[]): boolean => path.every((one, index) => positional[index] === one)
     const name = positional.slice(0, 2).join(' ') || '(nothing)'
     const isScan = rest.some(one => one === '--scan' || one.startsWith('--scan='))
     if (ctx.caller === 'worker') {
       if (!WORKER_MAY.some(is)) return `runs lore ${name}`
+      // The mod pins a worker's lore to its own workspace: naming a repository is never needed, so it is never taken.
+      if (invocation.some(one => one === '--repository' || one.startsWith('--repository='))) return 'names a --repository: lore runs in your own workspace'
       const branch = optionValue(rest, '--branch') ?? optionValue(rest, '-b')
       if (branch !== undefined && branch !== ctx.ownBranch) return `names the branch ${branch || '(none)'}`
       if (is(['push'])) {
