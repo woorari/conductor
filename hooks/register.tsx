@@ -3014,7 +3014,7 @@ export const register: Register = (on, options) => {
       runLore === undefined
         ? []
         : [
-            `- This is a Lore workspace. The run has its own branch, ${runLore.branch}, made from ${runLore.base} when the owner approved the plan. Each task's worker builds in a Lore workspace of its own, on its own branch ${runLore.branch}/<task id>: the mod copies it from the owner's workspace when the worker starts. The owner's workspace is only read: never stage, commit, sync, switch or push there.`,
+            `- This is a Lore workspace. The run has its own branch, ${runLore.branch}, made from ${runLore.base} when the owner approved the plan. Start each task's worker always with isolation: "worktree": the mod then hands it a Lore workspace of its own, copied from the owner's workspace, on its own branch ${runLore.branch}/<task id>. A worker started without it is refused every write. Each worker commits and pushes its own branch itself; the mod only makes workspaces and merges. The owner's workspace is only read: never stage, commit, sync, switch or push there.`,
             `- A worker hands back with the revision it pushed (task_update with revision). A task you judged green (its change reviewed${checkArgv === undefined ? '' : ', its check passed'}) is merged into ${runLore.branch} through ${TOOL_MERGE} alone, pinned to that revision, one at a time; ${TOOL_CHECK} says what stands in the way. A conflict comes back as a blocked task with the files named: have its worker bring the run branch in and resolve, never by picking one side of a binary file. A new revision on a green task sends it back to review.`,
             ...(checkArgv === undefined ? [] : [`- The project's check (${checkArgv.join(' ')}) runs on each revision you judge green, and on the run branch's head once every task is merged. Its verdict reaches you as a board notice; a task is merged only once its check passed.`]),
             `- When every task is merged into ${runLore.branch} and no blocker or warning is open, tell the owner in a line or two what changed and how to try it, and ask them to type /approve-main. Only the owner merges the run branch into ${runLore.base}: no tool of yours does. When ${runLore.base} moved since the run branch last took it in, /approve-main is refused: bring it in with mcp__conductor__run_sync_base, then ask the owner again.`,
@@ -3238,6 +3238,11 @@ export const register: Register = (on, options) => {
   on('command.run', { command: 'unpause' }, $ => hold($, false))
 
   on('command.run', { command: 'merged' }, async ($, e) => {
+    // In a Lore run nothing is merged by hand: a task reaches the run branch through the board's merge alone.
+    const mergedIn = await boundLedger($).catch(() => undefined)
+    if (mergedIn !== undefined && parseLedger((await textAt($, mergedIn)) ?? '').ledger?.run.lore !== undefined) {
+      return { text: 'Not done. In a Lore run the orchestrator merges a green task into the run branch with mcp__conductor__merge, pinned to its revision; /merged would mark it done with nothing merged. Ask the orchestrator to merge it.' }
+    }
     const taskId = e.args.trim()
     if (taskId === '' || /\s/.test(taskId)) {
       return { text: 'Say which task: /merged <task id>. It marks the task done by your word that its pull request is merged.' }

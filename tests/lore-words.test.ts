@@ -3,6 +3,7 @@ import type { Engine } from 'claude-code/testing'
 
 import { detail } from '../hooks/board'
 import { loreByHand } from '../hooks/lore'
+import { handover } from '../hooks/handover'
 import { briefing } from '../hooks/posts'
 import type { Ledger } from '../types'
 import { REV_MAIN, REV_T1 } from './lore-output'
@@ -137,5 +138,32 @@ describe('what a Lore run is told', () => {
     const line = detail(row as never)
     expect(line).toContain(`rev ${REV_T1.slice(0, 7)}`)
     expect(line).toContain('check running')
+  })
+})
+
+describe('found in the live run', () => {
+  const LORE_RUN: Ledger = { ...RUN, run: { ...RUN.run, lore: { ...RUN.run.lore!, workspace: `${BASE}/ABC-12/_run`, baseAt: REV_MAIN, head: REV_MAIN } } }
+
+  test('the handover of a Lore run tells how Lore merges, never /merged', () => {
+    const text = handover(LORE_RUN, { at: '2026-10-09T10:30:00.000Z', isElsewhere: true })
+    expect(text).toContain('mcp__conductor__merge')
+    expect(text).toContain('/approve-main')
+    expect(text).not.toContain('/merged')
+  })
+
+  test('/merged is refused in a Lore run: its tasks merge through the board', async ($, on) => {
+    const { files } = await lored($, on, { ...LORE_RUN, tasks: [task('t1', { status: 'green', branch: `${RUN_BRANCH}/t1`, revision: REV_T1 })] })
+
+    const said = await $.command.run({ command: 'merged', args: 't1', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } })
+    expect(said.text).toContain('mcp__conductor__merge')
+    expect(JSON.parse(files['/work/Big Game 5.8/.claude/conductor/runs/ABC-12/ledger.json']?.text ?? '{}').tasks[0].status).toBe('green')
+  })
+
+  test('the Lore rules say workers need isolation "worktree" and push their own branches', async ($, on) => {
+    await lored($, on, LORE_RUN)
+    const composed = await $.prompt.compose({ model: 'claude-opus-5-5', promptModel: 'claude-opus-5-5', surfaces: ['terminal'], tools: [], outputStyle: null, traits: [] } as never)
+    const text = (composed as { sections: { id: string; text: string }[] }).sections.find(one => one.id === 'conductor:run')?.text ?? ''
+    expect(text).toContain('always with isolation: "worktree"')
+    expect(text).toContain('Each worker commits and pushes its own branch itself')
   })
 })
