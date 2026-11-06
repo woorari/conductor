@@ -36,7 +36,7 @@ import { LINEAR_KEY, RUN_ID, STATUSES, TIERS, parseLedger } from './ledger'
 import { LINEAR_API, M_CREATE, M_UPDATE, Q_ISSUE, Q_TEAM, apiKeyOf, createdOf, errorsOf, issueOf, issueText, stateFor, teamOf, updatedOf } from './linear'
 import { branchInfoOf, ignoreRules, pushOf, repositoryInfoOf, statusOf } from './lore'
 import { CONFIG_PATH, LORE_DEFAULTS, PLACEHOLDER_SNIPPET, hasPlaceholder, parseConfig, runsIgnored } from './project'
-import { removals, runBranchOf, taskBranchOf, topLevel, workspaceOf, workspacesOf } from './workspace'
+import { isInside, removals, runBranchOf, runWorkspaceOf, taskBranchOf, topLevel, workspaceOf, workspacesOf } from './workspace'
 import type { RepositoryInfo } from './lore'
 import { pauseRun, unpauseRun } from './pause'
 import { LOOK_AGAIN_MIN, dueForLook, isUnderway, unsettled } from './problems'
@@ -463,7 +463,7 @@ async function onPaths($: EngineInterface, head: readonly string[], paths: reado
   return undefined
 }
 
-type Making = { root: string; path: string; branch: string; from: string; carry: readonly string[]; minFreeGB: number; runId: string; taskId: string }
+type Making = { root: string; base: string; path: string; branch: string; from: string; carry: readonly string[]; minFreeGB: number; runId: string; taskId: string }
 
 /**
  * Makes a Lore workspace for one task: a copy-on-write copy of the owner's
@@ -473,6 +473,9 @@ type Making = { root: string; path: string; branch: string; from: string; carry:
  * removed and the reason answered.
  */
 async function prepareWorkspace($: EngineInterface, at: Making): Promise<{ path: string; error?: undefined } | { error: string }> {
+  // Only a folder the mod makes itself, inside the run's workspaces and outside the owner's workspace, is ever removed.
+  if (!isInside(at.base, at.path) || at.path === at.root || at.path.startsWith(`${at.root}/`)) return { error: `${at.path} is no place for a workspace: it must lie inside ${at.base}, outside ${at.root}` }
+  if (await $.fs.exists(at.path).catch(() => true)) return { error: `${at.path} is there already and is no Lore workspace; it is left as it is. Move it away, then start the worker again` }
   const fail = async (why: string) => {
     await runProgram($, ['rm', '-rf', '--', at.path], LONG_MS)
 
@@ -500,7 +503,7 @@ async function prepareWorkspace($: EngineInterface, at: Making): Promise<{ path:
     .split('\n')
     .map(line => (line.startsWith(`${at.path}/`) ? line.slice(at.path.length + 1) : line))
     .join('\n')
-  const removedFailed = await onPaths($, ['rm', '-rf', '--'], removals(relativeListing, rules, at.carry).map(one => `${at.path}/${one}`))
+  const removedFailed = await onPaths($, ['rm', '-rf', '--'], removals(relativeListing, rules, at.carry).map(one => `${at.path}/${one}`).filter(one => isInside(at.path, one)))
   if (removedFailed !== undefined) return fail(`what the copy must not hold could not be removed: ${lastLine(removedFailed)}`)
   const step = async (args: readonly string[], timeoutMs = 30_000): Promise<Ran> => lore($, args, at.path, timeoutMs)
   const updated = await step(['repository', 'update-path'])
@@ -508,7 +511,7 @@ async function prepareWorkspace($: EngineInterface, at: Making): Promise<{ path:
   const scanned = await step(['status', '--scan'], LONG_MS)
   const status = statusOf(scanned.out)
   if (scanned.exitCode !== 0 || status === undefined) return fail(`lore could not read the copy's status: ${lastLine(scanned)}`)
-  const untrackedFailed = await onPaths($, ['rm', '-f', '--'], status.untracked.map(one => `${at.path}/${one}`))
+  const untrackedFailed = await onPaths($, ['rm', '-f', '--'], status.untracked.map(one => `${at.path}/${one}`).filter(one => isInside(at.path, one)))
   if (untrackedFailed !== undefined) return fail(`the copy's untracked files could not be removed: ${lastLine(untrackedFailed)}`)
   const from = await step(['branch', 'switch', at.from, '--reset'], LONG_MS)
   if (from.exitCode !== 0) return fail(`lore could not switch the copy to ${at.from}: ${lastLine(from)}`)
@@ -526,6 +529,51 @@ async function prepareWorkspace($: EngineInterface, at: Making): Promise<{ path:
   }
 
   return { path: at.path }
+}
+
+/**
+ * Before the owner's approval of a Lore run's plan takes effect: the run's
+ * own workspace on its own branch, made from the base branch and pushed, the
+ * base branch protected, and where the base stood kept. Answers why it could
+ * not be done, or undefined when it was (or there is nothing of Lore to do).
+ */
+async function loreApprove($: EngineInterface, path: string): Promise<string | undefined> {
+  const ledger = parseLedger((await textAt($, path)) ?? '').ledger
+  const here = await backendOf($)
+  const runLore = ledger?.run.lore
+  if (ledger === undefined || runLore === undefined || ledger.run.plan !== 'proposed' || here?.kind !== 'lore') return undefined
+  const project = ledger.run.config
+  const workspacesBase = workspacesOf(here.root, project?.lore?.workspaces)
+  const workspace = runLore.workspace ?? runWorkspaceOf(workspacesBase, ledger.run.id)
+  if (!(await $.fs.exists(`${workspace}/.lore`).catch(() => false))) {
+    await Promise.resolve($.ui.toast("Run board: making the run's Lore workspace. A large workspace takes a minute or two.")).catch(() => undefined)
+    const made = await prepareWorkspace($, {
+      root: here.root,
+      base: workspacesBase,
+      path: workspace,
+      branch: runLore.branch,
+      from: runLore.base,
+      carry: project?.lore?.carry ?? LORE_DEFAULTS.carry,
+      minFreeGB: project?.lore?.minFreeGB ?? LORE_DEFAULTS.minFreeGB,
+      runId: ledger.run.id,
+      taskId: '_run',
+    })
+    if (made.error !== undefined) return `the run's Lore workspace could not be made: ${made.error}.`
+  }
+  const protectedNow = await lore($, ['branch', 'protect', runLore.base], workspace)
+  if (protectedNow.exitCode !== 0) return `the base branch ${runLore.base} could not be protected: ${lastLine(protectedNow)}.`
+  const baseAt = branchInfoOf((await lore($, ['branch', 'info', runLore.base], workspace)).out)?.remoteLatest
+  if (baseAt === undefined) return `lore did not say where ${runLore.base} stands.`
+  const written = await mutate($, path, raw => {
+    const kept = (raw.run as { lore?: Record<string, unknown> }).lore
+    if (kept === undefined) return { value: false, isChanged: false }
+    kept.workspace = workspace
+    kept.baseAt = baseAt
+
+    return { value: true, isChanged: true }
+  })
+
+  return written.error ?? (written.value ? undefined : 'the run has no Lore branch any more.')
 }
 
 /** A worker's workspace made and not handed to the engine yet, by task. */
@@ -2077,12 +2125,14 @@ export const register: Register = (on, options) => {
       unlock = await exclusive()
       const project = read.ledger.run.config
       const taskId = decided.taskId
-      const workspace = workspaceOf(workspacesOf(here.root, project?.lore?.workspaces), read.ledger.run.id, taskId)
+      const workspacesBase = workspacesOf(here.root, project?.lore?.workspaces)
+      const workspace = workspaceOf(workspacesBase, read.ledger.run.id, taskId)
       const isThere = await $.fs.exists(`${workspace}/.lore`).catch(() => false)
       const made = isThere
         ? { path: workspace }
         : await prepareWorkspace($, {
             root: here.root,
+            base: workspacesBase,
             path: workspace,
             branch: taskBranchOf(runLore.branch, taskId),
             from: decided.base?.branch ?? runLore.branch,
@@ -2497,6 +2547,8 @@ export const register: Register = (on, options) => {
   on('command.run', { command: 'approve' }, async $ => {
     const path = await boundLedger($)
     if (path === undefined) return { text: await unbound($) }
+    const notReady = await loreApprove($, path)
+    if (notReady !== undefined) return { text: `No plan was approved: ${notReady} Approve again once that is fixed.` }
     const written = await mutate($, path, raw => {
       const outcome = approvePlan(raw)
 

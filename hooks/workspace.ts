@@ -33,10 +33,22 @@ export function workspacesOf(root: string, configured?: string): string {
   return `${root.slice(0, at)}/${root.slice(at + 1)}.conductor`
 }
 
-export const workspaceOf = (base: string, runId: string, taskId: string): string => `${base}/${runId}/${taskId}`
+/** A run's or a task's id as part of a folder's path: a plain name, never a way out of the folder above it. */
+const PLAIN = /^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$/
+function plain(name: string): string {
+  if (!PLAIN.test(name)) throw new Error(`"${name}" is no plain name, so it gives no workspace`)
+
+  return name
+}
+
+export const workspaceOf = (base: string, runId: string, taskId: string): string => `${base}/${plain(runId)}/${plain(taskId)}`
 
 /** The run's own workspace, on the run branch: where the mod merges. */
-export const runWorkspaceOf = (base: string, runId: string): string => `${base}/${runId}/_run`
+export const runWorkspaceOf = (base: string, runId: string): string => `${base}/${plain(runId)}/_run`
+
+/** Whether a path lies strictly inside a folder, with no `..` or `.` part on the way: what alone may be removed. */
+export const isInside = (base: string, path: string): boolean =>
+  path.startsWith(`${base}/`) && path.slice(base.length + 1).split('/').every(part => part !== '' && part !== '.' && part !== '..')
 
 /** Whether a path is one the project carries into a worker's copy, or lies in one. */
 export const isCarried = (carry: readonly string[], path: string): boolean =>
@@ -62,7 +74,8 @@ export function removals(listing: string, rules: readonly IgnoreRule[], carry: r
     .split(/\r?\n/)
     .filter(line => line.trim() !== '')
     .map(line => ({ path: line.replace(/^\.\/|\/+$/g, ''), isDir: line.endsWith('/') }))
-    .filter(one => one.path !== '')
+    // A line that would lead out of the copy is no part of it.
+    .filter(one => one.path !== '' && one.path.split('/').every(part => part !== '' && part !== '.' && part !== '..'))
     .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
   const out: string[] = []
   for (const one of paths) {

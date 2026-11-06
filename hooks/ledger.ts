@@ -273,6 +273,8 @@ function activity(value: unknown, where: string): Activity | undefined {
 function task(value: unknown, where: string): Task {
   const from = fields(value, where)
   const dependsOn = texts(from.dependsOn, `${where}.dependsOn`)
+  // A task's id becomes part of a folder's path (its Lore workspace) and of a branch's name: a plain name only.
+  if (typeof from.id !== 'string' || !RUN_ID.test(from.id)) refuse(`${where}.id`, 'letters, digits, _ and - (at most 64)', from.id)
 
   return {
     id: text(from, 'id', where),

@@ -65,3 +65,16 @@ describe('what a Lore worker changes, as the board compares it', () => {
     expect(relative('/repo/.claude/worktrees/agent-7f/api/x.py', '/repo'), 'git as before').toBe('api/x.py')
   })
 })
+
+describe('nothing outside a run\'s workspaces is ever removed', () => {
+  test('a task or run id that is no plain name gives no workspace', () => {
+    expect(() => workspaceOf('/work/ws', 'ABC-12', '../../etc')).toThrow('no plain name')
+    expect(() => workspaceOf('/work/ws', '..', 't1')).toThrow('no plain name')
+    expect(() => runWorkspaceOf('/work/ws', 'a/b')).toThrow('no plain name')
+  })
+
+  test('a listing line that leaves the copy is never a removal', () => {
+    const rules = ignoreRules('*.log\n')
+    expect(removals('../outside.log\nSource/../../x.log\nSource/ok.log\n', rules, [])).toEqual(['Source/ok.log'])
+  })
+})

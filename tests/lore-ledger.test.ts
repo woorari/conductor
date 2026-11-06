@@ -27,6 +27,12 @@ describe('the ledger, for Lore and Linear', () => {
     }
   })
 
+  test('a task id is a plain name: it becomes part of a folder\'s path', () => {
+    for (const bad of ['../x', 'a/b', '.hidden', '']) {
+      expect(refused(withTask('t392-1', { id: bad }))).toContain('tasks[4].id: expected letters, digits, _ and - (at most 64)')
+    }
+  })
+
   test('a revision is 64 hex', () => {
     expect(refused(withTask('t392-1', { revision: REV_T1 }))).toBe('accepted')
     expect(refused(withTask('t392-1', { revision: REV_T1.slice(0, 40) }))).toContain('tasks[4].revision: expected a Lore revision (64 hex)')
