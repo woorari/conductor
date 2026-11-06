@@ -259,6 +259,41 @@ If the app you run Claude Code in doesn't find `lore` (it looks on the PATH, the
 - The mod moves issues itself, by state type: the run's issue and each task's issue to started when work starts, a task's to completed when it is merged, and the run's when the run is merged (in git: when every task is done). A failed Linear call never stops the run. It is a warning on the board, said once.
 - The key comes from the mod's **Linear API key** option (kept in the system's secure storage), then from `LINEAR_API_KEY`. It goes into the request's header and nowhere else.
 
+## A home that is not a repository
+
+conductor's home doesn't have to be a repository. A folder that holds several projects side by side (some git repositories, some Lore workspaces) can be the home itself. You conduct from there, and each run works in the project its ticket belongs to.
+
+### Turn it on in a parent folder
+
+The folder must lie inside your home folder, and it must not be inside a repository. Give it a `.claude/conductor/config.json` that lists its **places**:
+
+```json
+{
+  "places": [
+    { "folder": "studio", "teams": ["ABC"], "about": "the studio's own tools", "check": { "argv": ["npm", "test"], "timeoutMin": 20 } },
+    { "folder": "game/code", "teams": ["DEF"], "about": "engine and game code", "lore": { "branchPrefix": "conductor/" } },
+    { "folder": "game/art", "teams": ["DEF"], "about": "3D art and source assets" }
+  ]
+}
+```
+
+- `folder`: a folder inside the home, given relative to it. Absolute paths, `~`, `..` and symlinks that lead out of the home are refused. Places may not overlap.
+- `teams`: the Linear teams whose tickets may land there.
+- `about`: one line on what belongs there. The orchestrator reads it when it picks.
+- `base`, `lore`, `check` (optional): the settings of that place's workspaces, as a repository's own config has them. `base` falls back to the mod's base branch option.
+
+Add the `WorktreeCreate` placeholder shown under [Lore](#lore) to `.claude/settings.local.json` of the folder you start sessions in. Outside git, Claude Code lets the mod make workers' workspaces only then. Run ledgers stay in the home, so no project needs a `.loreignore` or `.gitignore` line for them.
+
+### How a run finds its workspace
+
+- A place's workspaces are found, never configured: the place itself and its direct subfolders, wherever they are a git repository or a Lore workspace.
+- `/conduct ABC-12` takes the places of team ABC. With one workspace there, the run works in it. With several, the orchestrator reads the ticket and picks one with `run_workspace` before it plans, and the plan names it, so you see it when you `/approve`. A new pick after the plan is proposed sends the plan back to a draft.
+- `/conduct path/to/spec.md` works in the nearest workspace that holds the spec.
+- A ticket whose work lies in no workspace isn't run. Put that folder into Lore or git first.
+- In such a home, tickets are Linear. `#12` names an issue only within one repository, so start that session in the repository itself.
+- A Lore run works as described under [Lore](#lore). A git run's workers get worktrees the mod makes beside the repository (`<repository>.conductor/<run>/<task>`), and pull requests merge on GitHub as usual.
+- A repository with its own `.claude/conductor/` stays its own home, as before. A session started inside it uses that home.
+
 ## What it never does
 
 - It starts no agent and sends no message by itself.
