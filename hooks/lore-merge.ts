@@ -82,6 +82,9 @@ export function onRunBranch(raw: Raw, at: string, taskId: string, revision: stri
   task.mergeCommit = revision
   task.mergedAt = at
   delete (raw as { merge?: Loose }).merge
+  // What the run branch holds now is what the mod put there: /approve-main takes nothing else.
+  const kept = (raw.run as { lore?: Loose }).lore
+  if (kept !== undefined) kept.head = revision
   const left = afterDone(raw, task.id)
   const next = isPausedRaw(raw) ? 'The run is paused: nothing starts or merges until the owner types /unpause.' : 'Go on at once: start what can start and merge the next green task.'
 
@@ -122,6 +125,12 @@ export function letGo(raw: Raw, why: string): Outcome {
 export function readyForBase(ledger: Ledger, head: string | undefined): string[] {
   const base = ledger.run.lore?.base ?? 'the base branch'
   const blocks = ledger.tasks.filter(one => one.status !== 'done').map(one => `${one.id} is ${one.status}: every task is merged into the run branch first.`)
+  const known = ledger.run.lore?.head
+  if (head !== undefined && head !== known) {
+    blocks.push(
+      `${ledger.run.lore?.branch ?? 'The run branch'} is at ${rev7(head)}, but the board left it at ${known === undefined ? 'no revision it knows of' : rev7(known)}: something nobody judged is on it. Look at lore history --branch ${ledger.run.lore?.branch ?? '<run branch>'} before anything goes into ${base}.`,
+    )
+  }
   const open = unsettled(ledger)
   if (open.length > 0) blocks.push(`${named(open.map(one => one.id))} ${open.length === 1 ? 'is' : 'are'} open: a run with a blocker or a warning open does not go into ${base}.`)
   if (ledger.merge !== undefined) blocks.push(`${ledger.merge.task} is still merging.`)
@@ -152,10 +161,11 @@ export function onBase(raw: Raw, at: string, revision: string, base: string): Ou
 }
 
 /** The base branch was brought into the run branch: what it took in is kept, and an approval made before it covers it no more. */
-export function baseBroughtIn(raw: Raw, baseAt: string): Outcome {
+export function baseBroughtIn(raw: Raw, baseAt: string, head: string): Outcome {
   const run = raw.run as Loose & { lore?: Loose }
   if (run.lore === undefined) return refused('This run has no Lore branch.')
   run.lore.baseAt = baseAt
+  run.lore.head = head
   delete run.approval
 
   return changed(`The run branch took in the base branch at ${rev7(baseAt)}.`)

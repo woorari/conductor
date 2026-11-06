@@ -192,6 +192,7 @@ function loreRun(value: unknown): Ledger['run']['lore'] {
     branch: text(from, 'branch', where),
     workspace: optionalText(from, 'workspace', where),
     baseAt: optionalRevision(from, 'baseAt', where),
+    head: optionalRevision(from, 'head', where),
   }
 }
 

@@ -57,6 +57,7 @@ test('a green task is merged into the run branch, pinned to its judged revision'
   expect(t1).toMatchObject({ status: 'done', mergeCommit: REV_RUN })
   expect(t1?.workspace).toBeUndefined()
   expect(stored(files).merge).toBeUndefined()
+  expect(stored(files).run.lore?.head, 'the board knows what it put on the run branch').toBe(REV_RUN)
   expect(engine.calls.map(one => one.argv)).toContainEqual(['rm', '-rf', '--', T1_WS])
   expect(engine.linear.updated).toEqual([{ id: 'issue-ABC-13', input: { stateId: 's-done' } }])
 })

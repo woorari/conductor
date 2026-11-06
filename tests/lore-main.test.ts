@@ -18,7 +18,7 @@ const info = (name: string, remote: string): string => `Branch ${name}\n  ID: 01
 const status = (branch: string, revision: string): string => `On branch ${branch} revision 4 -> ${revision}\nRemote revision 4 -> ${revision}\nLocal branch in sync with remote\nNo tracked changes\n`
 const DONE: Ledger = {
   ...RUN,
-  run: { ...RUN.run, tickets: 'linear', lore: { ...RUN.run.lore!, workspace: RUN_WS, baseAt: REV_MAIN } },
+  run: { ...RUN.run, tickets: 'linear', lore: { ...RUN.run.lore!, workspace: RUN_WS, baseAt: REV_MAIN, head: REV_RUN } },
   tasks: [task('t1', { status: 'done', branch: `${RUN_BRANCH}/t1`, mergeCommit: REV_RUN }), task('t2', { status: 'done', branch: `${RUN_BRANCH}/t2`, mergeCommit: REV_RUN })],
 }
 
@@ -159,4 +159,15 @@ test('across a whole run, no Lore write ran in the owner\'s workspace', async ($
   const reads = /^(--version|repository info|branch info|status)( |$)/
   const owner = engine.loreCalls.filter(one => one.cwd === '/work/Big Game 5.8').map(one => one.argv.slice(1).filter(arg => arg !== '--non-interactive').join(' '))
   expect(owner.filter(one => !reads.test(one) || one.includes('--scan'))).toEqual([])
+})
+
+test('a run branch head the board did not merge is never approved', async ($, on) => {
+  const { files, engine } = await finished($, on)
+  const stranger = 'abcdef0'.padEnd(64, '0')
+  engine.lore.unshift(answers(['branch', 'info', RUN_BRANCH], ok(info(RUN_BRANCH, stranger))))
+
+  const said = await approveMain($)
+  expect(said.text).toContain('nobody judged')
+  expect(ranIn(engine, RUN_WS)).not.toContain('branch unprotect main')
+  expect(stored(files).run.approval).toBeUndefined()
 })

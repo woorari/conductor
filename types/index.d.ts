@@ -254,6 +254,8 @@ export type Ledger = {
       workspace?: string
       /** The base branch's revision the run branch last took in: when it was made, or brought up to date. */
       baseAt?: string
+      /** The run branch's revision as the mod last left it (made, a task merged in, the base brought in): nothing else may stand there. */
+      head?: string
     }
     /** The owner's approval of the run branch for the base branch: the revision it covers, and the base's revision then. */
     approval?: { revision: string; base: string; at: string }

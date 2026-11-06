@@ -731,11 +731,14 @@ async function loreApprove($: EngineInterface, path: string): Promise<string | u
   if (protectedNow.exitCode !== 0) return `the base branch ${runLore.base} could not be protected: ${lastLine(protectedNow)}.`
   const baseAt = branchInfoOf((await lore($, ['branch', 'info', runLore.base], workspace)).out)?.remoteLatest
   if (baseAt === undefined) return `lore did not say where ${runLore.base} stands.`
+  const runHead = branchInfoOf((await lore($, ['branch', 'info', runLore.branch], workspace)).out)?.remoteLatest
   const written = await mutate($, path, raw => {
     const kept = (raw.run as { lore?: Record<string, unknown> }).lore
     if (kept === undefined) return { value: false, isChanged: false }
     kept.workspace = workspace
     kept.baseAt = baseAt
+    // A run branch just made from the base stands where the base stands; one made before keeps the head it had.
+    kept.head ??= runHead ?? baseAt
 
     return { value: true, isChanged: true }
   })
@@ -1798,7 +1801,8 @@ async function runSyncBase($: EngineInterface, call: ToolCall): Promise<{ result
   const sent = await lore($, ['push'], run, LONG_MS)
   const result = pushOf(sent.exitCode, sent.out)
   if (result.kind === 'refused') return fail(`the run branch could not be pushed: ${result.text}.`)
-  const written = await settle($, path, raw => baseBroughtIn(raw, baseNow))
+  const broughtHead = result.kind === 'pushed' ? result.revision : outcome.revision
+  const written = await settle($, path, raw => baseBroughtIn(raw, baseNow, broughtHead))
   if (written === undefined) return fail('the board could not be written.')
   const head2 = result.kind === 'pushed' ? result.revision : outcome.revision
   const now2 = parseLedger((await textAt($, path)) ?? '').ledger
