@@ -93,3 +93,15 @@ test('the orchestrator is told to pick first', async ($, on) => {
   expect(text).toContain(`${TOOLS} (engine and game code)`)
   expect(text).toContain('If the work lies outside all of them, say so with mcp__conductor__board_post and propose no plan.')
 })
+
+test('a new pick after the plan is proposed sends the plan back to draft', async ($, on) => {
+  const { files } = await open($, on)
+  await pick($, LORE_WS)
+  await callTool($, { tool: 'mcp__conductor__task_add', tool_use_id: 'add', id: 't1', title: 'A task', tier: 'haiku', tierReason: 'small', files: ['Source/a.cpp'] })
+  await callTool($, { tool: 'mcp__conductor__run_plan', tool_use_id: 'plan', title: 'Retry' })
+  expect(ledgerOf(files).run.plan).toBe('proposed')
+  const answer = await pick($, TOOLS)
+  expect(answer.text).toContain('The plan goes back to a draft: propose it again with run_plan, so the owner approves the plan for this workspace.')
+  expect(ledgerOf(files).run.plan).toBe('draft')
+  expect(ledgerOf(files).run.workspace?.root).toBe(TOOLS)
+})

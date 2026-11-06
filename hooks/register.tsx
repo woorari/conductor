@@ -447,8 +447,8 @@ async function loreRoot($: EngineInterface): Promise<string | null> {
 
 /** Where the session works, read once: git first, as before, then a Lore workspace. Null outside both. */
 async function backendOf($: EngineInterface): Promise<Backend | null> {
+  if (await isFolderHome($)) return await runBackend($)
   if (backend !== undefined) return backend
-  if (await isFolderHome($)) return null
   const repo = await $.session.repo().catch(() => null)
   if (repo !== null && repo !== undefined) {
     backend = { kind: 'git', root: repo.root, remote: repo.remote }
@@ -461,6 +461,36 @@ async function backendOf($: EngineInterface): Promise<Backend | null> {
 
     return backend
   }
+
+  return await loreBackendAt($, found)
+}
+
+/** The run whose workspace `backend` holds, in a home that is not a repository. */
+let backendRun: string | undefined
+
+/**
+ * In a home that is not a repository, the session works where its bound run
+ * does: the run's workspace, read from its ledger, and read again when the
+ * session binds to another run. Null while no run is bound or none is picked.
+ */
+async function runBackend($: EngineInterface): Promise<Backend | null> {
+  const run = await read($, pinnedRun)
+  if (run === null) return null
+  if (backend !== undefined && backend !== null && backendRun === run) return backend
+  const path = await boundLedger($).catch(() => undefined)
+  const workspace = path === undefined ? undefined : parseLedger((await textAt($, path)) ?? '').ledger?.run.workspace
+  if (workspace === undefined) return null
+  const found: Backend = workspace.kind === 'git' ? { kind: 'git', root: workspace.root, remote: workspace.remote ?? null } : await loreBackendAt($, workspace.root)
+  // A Lore workspace whose lore could not be run is not kept: it is looked at again.
+  if (found.kind === 'lore' && found.problem !== undefined) return found
+  backend = found
+  backendRun = run
+
+  return backend
+}
+
+/** A Lore workspace's backend: its lore and its repository's info, or what is missing. */
+async function loreBackendAt($: EngineInterface, found: string): Promise<LoreBackend> {
   const bin = await loreBin($, found)
   if (bin === undefined) {
     // Not kept: lore may be installed meanwhile, and the next look finds it.
@@ -469,9 +499,10 @@ async function backendOf($: EngineInterface): Promise<Backend | null> {
   const asked = await lore($, ['repository', 'info'], found)
   const info = asked.exitCode === 0 ? repositoryInfoOf(asked.out) : undefined
   if (info === undefined) return { kind: 'lore', root: found, bin, problem: `lore could not read this workspace's repository: ${asked.out.trim() || `exit ${asked.exitCode}`}` }
-  backend = { kind: 'lore', root: found, bin, info }
+  const lored: LoreBackend = { kind: 'lore', root: found, bin, info }
+  if (!(await isFolderHome($))) backend = lored
 
-  return backend
+  return lored
 }
 
 /** What a run in a home that is not a repository starts with: its workspace once fixed, or the ones the orchestrator picks from. */
@@ -610,19 +641,23 @@ async function pickWorkspace($: EngineInterface, call: ToolCall): Promise<{ resu
   const written = await mutate($, path, raw => {
     const run = raw.run as Record<string, unknown>
     if (run.plan === 'approved') return { value: false, isChanged: false }
+    // The owner approves the plan for the workspace it named: a new pick takes the proposal back.
+    const wasProposed = run.plan === 'proposed'
+    if (wasProposed) run.plan = 'draft'
     run.workspace = fixed.workspace
     // The places stay frozen beside the place's settings, so a pick can be made again until the plan is approved.
     run.config = { ...fixed.config, places }
     if (fixed.lore === undefined) delete run.lore
     else run.lore = fixed.lore
 
-    return { value: true, isChanged: true }
+    return { value: wasProposed ? 'redrafted' : 'picked', isChanged: true }
   })
   if (written.error !== undefined) return fail(written.error)
-  if (written.value !== true) return fail("This run's workspace is fixed: the plan naming it is approved.")
+  if (written.value === false) return fail("This run's workspace is fixed: the plan naming it is approved.")
   seen = undefined
   await refresh($, false)
-  const text = `The run works in ${await relOf($, chosen.root)}, a ${chosen.kind === 'lore' ? 'Lore workspace' : 'git repository'}. Plan it there; you may pick again until the owner approves the plan.`
+  const redrafted = written.value === 'redrafted' ? ' The plan goes back to a draft: propose it again with run_plan, so the owner approves the plan for this workspace.' : ''
+  const text = `The run works in ${await relOf($, chosen.root)}, a ${chosen.kind === 'lore' ? 'Lore workspace' : 'git repository'}. Plan it there; you may pick again until the owner approves the plan.${redrafted}`
 
   return { result: text, text }
 }
@@ -3236,6 +3271,13 @@ export const register: Register = (on, options) => {
     const bound = boundPath === undefined ? undefined : parseLedger((await textAt($, boundPath)) ?? '').ledger
     const runLore = (await backendOf($))?.kind === 'lore' ? bound?.run.lore : undefined
     const checkArgv = bound?.run.config?.check?.argv
+    // In a home that is not a repository: where the run works, and that its commands run there.
+    const fixedIn = bound?.run.workspace
+    const quotedRoot = fixedIn === undefined ? '' : fixedIn.root.replace(/'/g, "'\\''")
+    const placedIn =
+      fixedIn === undefined
+        ? undefined
+        : `- This run works in ${await relOf($, fixedIn.root)}, a ${fixedIn.kind === 'lore' ? 'Lore workspace' : 'git repository'} inside this home. Run its commands there: cd -- '${quotedRoot}' first${fixedIn.kind === 'git' ? `, or git -C '${quotedRoot}'` : ''}.`
     const loreBullets =
       runLore === undefined
         ? []
@@ -3252,6 +3294,7 @@ export const register: Register = (on, options) => {
       `This session is bound to run \`${run}\`. Its board is the pane "Run board"; its ledger is ${RUNS_DIR}/${run}/ledger.json.`,
       '',
       REPORTING,
+      ...(placedIn === undefined ? [] : [placedIn]),
       ...(bound?.run.candidates !== undefined && bound.run.workspace === undefined
         ? [
             `- This run's workspace is not picked yet. Read the ticket, then pick one of these with mcp__conductor__run_workspace before you plan:`,
