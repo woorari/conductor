@@ -69,6 +69,15 @@ describe('the guard fails closed where it cannot read a command', () => {
     expect(loreByHand('python3 tools/report.py', WORKER), 'an interpreter with no lore in the line is no lore command').toBeUndefined()
   })
 
+  test('lore anywhere outside a lore invocation is refused, and so is a program named only by variables', () => {
+    for (const command of ['env python3 -c "import os; os.system(\'lore push x\')"', 'python3.11 -c "os.system(\'lore push x\')"', 'env -i PATH=/bin lore push x', 'L=lo; R=re; $L$R push x', '${L}${R} push x']) {
+      expect(loreByHand(command, WORKER), command).toBeDefined()
+    }
+    for (const command of ['cat Docs/lore-notes.md', '"$HOME/bin/build.sh" --fast', 'lore commit "update the lore docs"']) {
+      expect(loreByHand(command, WORKER), command).toBeUndefined()
+    }
+  })
+
   test('--scan= is a scan', () => {
     expect(loreByHand('lore status --scan=true', ORCH)).toBeDefined()
   })

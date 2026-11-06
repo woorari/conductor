@@ -367,6 +367,11 @@ function optionValue(words: readonly string[], name: string): string | undefined
 export function loreByHand(command: string, ctx: { base: string; runBranch?: string; ownBranch?: string; caller: 'orchestrator' | 'worker' }): string | undefined {
   // The words as the shell reads them: an escape, a quote or a bracket does not hide a name.
   const plain = command.replace(/\\(.)/g, '$1').replace(/["']/g, '')
+  // A program named only by variables (`$L$R`) could be lore whatever the line says: refused in a bound Lore run.
+  for (const segment of plain.split(/&&|\|\||\|&|;|\||&|\n/)) {
+    const first = tokens(segment.trim()).map(one => one.replace(/^[({]+/, '')).find(one => one !== '' && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(one)) ?? ''
+    if (/^(?:\$\{?[A-Za-z_][A-Za-z0-9_]*\}?)+$/.test(first)) return 'runs a program named by a variable, which the board cannot read'
+  }
   if (!/(^|[^A-Za-z0-9_])lore($|[^A-Za-z0-9_])/.test(plain)) return undefined
   if (/\$\(|`|<\(|>\(/.test(command) || /(^|[\s;&|(])eval\s/.test(plain)) {
     return 'runs lore inside a substitution or another shell, which the board cannot read'
@@ -375,7 +380,13 @@ export function loreByHand(command: string, ctx: { base: string; runBranch?: str
     const words = tokens(segment.trim()).map(one => one.replace(/^[({]+|[)}]+$/g, '')).filter(one => one !== '')
     const first = words.find(one => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(one)) ?? ''
     if (first.startsWith('$')) return 'runs a program named by a variable, which the board cannot read'
-    if (INTERPRETERS.has(first.split('/').pop() ?? '')) return `runs ${first}, and lore through it cannot be read`
+    if (/^(?:sh|bash|zsh|dash|ksh|fish|t?csh|python|pypy|perl|ruby|node|deno|bun|php|lua|tclsh|g?awk|mawk|osascript|pwsh|swift|R|Rscript)[0-9.]*$/.test(first.split('/').pop() ?? '')) {
+      return `runs ${first}, and lore through it cannot be read`
+    }
+    // Outside a lore invocation, lore may not show up at all: inside a script, behind a wrapper, as an argument.
+    if (!isLore(first) && words.some(word => word.split(/[^A-Za-z0-9_./-]+/).some(part => part === 'lore' || part.endsWith('/lore')))) {
+      return WRAPPERS.has(first.split('/').pop() ?? '') ? `runs lore behind ${first}` : 'runs lore in a way the board cannot read'
+    }
     let at = 0
     while (at < words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[at] ?? '')) at += 1
     if (!isLore(words[at])) {
