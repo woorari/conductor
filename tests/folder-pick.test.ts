@@ -105,3 +105,15 @@ test('a new pick after the plan is proposed sends the plan back to draft', async
   expect(ledgerOf(files).run.plan).toBe('draft')
   expect(ledgerOf(files).run.workspace?.root).toBe(TOOLS)
 })
+
+test("the guard follows a new pick: Lore writes are refused once the run works in a Lore workspace", async ($, on) => {
+  const { engine } = await open($, on)
+  const gitRoot = `${HOME_ROOT}/game/code/tools-git`
+  engine.dirs.push(gitRoot, `${gitRoot}/.git`)
+  engine.listings[`${HOME_ROOT}/game/code`] = [{ name: 'Big Game 5.8', kind: 'dir' }, { name: 'tools-git', kind: 'dir' }]
+  const bash = (command: string) => callTool($, { tool: 'Bash', tool_use_id: 'bash', command, description: 'A command' }) as Promise<{ deny?: string }>
+  await pick($, gitRoot)
+  await bash('git status')
+  await pick($, LORE_WS)
+  expect((await bash('lore branch merge x')).deny, 'the guard reads the workspace picked last').toBeDefined()
+})

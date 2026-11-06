@@ -476,10 +476,11 @@ let backendRun: string | undefined
 async function runBackend($: EngineInterface): Promise<Backend | null> {
   const run = await read($, pinnedRun)
   if (run === null) return null
-  if (backend !== undefined && backend !== null && backendRun === run) return backend
+  // Read on every call: a new pick (here or in another session) changes the workspace, and the guards follow it.
   const path = await boundLedger($).catch(() => undefined)
   const workspace = path === undefined ? undefined : parseLedger((await textAt($, path)) ?? '').ledger?.run.workspace
   if (workspace === undefined) return null
+  if (backend !== undefined && backend !== null && backendRun === run && backend.root === workspace.root && backend.kind === workspace.kind) return backend
   const found: Backend = workspace.kind === 'git' ? { kind: 'git', root: workspace.root, remote: workspace.remote ?? null } : await loreBackendAt($, workspace.root)
   // A Lore workspace whose lore could not be run is not kept: it is looked at again.
   if (found.kind === 'lore' && found.problem !== undefined) return found
@@ -693,7 +694,8 @@ async function onPaths($: EngineInterface, head: readonly string[], paths: reado
   return undefined
 }
 
-type Making = { root: string; base: string; path: string; branch: string; from: string; carry: readonly string[]; minFreeGB: number; runId: string; taskId: string }
+/** `home` holds the run folders (ledger, listings, marks); `root` is the workspace copied. In a repository home they are one. */
+type Making = { home: string; root: string; base: string; path: string; branch: string; from: string; carry: readonly string[]; minFreeGB: number; runId: string; taskId: string }
 
 /**
  * Makes a Lore workspace for one task: a copy-on-write copy of the owner's
@@ -731,7 +733,7 @@ async function prepareWorkspace($: EngineInterface, at: Making): Promise<{ path:
     const copied = await runProgram($, ['cp', '-c', '-R', `${at.root}/${entry}`, `${at.path}/`], LONG_MS)
     if (copied.exitCode !== 0) return fail(`${entry} could not be copied: ${lastLine(copied)}`)
   }
-  const listing = `${at.root}/${RUNS_DIR}/${at.runId}/listing-${at.taskId}.txt`
+  const listing = `${at.home}/${RUNS_DIR}/${at.runId}/listing-${at.taskId}.txt`
   const listed = await runProgram($, ['/bin/sh', '-c', LIST_SCRIPT, 'sh', at.path, listing], LONG_MS)
   if (listed.exitCode !== 0) return fail(`the copy's files could not be listed: ${lastLine(listed)}`)
   const relativeListing = ((await textAt($, listing)) ?? '')
@@ -830,6 +832,7 @@ async function startCheckNow($: EngineInterface, path: string, ledger: Ledger, t
     {
       {
         const made = await workspaceFor($, {
+          home: await runsRootOf($, here.root),
           root: here.root,
           base,
           path: cwd,
@@ -848,7 +851,7 @@ async function startCheckNow($: EngineInterface, path: string, ledger: Ledger, t
         return void (await failed(`the check workspace could not be put at ${rev7(target.revision)}: ${lastLine(pinned)}`))
       }
     }
-    const log = checkLog(here.root, ledger.run.id, target.taskId ?? '_run', target.revision)
+    const log = checkLog(await runsRootOf($, here.root), ledger.run.id, target.taskId ?? '_run', target.revision)
     await runProgram($, ['mkdir', '-p', log.slice(0, log.lastIndexOf('/'))])
     const started = await runProgram($, ['/bin/sh', '-c', CHECK_SCRIPT, 'sh', cwd, '--', ...check.argv], 30_000, { OUT: log })
     if (started.exitCode !== 0) await failed(`the check could not start: ${lastLine(started)}`)
@@ -875,7 +878,7 @@ async function watchChecks($: EngineInterface): Promise<void> {
     ]
     const now = await $.clock.now()
     for (const { taskId, record } of running) {
-      const log = checkLog(here.root, ledger.run.id, taskId ?? '_run', record.revision)
+      const log = checkLog(await runsRootOf($, here.root), ledger.run.id, taskId ?? '_run', record.revision)
       const exit = await textAt($, `${log}.exit`)
       let ended: { verdict: 'passed' | 'failed'; line?: string } | undefined
       if (exit !== undefined) {
@@ -986,9 +989,10 @@ async function loreApprove($: EngineInterface, path: string): Promise<string | u
   const project = ledger.run.config
   const workspacesBase = workspacesOf(here.root, project?.lore?.workspaces)
   const workspace = runLore.workspace ?? runWorkspaceOf(workspacesBase, ledger.run.id)
-  if (!(await $.fs.exists(readyMark(here.root, ledger.run.id, '_run')).catch(() => false)) || !(await $.fs.exists(`${workspace}/.lore`).catch(() => false))) {
+  if (!(await $.fs.exists(readyMark(await runsRootOf($, here.root), ledger.run.id, '_run')).catch(() => false)) || !(await $.fs.exists(`${workspace}/.lore`).catch(() => false))) {
     await Promise.resolve($.ui.toast("Run board: making the run's Lore workspace. A large workspace takes a minute or two.")).catch(() => undefined)
     const made = await workspaceFor($, {
+      home: await runsRootOf($, here.root),
       root: here.root,
       base: workspacesBase,
       path: workspace,
@@ -1049,7 +1053,7 @@ const readyMark = (root: string, runId: string, taskId: string): string => `${ro
  * `prepareWorkspace`.
  */
 async function workspaceFor($: EngineInterface, making: Making): Promise<{ path: string; error?: undefined } | { error: string }> {
-  const mark = readyMark(making.root, making.runId, making.taskId)
+  const mark = readyMark(making.home, making.runId, making.taskId)
   const hasLore = await $.fs.exists(`${making.path}/.lore`).catch(() => false)
   if (hasLore && (await $.fs.exists(mark).catch(() => false))) return { path: making.path }
   if (hasLore && isInside(making.base, making.path)) await runProgram($, ['rm', '-rf', '--', making.path], LONG_MS)
@@ -1083,6 +1087,13 @@ function exclusive(): Promise<() => void> {
   startChain = prior.then(() => mine)
 
   return prior.then(() => unlock)
+}
+
+/** The folder that holds the run folders: the home's root, which in a repository home is the repository's. */
+async function runsRootOf($: EngineInterface, fallback: string): Promise<string> {
+  if (root === undefined) root = await rootOf($)
+
+  return root ?? fallback
 }
 
 /** A file's text, or undefined when it is not there or cannot be read. */
@@ -2986,6 +2997,7 @@ export const register: Register = (on, options) => {
       const workspacesBase = workspacesOf(here.root, project?.lore?.workspaces)
       const workspace = workspaceOf(workspacesBase, read.ledger.run.id, taskId)
       const made = await workspaceFor($, {
+            home: await runsRootOf($, here.root),
             root: here.root,
             base: workspacesBase,
             path: workspace,

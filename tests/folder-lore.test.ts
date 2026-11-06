@@ -83,3 +83,14 @@ test('binding another run moves the backend', async ($, on) => {
   expect(copies.length).toBeGreaterThan(0)
   expect(copies.every(one => one?.startsWith(`${TOOLS}/`))).toBe(true)
 })
+
+test("the mod's own files of a run stay in the home, never in the workspace", async ($, on) => {
+  const { engine, files } = await bound($, on)
+  engine.agentIds.push('a1')
+  await spawn($, 't1')
+  const runs = `${HOME_ROOT}/.claude/conductor/runs/DEF-4`
+  expect(Object.keys(files).filter(path => path.startsWith(`${LORE_WS}/.claude/`))).toEqual([])
+  expect(files[`${runs}/ready-t1`], 'the mark that the workspace is ready').toBeDefined()
+  const shell = engine.calls.find(one => one.argv[0] === '/bin/sh')?.argv ?? []
+  expect(shell.slice(3), 'the copy is listed into the run folder of the home').toEqual(['sh', `${LORE_WS}.conductor/DEF-4/t1`, `${runs}/listing-t1.txt`])
+})
