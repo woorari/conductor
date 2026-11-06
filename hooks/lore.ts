@@ -332,6 +332,9 @@ const WORKER_MAY: readonly string[][] = [
 /** Lore's global flags that take no value. */
 const FLAGS = new Set(['--non-interactive', '-d', '--debug', '-f', '--force', '--dry-run', '-P', '--no-pager', '--offline', '--remote', '--local'])
 
+/** Shells and interpreters: a line that mentions lore and runs one of them is refused, whatever it passes. */
+const INTERPRETERS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'fish', 'tcsh', 'csh', 'python', 'python3', 'perl', 'ruby', 'node', 'deno', 'bun', 'php', 'lua', 'tclsh', 'awk', 'osascript', 'pwsh', 'swift'])
+
 /** Programs that run another program: lore behind one of them is not read, so it is refused. */
 const WRAPPERS = new Set(['env', 'command', 'sudo', 'doas', 'xargs', 'time', 'nohup', 'nice', 'exec', 'builtin', 'timeout', 'caffeinate', 'watch', 'parallel'])
 
@@ -362,12 +365,17 @@ function optionValue(words: readonly string[], name: string): string | undefined
  * run from inside a script file is not seen.
  */
 export function loreByHand(command: string, ctx: { base: string; runBranch?: string; ownBranch?: string; caller: 'orchestrator' | 'worker' }): string | undefined {
-  if (!/(^|[^A-Za-z0-9_])lore($|[^A-Za-z0-9_])/.test(command)) return undefined
-  if (/\$\(|`|<\(|>\(/.test(command) || /(^|[\s;&|(])(?:bash|sh|zsh|dash|ksh|fish)\s+-[a-z]*c\b/.test(command) || /(^|[\s;&|(])eval\s/.test(command)) {
+  // The words as the shell reads them: an escape, a quote or a bracket does not hide a name.
+  const plain = command.replace(/\\(.)/g, '$1').replace(/["']/g, '')
+  if (!/(^|[^A-Za-z0-9_])lore($|[^A-Za-z0-9_])/.test(plain)) return undefined
+  if (/\$\(|`|<\(|>\(/.test(command) || /(^|[\s;&|(])eval\s/.test(plain)) {
     return 'runs lore inside a substitution or another shell, which the board cannot read'
   }
-  for (const segment of command.split(/&&|\|\||\|&|;|\||&|\n/)) {
-    const words = tokens(segment.trim())
+  for (const segment of plain.split(/&&|\|\||\|&|;|\||&|\n/)) {
+    const words = tokens(segment.trim()).map(one => one.replace(/^[({]+|[)}]+$/g, '')).filter(one => one !== '')
+    const first = words.find(one => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(one)) ?? ''
+    if (first.startsWith('$')) return 'runs a program named by a variable, which the board cannot read'
+    if (INTERPRETERS.has(first.split('/').pop() ?? '')) return `runs ${first}, and lore through it cannot be read`
     let at = 0
     while (at < words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[at] ?? '')) at += 1
     if (!isLore(words[at])) {

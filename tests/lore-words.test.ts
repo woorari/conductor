@@ -62,6 +62,13 @@ describe('the guard fails closed where it cannot read a command', () => {
     expect(loreByHand('lore push', { ...WORKER, ownBranch: undefined }), 'no own branch, no push').toBeDefined()
   })
 
+  test('quotes, backslashes and brackets do not hide lore, nor does an interpreter or a variable', () => {
+    for (const command of ['l\\ore push x', '"lo""re" push x', "'lore' push x", '(lore push x)', '{ lore push x; }', 'python3 -c "import os; os.system(\'lore push x\')"', 'perl -e "system(q(lore push x))"', 'node -e "require(\'child_process\').execSync(\'lore push x\')"', 'L=lore; $L push x', 'L=lore; "$L" push x']) {
+      expect(loreByHand(command, WORKER), command).toBeDefined()
+    }
+    expect(loreByHand('python3 tools/report.py', WORKER), 'an interpreter with no lore in the line is no lore command').toBeUndefined()
+  })
+
   test('--scan= is a scan', () => {
     expect(loreByHand('lore status --scan=true', ORCH)).toBeDefined()
   })

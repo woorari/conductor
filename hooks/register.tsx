@@ -552,14 +552,33 @@ const checkLog = (root: string, runId: string, target: string, revision: string)
  * run's workspace, at its head. One check runs at a time; the next waits
  * until it ends. Never throws.
  */
-async function startCheck($: EngineInterface, path: string, ledger: Ledger, target: { taskId?: string; cwd: string; revision: string }): Promise<void> {
+let checkChain: Promise<void> = Promise.resolve()
+
+/** One check start at a time, from its claim until its program runs: the check workspace is shared. */
+function startCheck($: EngineInterface, path: string, ledger: Ledger, target: { taskId?: string; cwd: string; revision: string }): Promise<void> {
+  const run = checkChain.then(() => startCheckNow($, path, ledger, target))
+  checkChain = run.catch(() => undefined)
+
+  return run
+}
+
+async function startCheckNow($: EngineInterface, path: string, ledger: Ledger, target: { taskId?: string; cwd: string; revision: string }): Promise<void> {
   try {
     const check = ledger.run.config?.check
     const here = await backendOf($)
     const runLore = ledger.run.lore
     if (check === undefined || here === null || here.kind !== 'lore' || runLore === undefined) return
-    if (ledger.tasks.some(one => one.check?.verdict === 'running') || ledger.run.check?.verdict === 'running') return
     const at0 = iso(await $.clock.now())
+    // The slot is claimed in the ledger's own write queue before the workspace is touched: of two asked for at once, one runs.
+    const claimed = await mutate($, path, raw => {
+      const busy = raw.tasks.some(one => (one.check as { verdict?: string } | undefined)?.verdict === 'running') || ((raw.run as Record<string, unknown>).check as { verdict?: string } | undefined)?.verdict === 'running'
+      const holder = target.taskId === undefined ? (raw.run as Record<string, unknown>) : raw.tasks.find(one => one.id === target.taskId)
+      if (busy || holder === undefined) return { value: false, isChanged: false }
+      holder.check = { revision: target.revision, verdict: 'running', at: at0 }
+
+      return { value: true, isChanged: true }
+    })
+    if (claimed.value !== true) return
     const failed = (line: string) =>
       mutate($, path, raw => {
         const holder = target.taskId === undefined ? (raw.run as Record<string, unknown>) : raw.tasks.find(one => one.id === target.taskId)
@@ -596,15 +615,7 @@ async function startCheck($: EngineInterface, path: string, ledger: Ledger, targ
     const log = checkLog(here.root, ledger.run.id, target.taskId ?? '_run', target.revision)
     await runProgram($, ['mkdir', '-p', log.slice(0, log.lastIndexOf('/'))])
     const started = await runProgram($, ['/bin/sh', '-c', CHECK_SCRIPT, 'sh', cwd, '--', ...check.argv], 30_000, { OUT: log })
-    const at = iso(await $.clock.now())
-    const record = started.exitCode === 0 ? { revision: target.revision, verdict: 'running', at } : { revision: target.revision, verdict: 'failed', at, line: `the check could not start: ${lastLine(started)}`.slice(0, 200) }
-    await mutate($, path, raw => {
-      const holder = target.taskId === undefined ? (raw.run as Record<string, unknown>) : raw.tasks.find(one => one.id === target.taskId)
-      if (holder === undefined) return { value: undefined, isChanged: false }
-      holder.check = record
-
-      return { value: undefined, isChanged: true }
-    })
+    if (started.exitCode !== 0) await failed(`the check could not start: ${lastLine(started)}`)
   } catch {
     // A check that could not start is started again when its task is judged green again.
   }
@@ -2682,7 +2693,8 @@ export const register: Register = (on, options) => {
     }
     const taskId = call.agentId === undefined ? undefined : agents.get(call.agentId)
     // In a bound Lore run the mod does the Lore writes: a worker moves only its own branch, the orchestrator only reads.
-    if (call.tool === 'Bash' && typeof call.command === 'string' && call.command.includes('lore') && (await backendOf($))?.kind === 'lore') {
+    // Every command of a bound Lore run goes through the guard, which fails closed on what it cannot read.
+    if (call.tool === 'Bash' && typeof call.command === 'string' && (await backendOf($))?.kind === 'lore') {
       const path = await boundLedger($).catch(() => undefined)
       const boundRun = path === undefined ? undefined : parseLedger((await textAt($, path)) ?? '').ledger
       const runLore = boundRun?.run.lore
