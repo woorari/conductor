@@ -189,6 +189,9 @@ export function pushOf(exitCode: number, out: string): PushOutcome {
     const pushed = /Pushed revision \d+ -> ([0-9a-f]{64})/.exec(out)?.[1]
     if (pushed !== undefined) return { kind: 'pushed', revision: pushed }
     if (/already pushed and at remote latest/.test(out)) return { kind: 'unchanged' }
+    // A branch with no commit of its own is only made on the server, at the revision it was cut from.
+    const created = /^Creating branch \S+ at ([0-9a-f]{64})\s*$/m.exec(out)?.[1]
+    if (created !== undefined) return { kind: 'pushed', revision: created }
     return { kind: 'refused', reason: 'other', text: failure(exitCode, out) }
   }
   const text = failure(exitCode, out)

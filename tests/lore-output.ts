@@ -166,3 +166,7 @@ Pushed 6 fragment(s), 595 bytes
 Pushing ${REV_RUN} to branch conductor/S-1-spike
 Pushed revision 3 -> ${REV_RUN} to branch conductor/S-1-spike
 `
+
+/** The first push of a branch with no commit of its own: lore creates it on the server at the revision it was made from (spike, 2026-11-06; met again in the live run). */
+export const PUSH_NEW_EMPTY = `Creating branch conductor/S-1-spike at ${REV_MAIN}
+`

@@ -11,6 +11,7 @@ import {
   MERGE_INTO_PROTECTED,
   PUSH_DIVERGED,
   PUSH_FIRST,
+  PUSH_NEW_EMPTY,
   PUSH_NOTHING,
   PUSH_PROTECTED,
   REPOSITORY_INFO,
@@ -55,6 +56,7 @@ describe('Lore output', () => {
   test('push outcomes', () => {
     expect(pushOf(0, PUSH_FIRST)).toEqual({ kind: 'pushed', revision: REV_T1 })
     expect(pushOf(0, PUSH_NOTHING)).toEqual({ kind: 'unchanged' })
+    expect(pushOf(0, PUSH_NEW_EMPTY), 'a new branch with no commit is made on the server where it was cut').toEqual({ kind: 'pushed', revision: REV_MAIN })
     expect(pushOf(17, PUSH_PROTECTED)).toMatchObject({ kind: 'refused', reason: 'protected' })
     expect(pushOf(255, PUSH_DIVERGED)).toMatchObject({ kind: 'refused', reason: 'diverged' })
     expect(pushOf(1, 'boom')).toMatchObject({ kind: 'refused', reason: 'other', text: 'boom' })
