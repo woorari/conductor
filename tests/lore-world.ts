@@ -107,3 +107,24 @@ export async function lored($: Engine, on: Parameters<typeof world>[0], ledger: 
 }
 /** The lore commands that ran in a folder, as their arguments joined. */
 export const ranIn = (engine: World, cwd: string): string[] => loreRan(engine).filter(one => one.cwd === cwd).map(one => one.args.join(' '))
+
+/** A pretend lore whose check workspace stands at the revision it was last put at (`branch switch <b> <rev> --reset`). */
+export function pinnable(engine: World): void {
+  const check = `${BASE}/ABC-12/_check`
+  let at = '0'.repeat(64)
+  const args = (argv: readonly string[]) => argv.slice(1).filter(one => one !== '--non-interactive')
+  engine.lore.unshift(
+    {
+      match: (argv, cwd) => cwd === check && args(argv)[0] === 'branch' && args(argv)[1] === 'switch' && /^[0-9a-f]{64}$/.test(args(argv)[3] ?? ''),
+      answer: argv => {
+        at = args(argv)[3] ?? at
+
+        return { exitCode: 0, stdout: '' }
+      },
+    },
+    {
+      match: (argv, cwd) => cwd === check && args(argv)[0] === 'status' && !argv.includes('--scan'),
+      answer: () => ({ exitCode: 0, stdout: `On branch any revision 2 -> ${at}\nRemote revision 2 -> ${at}\nLocal branch in sync with remote\nNo tracked changes\n` }),
+    },
+  )
+}

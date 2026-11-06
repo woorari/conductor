@@ -3,7 +3,7 @@ import type { Engine } from 'claude-code/testing'
 
 import type { Ledger } from '../types'
 import { BRANCH_INFO_PUSHED, MERGE_ABORT, MERGE_CLEAN, MERGE_CONFLICT, PUSH_PROTECTED, PUSH_RUN, REV_MAIN, REV_RUN, REV_T1, STATUS_CLEAN, STATUS_UNTRACKED } from './lore-output'
-import { BASE, LORE_RUNS, RUN, RUN_BRANCH, answers, lored, ok, ranIn, stored, task } from './lore-world'
+import { BASE, LORE_RUNS, RUN, RUN_BRANCH, answers, lored, ok, pinnable, ranIn, stored, task } from './lore-world'
 import { LINEAR_TOKEN } from './world'
 
 type Ran = { text?: string; isError?: true; deny?: string }
@@ -177,10 +177,11 @@ test('once the last task is merged, the run branch\'s own check starts in the ru
   const config = { check: { argv: ['./check.sh'], timeoutMin: 20 } }
   const passed = { revision: REV_T1, verdict: 'passed' as const, at: '2026-10-09T10:20:00.000Z' }
   const { engine } = await green($, on, { ...GREEN, run: { ...GREEN.run, config }, tasks: [{ ...GREEN.tasks[0]!, check: passed }] })
+  pinnable(engine)
 
   await call($, 'merge', MERGE)
   const checks = engine.calls.filter(one => one.argv[0] === '/bin/sh' && one.argv.includes('--'))
-  expect(checks.map(one => one.argv[4])).toEqual([RUN_WS])
+  expect(checks.map(one => one.argv[4]), 'in the check workspace, never in the run workspace merges reset').toEqual([`${BASE}/ABC-12/_check`])
   expect(checks[0]?.env).toEqual({ OUT: `${LORE_RUNS}/ABC-12/checks/_run-${REV_RUN.slice(0, 7)}.log` })
 })
 

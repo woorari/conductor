@@ -3,7 +3,7 @@ import type { Engine } from 'claude-code/testing'
 
 import type { Ledger } from '../types'
 import { REV_MAIN, REV_RUN, REV_T1 } from './lore-output'
-import { BASE, LORE_RUNS, RUN, RUN_BRANCH, lored, ranIn, stored, task } from './lore-world'
+import { BASE, LORE_RUNS, RUN, RUN_BRANCH, lored, pinnable, ranIn, stored, task } from './lore-world'
 
 type Ran = { text?: string; isError?: true }
 const raise = ($: Engine, input: Record<string, unknown>) => ($.tool.call as unknown as (input: Record<string, unknown>) => Promise<Ran>)(input)
@@ -85,7 +85,8 @@ test('a check past its time is failed and stopped', async ($, on) => {
 
   await clock.advance(21 * 60_000)
   expect(stored(files).tasks[0]?.check).toMatchObject({ verdict: 'failed', line: 'timed out after 20 min' })
-  expect(engine.calls.map(one => one.argv)).toContainEqual(['kill', '4242'])
+  expect(engine.calls.map(one => one.argv), 'its whole process group, not only the shell that started it').toContainEqual(['kill', '-TERM', '--', '-4242'])
+  expect(shells(engine)[0]?.argv[2]).toContain('set -m')
 })
 
 test('a new revision restarts the check', async ($, on) => {
@@ -142,4 +143,34 @@ test('two checks asked for at the same moment: one claims the check workspace, t
   expect(shells(engine)).toHaveLength(1)
   expect(stored(files).tasks.filter(one => one.check?.verdict === 'running')).toHaveLength(1)
   expect(ranIn(engine, CHECK_WS).filter(one => /^branch switch \S+ [0-9a-f]{64} --reset$/.test(one)), 'the check workspace was put at one revision only').toHaveLength(1)
+})
+
+test('a failed check runs again when its task is judged green again', async ($, on) => {
+  const failed = { revision: REV_T1, verdict: 'failed' as const, at: '2026-10-09T10:00:00.000Z', line: 'network down' }
+  const { engine } = await checking($, on, { ...REVIEW, tasks: [{ ...REVIEW.tasks[0]!, status: 'green', check: failed }] })
+
+  await call($, 'task_update', { task: 't1', status: 'green' })
+  expect(shells(engine)).toHaveLength(1)
+})
+
+test("the run branch's check runs in the check workspace at the run head, started by the timer when it is due", async ($, on) => {
+  const done: Ledger = { ...REVIEW, run: { ...REVIEW.run, lore: { ...REVIEW.run.lore!, head: REV_RUN } }, tasks: [{ ...REVIEW.tasks[0]!, status: 'done', mergeCommit: REV_RUN }] }
+  const { engine, clock } = await lored($, on, done)
+  pinnable(engine)
+
+  await clock.advance(HALF_MINUTE)
+  expect(ranIn(engine, CHECK_WS)).toContain(`branch switch ${RUN_BRANCH} ${REV_RUN} --reset`)
+  expect(shells(engine).map(one => one.argv[4])).toEqual([CHECK_WS])
+})
+
+test('run_check runs a check again: a task\'s, or the run branch\'s', async ($, on) => {
+  const failedRun = { revision: REV_RUN, verdict: 'failed' as const, at: '2026-10-09T10:00:00.000Z', line: 'flaky' }
+  const done: Ledger = { ...REVIEW, run: { ...REVIEW.run, check: failedRun, lore: { ...REVIEW.run.lore!, head: REV_RUN } }, tasks: [{ ...REVIEW.tasks[0]!, status: 'done', mergeCommit: REV_RUN }] }
+  const { engine, files } = await lored($, on, done)
+  pinnable(engine)
+
+  const said = await call($, 'run_check', {})
+  expect(said.text).toContain('started')
+  expect(shells(engine)).toHaveLength(1)
+  expect(stored(files).run.check).toMatchObject({ revision: REV_RUN, verdict: 'running' })
 })
