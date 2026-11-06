@@ -126,3 +126,24 @@ describe('the lines the pane draws', () => {
     expect([0, 12, 60, 65].map(elapsed)).toEqual(['under 1 min', '12 min', '1 h 00 min', '1 h 05 min'])
   })
 })
+
+describe("parseLedger: a run's workspace in a home that is not a repository", () => {
+  const WORKSPACE = { kind: 'lore', root: '/work/game/code/Big Game 5.8', place: 'game/code', base: 'main' } as const
+  const CANDIDATES = [
+    { kind: 'lore', root: '/work/game/code/Big Game 5.8', place: 'game/code', about: 'engine and game code' },
+    { kind: 'git', root: '/work/game/code/tools', place: 'game/code', about: 'engine and game code' },
+  ] as const
+  const with_ = (run: Record<string, unknown>) => ({ ...LEDGER, run: { ...LEDGER.run, ...run } })
+
+  test("ledger: a run's workspace and candidates are read and kept", () => {
+    const ledger = with_({ workspace: { ...WORKSPACE, remote: 'git@github.com:acme/widgets.git' }, candidates: CANDIDATES })
+    expect(parseLedger(JSON.stringify(ledger)).ledger).toEqual(ledger)
+  })
+
+  test("ledger: a workspace of another kind, or one not given by its absolute path, is refused", () => {
+    expect(refused(with_({ workspace: { ...WORKSPACE, kind: 'svn' } }))).not.toBe('accepted')
+    expect(refused(with_({ workspace: { ...WORKSPACE, root: 'game/code' } }))).not.toBe('accepted')
+    expect(refused(with_({ candidates: [{ ...CANDIDATES[0], root: 'rel' }] }))).not.toBe('accepted')
+    expect(refused(with_({ candidates: [{ ...CANDIDATES[0], kind: 'none' }] }))).not.toBe('accepted')
+  })
+})
