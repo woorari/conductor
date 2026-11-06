@@ -33,6 +33,7 @@ import type { TaskRow } from './board'
 import { dashboardSvg } from './dashboard'
 import { KEEP, ROTATE_AT, carried, handover } from './handover'
 import { LINEAR_KEY, RUN_ID, STATUSES, TIERS, parseLedger } from './ledger'
+import { LINEAR_API, M_CREATE, M_UPDATE, Q_ISSUE, Q_TEAM, apiKeyOf, createdOf, errorsOf, issueOf, issueText, stateFor, teamOf, updatedOf } from './linear'
 import { repositoryInfoOf } from './lore'
 import { CONFIG_PATH, LORE_DEFAULTS, PLACEHOLDER_SNIPPET, hasPlaceholder, parseConfig, runsIgnored } from './project'
 import { runBranchOf } from './workspace'
@@ -335,6 +336,10 @@ const LORE_MISSING =
   "lore could not be run: not as lore on the PATH, and not as ~/.local/bin/lore. Set its full path in the mod's Lore program option, or export LORE_BIN, then start a new session."
 /** The person's own word on which lore to run: the mod's Lore program option. LORE_BIN comes after it. */
 let loreOption: string | undefined
+/** The key of the mod's Linear API key option; empty when none. LINEAR_API_KEY comes after it. */
+let linearOption = ''
+/** Why the last Linear state change failed, said once as a problem: later ones for the same reason are not said again. */
+let linearFailed: string | undefined
 
 type Ran = { exitCode: number; stdout: string; stderr: string; out: string }
 
@@ -621,8 +626,10 @@ async function heard(
     if (decided.kind === 'child') return
     workers.add(agentId)
     const at = iso(await $.clock.now())
+    let ticket: unknown
     await mutate($, path, raw => {
       const taskId = spawned(raw, at, { name, agentId, model, slot })
+      ticket = raw.tasks.find(one => one.id === taskId)?.ticket
       // The engine has the last word on the model. When it is not the tier's, the board says so.
       if (taskId !== undefined && familyOf(model) !== decided.model) {
         reportProblem(raw, at, { kind: 'orchestrator' }, {
@@ -634,6 +641,7 @@ async function heard(
 
       return { value: taskId, isChanged: taskId !== undefined }
     })
+    if (typeof ticket === 'string') await moveIssue($, path, ticket, 'started')
   } catch {
     // The worker runs whether or not the board heard of it.
   }
@@ -1041,6 +1049,186 @@ async function github($: EngineInterface, path: string, init?: { method?: string
   }
 }
 
+const NO_LINEAR_KEY = "there is no Linear key: set the mod's Linear API key option, or export LINEAR_API_KEY"
+
+/** The key a request to Linear carries: the mod's option, then LINEAR_API_KEY. It goes into the request's header and nowhere else. */
+async function linearKey($: EngineInterface): Promise<string | undefined> {
+  if (linearOption !== '') return linearOption
+  const fromEnv = (await $.env.get('LINEAR_API_KEY').catch(() => undefined))?.trim()
+
+  return fromEnv === undefined || fromEnv === '' ? undefined : fromEnv
+}
+
+/** One GraphQL request to Linear, its `data` or why there is none. Never throws, and never says the key. */
+async function linear($: EngineInterface, query: string, variables: Record<string, unknown>): Promise<{ data: unknown; error?: undefined } | { error: string }> {
+  const key = await linearKey($)
+  if (key === undefined) return { error: NO_LINEAR_KEY }
+  const answered = await ask($, LINEAR_API, {
+    method: 'POST',
+    headers: { Authorization: key, 'Content-Type': 'application/json', 'User-Agent': 'conductor-claude-code-mod' },
+    body: JSON.stringify({ query, variables }),
+  })
+  const scrub = (text: string): string => text.split(key).join('[key]')
+  if (answered.error !== undefined) return { error: scrub(answered.error) }
+  let json: unknown
+  try {
+    json = JSON.parse(answered.text)
+  } catch {
+    return { error: `an answer that is not JSON (HTTP ${answered.status})` }
+  }
+  const errors = errorsOf(json)
+  if (errors !== undefined) return { error: scrub(`${errors}${answered.status === 401 ? ' (HTTP 401: Linear did not take the key)' : ''}`) }
+  if (answered.status >= 400) return { error: `HTTP ${answered.status}` }
+
+  return { data: (json as { data?: unknown }).data }
+}
+
+/** Records, once for each reason, that Linear did not take a state change. Never throws. */
+async function linearProblem($: EngineInterface, path: string, text: string, reason: string): Promise<void> {
+  if (linearFailed === reason) return
+  linearFailed = reason
+  const at = iso(await $.clock.now())
+  await mutate($, path, raw => {
+    const outcome = reportProblem(raw, at, { kind: 'orchestrator' }, { text, severity: 'warning' })
+
+    return { value: outcome, isChanged: outcome.isChanged }
+  })
+}
+
+/**
+ * Moves a Linear issue to its team's first state of a type: started when its
+ * work starts, completed when it is merged. An issue that is there already,
+ * or further on, stays. A failure never stops the run: it is recorded once as
+ * a warning. Never throws.
+ */
+async function moveIssue($: EngineInterface, path: string, key: string, type: 'started' | 'completed'): Promise<void> {
+  try {
+    const fail = (reason: string) => linearProblem($, path, `Linear did not move ${key} to its ${type} state: ${reason}. The run goes on; later changes are not reported while this lasts.`, reason)
+    const read = await linear($, Q_ISSUE, { id: key })
+    if (read.error !== undefined) return await fail(read.error)
+    const view = issueOf(read.data)
+    if (view === undefined) return await fail(`Linear has no issue ${key}`)
+    if (view.state.type === type || (type === 'started' && view.state.type === 'completed')) return
+    const stateId = stateFor(view.team.states, type)
+    if (stateId === undefined) return await fail(`team ${view.team.key} has no ${type} state`)
+    const sent = await linear($, M_UPDATE, { id: view.id, input: { stateId } })
+    if (sent.error !== undefined) return await fail(sent.error)
+    if (!updatedOf(sent.data)) return await fail('Linear did not say the change went through')
+    linearFailed = undefined
+  } catch {
+    // The run goes on whatever Linear does.
+  }
+}
+
+/** A task that is done moves its Linear issue to completed, when its ticket is one. Never throws. */
+async function issueDone($: EngineInterface, path: string, taskId: string): Promise<void> {
+  try {
+    const ticket = parseLedger(await $.fs.read(path)).ledger?.tasks.find(one => one.id === taskId)?.ticket
+    if (typeof ticket === 'string') await moveIssue($, path, ticket, 'completed')
+  } catch {
+    // Nothing to move.
+  }
+}
+
+/**
+ * After the owner approved a Linear run's plan: a run from a spec gets its own
+ * issue in the project's team, filed now, and the run's issue moves to
+ * started. Never throws, and never holds up the approval.
+ */
+async function linearApproved($: EngineInterface, path: string): Promise<void> {
+  try {
+    const ledger = parseLedger(await $.fs.read(path)).ledger
+    if (ledger === undefined || ledger.run.tickets !== 'linear') return
+    let key = ledger.run.issue ?? (LINEAR_KEY.test(ledger.run.source ?? '') ? ledger.run.source : undefined)
+    if (key === undefined) {
+      const teamKey = ledger.run.config?.linear?.team
+      const fail = (reason: string) =>
+        linearProblem($, path, `Linear did not file this run's own issue in team ${teamKey ?? '(none)'}: ${reason}. File it by hand, then give its key with task_update on a task, or set the run's issue.`, reason)
+      if (teamKey === undefined) return await fail('the project config names no linear.team')
+      const team = await linear($, Q_TEAM, { key: teamKey })
+      if (team.error !== undefined) return await fail(team.error)
+      const found = teamOf(team.data)
+      if (found === undefined) return await fail(`Linear has no team ${teamKey}`)
+      const made = await linear($, M_CREATE, { input: { teamId: found.id, title: ledger.run.title, description: `Spec: ${ledger.run.source ?? ''}` } })
+      if (made.error !== undefined) return await fail(made.error)
+      const created = createdOf(made.data)
+      if (created === undefined) return await fail('Linear did not say which issue it made')
+      key = created.key
+      const filed = created.key
+      await mutate($, path, raw => {
+        ;(raw.run as Record<string, unknown>).issue = filed
+
+        return { value: undefined, isChanged: true }
+      })
+    }
+    await moveIssue($, path, key, 'started')
+  } catch {
+    // The approval stands whatever Linear does.
+  }
+}
+
+/** `ticket_read`: an issue in Linear, as the orchestrator reads it. */
+async function ticketRead($: EngineInterface, call: ToolCall) {
+  const fail = (reason: string) => ({ isError: true as const, result: `${NOT_DONE} ${reason}`, text: `${NOT_DONE} ${reason}` })
+  const key = call.key
+  if (typeof key !== 'string' || !LINEAR_KEY.test(key)) return fail('key is a Linear issue key, like ABC-12.')
+  const read = await linear($, Q_ISSUE, { id: key })
+  if (read.error !== undefined) return fail(`Linear could not be read: ${read.error}.`)
+  const view = issueOf(read.data)
+  if (view === undefined) return fail(`Linear has no issue ${key}.`)
+  const text = issueText(view)
+
+  return { result: text, text }
+}
+
+/** `ticket_file`: the orchestrator files a drafted ticket as a sub-issue of the run's issue, after the owner approved the plan. */
+async function ticketFile($: EngineInterface, call: ToolCall) {
+  const fail = (reason: string) => ({ isError: true as const, result: `${NOT_DONE} ${reason}`, text: `${NOT_DONE} ${reason}` })
+  const path = await boundLedger($)
+  if (path === undefined) return fail(NOT_BOUND)
+  if (callerOf(call.agentId).kind !== 'orchestrator') return fail('Only the orchestrator files a ticket.')
+  const { title, description, task } = call
+  if (typeof title !== 'string' || title.trim() === '') return fail('Give the ticket a title.')
+  if (description !== undefined && typeof description !== 'string') return fail('description is text.')
+  const ledger = parseLedger(await $.fs.read(path)).ledger
+  if (ledger === undefined) return fail('The ledger does not read.')
+  if (ledger.run.plan !== 'approved' && ledger.run.plan !== undefined) {
+    return fail('The plan is not approved yet: drafted tickets are filed only after the owner approves the plan with /approve.')
+  }
+  if (task !== undefined && !ledger.tasks.some(one => one.id === task)) return fail(`There is no task ${String(task)} in this run.`)
+  const parent = ledger.run.issue ?? (LINEAR_KEY.test(ledger.run.source ?? '') ? ledger.run.source : undefined)
+  if (parent === undefined) return fail("This run has no Linear issue of its own to file under. It is filed when the owner approves the plan of a Linear run.")
+  const read = await linear($, Q_ISSUE, { id: parent })
+  if (read.error !== undefined) return fail(`Linear could not be read: ${read.error}.`)
+  const view = issueOf(read.data)
+  if (view === undefined) return fail(`Linear has no issue ${parent}.`)
+  const made = await linear($, M_CREATE, { input: { teamId: view.team.id, title: title.trim(), description: (description ?? '').trim(), parentId: view.id } })
+  if (made.error !== undefined) return fail(`Linear did not file it: ${made.error}.`)
+  const created = createdOf(made.data)
+  if (created === undefined) return fail('Linear did not say which issue it made.')
+  if (typeof task === 'string') {
+    await mutate($, path, raw => {
+      const found = raw.tasks.find(one => one.id === task)
+      if (found !== undefined) found.ticket = created.key
+
+      return { value: undefined, isChanged: found !== undefined }
+    })
+    seen = undefined
+  }
+  const text = `Filed ${created.key} under ${parent}: ${created.url}.${typeof task === 'string' ? ` ${task} carries it.` : ''}`
+
+  return { result: text, text }
+}
+
+/** Whether this project's tickets may be in Linear: its config says so, or a Linear key is set. */
+async function wantsLinear($: EngineInterface): Promise<boolean> {
+  if ((await linearKey($)) !== undefined) return true
+  if (root === undefined || root === null) return false
+  const read = parseConfig(await textAt($, `${root}/${CONFIG_PATH}`))
+
+  return 'config' in read && read.config.tickets === 'linear'
+}
+
 /** A commit's checks, check runs and commit statuses both, and their verdict. */
 async function checksAt($: EngineInterface, sha: string): Promise<Verdict | { error: string }> {
   const [runs, status] = await Promise.all([github($, `/commits/${sha}/check-runs?per_page=100`), github($, `/commits/${sha}/status?per_page=100`)])
@@ -1163,6 +1351,7 @@ async function mergeTool(
     const where = pull.commit === undefined ? '' : ` as ${short(pull.commit)}`
     if (isCheckOnly) return say(`PR ${asked.pr} is merged already${where}, outside the board. ${TOOL_MERGE} takes it over and marks ${id} done.`)
     const adopted = await settle($, path, raw => onMain(raw, iso(now), pull.commit ?? pull.head, config.base, { isAdopted: true, task: id, pr: asked.pr }))
+    if (adopted !== undefined) await issueDone($, path, id)
 
     return adopted === undefined ? fail(`${id} could not be taken over: the board could not be written.`) : say(adopted.text)
   }
@@ -1198,6 +1387,7 @@ async function mergeTool(
   if (settled?.isMerged === true) {
     const commit = settled.commit ?? pull.head
     const done = await settle($, path, raw => onMain(raw, now2, commit, config.base))
+    if (done !== undefined) await issueDone($, path, id)
 
     return say(done?.text ?? `Merged: PR ${asked.pr} (${id}) is on ${config.base} as ${short(commit)}, but the board could not be written. Set it right with ${TOOL_MERGE} for ${id} again: it is taken over.`)
   }
@@ -1244,6 +1434,7 @@ async function watchClaim($: EngineInterface): Promise<void> {
 
         return done.isError ? done : { ...done, wake: `Run board: PR ${flight.pr} (${flight.task}) is merged as ${short(pull.commit ?? flight.head)}, and the task is done.`, asks: `merge ${flight.task}` }
       })
+      await issueDone($, path, flight.task)
     } else await settle($, path, raw => abandoned(raw, 'the merge call did not go through'))
   } catch {
     // A look that failed is tried again on the next one.
@@ -1425,6 +1616,7 @@ export const register: Register = (on, options) => {
   config = configOf(options)
   const given = (options as Record<string, unknown> | undefined)?.loreBin
   loreOption = typeof given === 'string' && given.trim() !== '' ? given.trim() : undefined
+  linearOption = apiKeyOf(options)
   on('session.start', async ($, e, next) => {
     if (!(await isHome($))) return next(e)
     // The timers first: whatever a registration below runs into, the board stays live.
@@ -1651,6 +1843,35 @@ export const register: Register = (on, options) => {
       },
       isDeferred: false,
     })
+    if (await wantsLinear($)) {
+      await listTool($, {
+        name: 'ticket_read',
+        description: 'Run board: read an issue in Linear by its key: its title, state, description, sub-issues and last comments.',
+        inputSchema: {
+          type: 'object',
+          properties: { key: { type: 'string', pattern: TICKET_PATTERN, description: 'The issue\'s key, e.g. ABC-12.' } },
+          required: ['key'],
+          additionalProperties: false,
+        },
+        isDeferred: false,
+      })
+      await listTool($, {
+        name: 'ticket_file',
+        description:
+          "Run board: the orchestrator files a drafted ticket in Linear as a sub-issue of the run's issue, once the owner approved the plan. With task, that task carries the new key.",
+        inputSchema: {
+          type: 'object',
+          properties: {
+            title: { type: 'string', description: 'The ticket\'s title.' },
+            description: { type: 'string', description: 'The ticket\'s description, in Markdown; link the spec it comes from.' },
+            task: { type: 'string', description: 'The id of the task the ticket is for.' },
+          },
+          required: ['title'],
+          additionalProperties: false,
+        },
+        isDeferred: false,
+      })
+    }
     if (unlisted.length > 0) {
       void Promise.resolve($.ui.toast(`Run board: the engine did not take ${unlisted.join('; ')}. Everything else of the mod works.`)).catch(() => undefined)
     }
@@ -1855,6 +2076,8 @@ export const register: Register = (on, options) => {
   on('tool.call', { tool: /^mcp__conductor__problem_resolve$/ }, ($, e) =>
     answer($, e as unknown as ToolCall, (raw, _at, caller, input) => resolveProblem(raw, caller, input)),
   ).catch(broke)
+  on('tool.call', { tool: /^mcp__conductor__ticket_read$/ }, ($, e) => ticketRead($, e as unknown as ToolCall)).catch(broke)
+  on('tool.call', { tool: /^mcp__conductor__ticket_file$/ }, ($, e) => ticketFile($, e as unknown as ToolCall)).catch(broke)
   on('tool.call', { tool: /^mcp__conductor__problem_assign$/ }, ($, e) =>
     answer($, e as unknown as ToolCall, (raw, _at, caller, input) => assignProblem(raw, caller, input)),
   ).catch(broke)
@@ -2050,7 +2273,10 @@ export const register: Register = (on, options) => {
       return { value: outcome, isChanged: outcome.isChanged }
     })
     if (written.error !== undefined) return { text: written.error }
-    if (!written.value.isError) asks.push(APPROVED)
+    if (!written.value.isError) {
+      asks.push(APPROVED)
+      await linearApproved($, path)
+    }
     seen = undefined
     await refresh($, false)
 

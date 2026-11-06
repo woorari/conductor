@@ -106,6 +106,42 @@ export type Forge = {
   asked: string[]
 }
 
+/** The key pretend Linear takes, and that a test asserts is written nowhere. */
+export const LINEAR_TOKEN = 'linear-key-for-tests'
+export const LINEAR_URL = 'https://api.linear.app/graphql'
+
+/** A workflow state of a Linear team, as its API lists it. */
+export type LinearState = { id: string; name: string; type: string; position: number }
+
+/** An issue as Linear's API answers it for the mod's issue query. */
+export type LinearIssue = {
+  id: string
+  identifier: string
+  title: string
+  description: string | null
+  url: string
+  state: { name: string; type: string }
+  parent: { identifier: string } | null
+  children: { nodes: { identifier: string; title: string; state: { name: string; type: string } }[] }
+  comments: { nodes: { body: string; createdAt: string; user: { displayName: string } | null }[] }
+  team: { id: string; key: string; states: { nodes: LinearState[] } }
+}
+
+/** The pretend Linear a test steers. */
+export type Linear = {
+  issues: Record<string, LinearIssue>
+  teams: Record<string, { id: string; key: string; states: { nodes: LinearState[] } }>
+  /** Every issueCreate input, in order. */
+  created: Record<string, unknown>[]
+  /** Every issueUpdate, in order. */
+  updated: { id: string; input: Record<string, unknown> }[]
+  /** The key Linear takes, as the bare Authorization value. */
+  accepts: string
+  isDown: boolean
+  /** Every request's GraphQL operation, in order. */
+  asked: string[]
+}
+
 /** One scripted answer of the pretend Lore CLI. */
 export type LoreAnswer = {
   match: (argv: readonly string[], cwd?: string) => boolean
@@ -172,6 +208,7 @@ export type World = {
   resolve: (asked: string | undefined) => string
   toasts: string[]
   forge: Forge
+  linear: Linear
   /** The mod's own store: what it keeps between sessions. A test may fill it before the session starts. */
   store: Record<string, unknown>
   /** The store takes nothing more: a write is refused, as the engine refuses one past its size limit. */
@@ -227,6 +264,7 @@ export function world(on: On, files: Files, repo: { root: string } | null = { ro
     isStoreFull: false,
     sessionId: 'session-1',
     builtins: new Set(['run', 'help', 'clear', 'compact', 'config', 'model', 'memory', 'review', 'init', 'login', 'logout', 'status', 'resume', 'cost', 'exit', 'plugin', 'agents', 'mcp', 'hooks', 'permissions', 'doctor']),
+    linear: { issues: {}, teams: {}, created: [], updated: [], accepts: LINEAR_TOKEN, isDown: false, asked: [] },
     forge: {
       pulls: {},
       checks: { [MAIN]: ci('success') },
@@ -276,6 +314,7 @@ export function world(on: On, files: Files, repo: { root: string } | null = { ro
   })
   on('store.keys', () => ({ value: Object.keys(state.store) }))
   on('http.fetch', (_$, e) => {
+    if (e.url === LINEAR_URL) return linearAnswer(state.linear, e.init)
     const { forge } = state
     const method = e.init?.method ?? 'GET'
     forge.asked.push(`${method} ${e.url}`)
@@ -440,6 +479,64 @@ export function world(on: On, files: Files, repo: { root: string } | null = { ro
   on('prompt.compose', () => ({ sections: [{ id: 'intro', text: 'You are Claude Code.', scope: 'shared' as const }] }))
 
   return state
+}
+
+/** How pretend Linear answers one GraphQL request: by the operation its query names. */
+function linearAnswer(linear: Linear, init: { method?: string; headers?: Record<string, string>; body?: string } | undefined) {
+  const answer = (status: number, body: unknown) => ({ value: { status, ok: status >= 200 && status < 300, headers: {}, text: JSON.stringify(body) } })
+  if (linear.isDown) return { deny: 'getaddrinfo ENOTFOUND api.linear.app' }
+  if (init?.method !== 'POST') return answer(400, { errors: [{ message: 'POST only' }] })
+  if (init.headers?.Authorization !== linear.accepts) return answer(401, { errors: [{ message: 'Authentication required, not authenticated' }] })
+  const { query, variables } = JSON.parse(init.body ?? '{}') as { query: string; variables: Record<string, unknown> }
+  const operation = /^\s*(?:query|mutation)\s+(\w+)/.exec(query)?.[1] ?? '?'
+  linear.asked.push(operation)
+  const notFound = answer(200, { data: null, errors: [{ message: 'Entity not found: Issue', extensions: { code: 'INVALID_INPUT' } }] })
+  if (/issueCreate\(/.test(query)) {
+    const input = variables.input as Record<string, unknown>
+    linear.created.push(input)
+    const team = Object.values(linear.teams).find(one => one.id === input.teamId) ?? Object.values(linear.issues).find(one => one.team.id === input.teamId)?.team
+    if (team === undefined) return answer(200, { data: null, errors: [{ message: 'Entity not found: Team' }] })
+    const number = 100 + linear.created.length
+    const identifier = `${team.key}-${number}`
+    linear.issues[identifier] = {
+      id: `issue-${identifier}`,
+      identifier,
+      title: String(input.title),
+      description: String(input.description ?? ''),
+      url: `https://linear.app/acme/issue/${identifier}`,
+      state: { name: 'Todo', type: 'unstarted' },
+      parent: null,
+      children: { nodes: [] },
+      comments: { nodes: [] },
+      team: { id: team.id, key: team.key, states: team.states },
+    }
+
+    return answer(200, { data: { issueCreate: { success: true, issue: { identifier, url: `https://linear.app/acme/issue/${identifier}` } } } })
+  }
+  if (/issueUpdate\(/.test(query)) {
+    const id = String(variables.id)
+    const input = variables.input as Record<string, unknown>
+    linear.updated.push({ id, input })
+    const issue = Object.values(linear.issues).find(one => one.id === id || one.identifier === id)
+    if (issue === undefined) return notFound
+    const state = issue.team.states.nodes.find(one => one.id === input.stateId)
+    if (state !== undefined) issue.state = { name: state.name, type: state.type }
+
+    return answer(200, { data: { issueUpdate: { success: true } } })
+  }
+  if (/\bteams\(/.test(query)) {
+    const key = String(variables.key)
+    const team = linear.teams[key] ?? Object.values(linear.issues).find(one => one.team.key === key)?.team
+
+    return answer(200, { data: { teams: { nodes: team === undefined ? [] : [team] } } })
+  }
+  if (/\bissue\(id:/.test(query)) {
+    const issue = linear.issues[String(variables.id)]
+
+    return issue === undefined ? notFound : answer(200, { data: { issue } })
+  }
+
+  return answer(400, { errors: [{ message: `pretend Linear does not know ${operation}` }] })
 }
 
 export const file = (ledger: Ledger, mtimeMs: number) => ({ text: JSON.stringify(ledger), mtimeMs })
