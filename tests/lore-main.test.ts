@@ -24,7 +24,7 @@ const DONE: Ledger = {
 
 /** A bound Lore run whose tasks are all merged into its branch, at REV_RUN, on a base still at REV_MAIN. */
 async function finished($: Engine, on: Parameters<typeof lored>[1], ledger: Ledger = DONE) {
-  const { files, engine } = await lored($, on, ledger)
+  const { files, engine, clock } = await lored($, on, ledger)
   engine.lore.unshift(
     answers(['branch', 'info', RUN_BRANCH], ok(info(RUN_BRANCH, REV_RUN))),
     answers(['branch', 'info', 'main'], ok(info('main', REV_MAIN))),
@@ -40,7 +40,7 @@ async function finished($: Engine, on: Parameters<typeof lored>[1], ledger: Ledg
     state: { name: 'In Progress', type: 'started' }, parent: null, children: { nodes: [] }, comments: { nodes: [] }, team: { id: 'team-abc', key: 'ABC', states },
   }
 
-  return { files, engine }
+  return { files, engine, clock }
 }
 
 test('approve-main merges the approved revision into the protected base and protects it again', async ($, on) => {
@@ -220,4 +220,22 @@ test('run_sync_base never builds on a run branch head the board did not leave', 
   const said = await call($, 'run_sync_base', {})
   expect(said.text).toContain('nobody judged')
   expect(ranIn(engine, RUN_WS).some(one => one.startsWith('branch merge main'))).toBe(false)
+})
+
+test('a base merge nobody heard back from is let go after a while, with the base protected again and a blocker on the board', async ($, on) => {
+  const stuck: Ledger = { ...DONE, merge: { task: 'ABC-12', revision: REV_RUN, target: 'base', state: 'merging', startedAt: '2026-10-09T09:50:00.000Z' } }
+  const { files, engine, clock } = await finished($, on, stuck)
+
+  await clock.advance(30_000)
+  expect(ranIn(engine, RUN_WS)).toContain('branch protect main')
+  expect(stored(files).merge).toBeUndefined()
+  expect(stored(files).problems.some(one => one.severity === 'blocker' && one.text.includes('lore history --branch main'))).toBe(true)
+})
+
+test('a fresh Lore claim is left alone', async ($, on) => {
+  const fresh: Ledger = { ...DONE, merge: { task: 'ABC-12', revision: REV_RUN, target: 'base', state: 'merging', startedAt: '2026-10-09T10:29:00.000Z' } }
+  const { files, clock } = await finished($, on, fresh)
+
+  await clock.advance(30_000)
+  expect(stored(files).merge).toBeDefined()
 })

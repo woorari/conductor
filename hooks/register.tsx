@@ -2041,7 +2041,7 @@ async function mergeTool(
   const path = await boundLedger($)
   if (path === undefined) return fail(NOT_BOUND)
   // Before anything is asked of GitHub: a pull request's number means something only in a repository on GitHub.
-  if ((await backendOf($))?.kind === 'lore') return loreMergeTool($, call, isCheckOnly)
+  if ((await backendOf($))?.kind === 'lore') return underWay(() => loreMergeTool($, call, isCheckOnly))
   if (!(await isAtForge($))) return fail(elsewhere(origin))
   await remember($, path)
   let ledger: Ledger
@@ -2128,14 +2128,61 @@ async function mergeTool(
  * between, or GitHub could not be asked afterwards): the pull request says.
  * Called from the timer; never throws.
  */
+/** A Lore merge is under way in this module: its own claim is never let go as stuck. */
+let loreMergesUnderWay = 0
+/** Runs one of the mod's own Lore merges, counted as under way while it runs. */
+async function underWay<T>(merging: () => Promise<T>): Promise<T> {
+  loreMergesUnderWay += 1
+  try {
+    return await merging()
+  } finally {
+    loreMergesUnderWay -= 1
+  }
+}
+
+/** A Lore claim older than this was not heard of again: longer than three of the engine's longest program runs. */
+const LORE_CLAIM_STALE_MIN = 35
+
+/**
+ * A Lore merge claim nobody heard back from (the session stopped mid-merge,
+ * or the mod was reloaded): after a while it is let go, a base merge's base
+ * protected again first, and a blocker says what to look at before anything
+ * else merges. Never throws.
+ */
+async function settleStuckLore($: EngineInterface, path: string, ledger: Ledger): Promise<void> {
+  const flight = ledger.merge
+  const runLore = ledger.run.lore
+  if (flight?.revision === undefined || runLore === undefined || loreMergesUnderWay > 0) return
+  const now = await $.clock.now()
+  if (now - Date.parse(flight.startedAt) < LORE_CLAIM_STALE_MIN * 60_000) return
+  const into = flight.target === 'base' ? runLore.base : runLore.branch
+  let protectLine = ''
+  if (flight.target === 'base' && runLore.workspace !== undefined) {
+    const again = await lore($, ['branch', 'protect', runLore.base], runLore.workspace)
+    protectLine = again.exitCode === 0 ? ` ${runLore.base} is protected again.` : ` ${runLore.base} could not be protected again (${lastLine(again)}): protect it by hand.`
+  }
+  const at = iso(now)
+  await settle($, path, raw => {
+    const out = letGo(raw, `nobody heard how it ended for ${LORE_CLAIM_STALE_MIN} minutes (the session may have stopped mid-merge)`)
+    reportProblem(raw, at, { kind: 'orchestrator' }, {
+      text: `The merge of ${flight.task} into ${into} was let go unheard after ${LORE_CLAIM_STALE_MIN} minutes.${protectLine} Check lore history --branch ${into} to see whether it landed before anything else merges.`,
+      severity: 'blocker',
+    })
+
+    return out
+  })
+}
+
 async function watchClaim($: EngineInterface): Promise<void> {
   if (isWatching) return
   isWatching = true
   try {
     const path = await boundLedger($)
     if (path === undefined) return
-    const flight = parseLedger(await $.fs.read(path)).ledger?.merge
-    if (flight === undefined) return
+    const watched = parseLedger(await $.fs.read(path)).ledger
+    const flight = watched?.merge
+    if (flight === undefined || watched === undefined) return
+    if (flight.revision !== undefined) return await settleStuckLore($, path, watched)
     // A claim in a repository whose origin is not on GitHub is none the board made: nothing of it is asked there.
     if (!(await isAtForge($))) return
     const now = await $.clock.now()
@@ -2940,7 +2987,7 @@ export const register: Register = (on, options) => {
   on('tool.call', { tool: /^mcp__conductor__problem_resolve$/ }, ($, e) =>
     answer($, e as unknown as ToolCall, (raw, _at, caller, input) => resolveProblem(raw, caller, input)),
   ).catch(broke)
-  on('tool.call', { tool: /^mcp__conductor__run_sync_base$/ }, ($, e) => runSyncBase($, e as unknown as ToolCall)).catch(broke)
+  on('tool.call', { tool: /^mcp__conductor__run_sync_base$/ }, ($, e) => underWay(() => runSyncBase($, e as unknown as ToolCall))).catch(broke)
   on('tool.call', { tool: /^mcp__conductor__run_check$/ }, ($, e) => runCheckTool($, e as unknown as ToolCall)).catch(broke)
   on('tool.call', { tool: /^mcp__conductor__ticket_read$/ }, ($, e) => ticketRead($, e as unknown as ToolCall)).catch(broke)
   on('tool.call', { tool: /^mcp__conductor__ticket_file$/ }, ($, e) => ticketFile($, e as unknown as ToolCall)).catch(broke)
@@ -3178,7 +3225,7 @@ export const register: Register = (on, options) => {
   })
 
   on('command.run', { command: 'approve-main' }, async ($, e) => {
-    const text = await approveMain($, e.origin.kind)
+    const text = await underWay(() => approveMain($, e.origin.kind))
     seen = undefined
     await refresh($, false)
 
