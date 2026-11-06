@@ -106,7 +106,7 @@ describe('the guard reads options the way lore does (security review after the m
     for (const command of ['lore --repository /work/Big\\ Game\\ 5.8 commit x', `lore --repository=/elsewhere push`, 'cd /work/Big\\ Game\\ 5.8 && lore commit x', 'pushd /tmp; lore push', 'lore commit x --repository /elsewhere']) {
       expect(loreByHand(command, OWN), command).toBeDefined()
     }
-    for (const command of [`lore --repository "${OWN.ownWorkspace}" commit x`, 'builtin cd /x && lore commit x', '(cd /x && lore commit x)', '/usr/bin/cd /x; lore push', 'command pushd /x; lore push', 'lo\\\nre push x']) {
+    for (const command of [`lore --repository "${OWN.ownWorkspace}" commit x`, 'builtin cd /x && lore commit x', '(cd /x && lore commit x)', 'trap "cd /x" DEBUG; lore commit x', 'source ./go.sh; lore push', '. ./go.sh; lore push', 'f() { cd /x; }; f; lore push', 'alias c=cd; lore push', '/usr/bin/cd /x; lore push', 'command pushd /x; lore push', 'lo\\\nre push x']) {
       expect(loreByHand(command, OWN), command).toBeDefined()
     }
     expect(loreByHand('lore commit "t1: fix" && lore push', OWN)).toBeUndefined()
