@@ -1,5 +1,6 @@
 import type { Activity, ModelTier, ProblemSeverity, TaskStatus, Ticket } from '../types'
 import { LINEAR_KEY, RUN_ID, STATUSES, TIERS } from './ledger'
+import { REVISION } from './lore'
 import { LOOK_AGAIN_MIN, afterDone, dueForLook, isUnderway, lostWith, named, standing, standingText } from './problems'
 
 /**
@@ -439,6 +440,14 @@ export function updateTask(raw: Raw, at: string, caller: Caller, input: Record<s
     if (caller.kind === 'worker' && !WORKER_STATUSES.includes(status)) {
       return refused(`A worker sets its task to ${WORKER_STATUSES.join(', ')}; ${status} is the orchestrator's to set.`)
     }
+    // A Lore task is handed back with the revision its worker pushed: what its merge is pinned to.
+    const isLore = typeof (raw.run as Record<string, unknown> | undefined)?.lore === 'object'
+    if (status === 'review' && isLore && (input.revision ?? task.revision) === undefined) {
+      return refused(`${id} is handed back with the revision it pushed: {"task": "${id}", "status": "review", "revision": "<64 hex>"}. lore branch info shows it as Remote Latest once lore push went through.`)
+    }
+    if (status === 'done' && task.status !== 'done' && (input.revision ?? task.revision) !== undefined) {
+      return refused(`${id} has a branch with code on it, so it is done once that is merged into the run branch: call mcp__conductor__merge for it.`)
+    }
     // A task with a pull request is done once that is merged: the merge loop's to say, not a claim.
     if (status === 'done' && task.status !== 'done' && (input.pr ?? task.pr) !== undefined) {
       return refused(`${id} has a pull request, so it is done once that is merged: call mcp__conductor__merge for it (a pull request already merged by hand is taken over). The owner can also say so with /merged ${id}.`)
@@ -484,7 +493,14 @@ export function updateTask(raw: Raw, at: string, caller: Caller, input: Record<s
     task.branch = tidy(input.branch)
     said.push(`branch ${task.branch}`)
   }
-  if (said.length === 0) return refused('Nothing to change: give status, tier, note, ticket, pr or branch.')
+  if (input.revision !== undefined) {
+    if (typeof input.revision !== 'string' || !REVISION.test(input.revision)) return refused('revision is the Lore revision its branch was pushed at: 64 hex characters.')
+    // A new revision is a new change: a check run on another one says nothing of it.
+    if (task.revision !== input.revision) delete task.check
+    task.revision = input.revision
+    said.push(`revision ${input.revision.slice(0, 7)}`)
+  }
+  if (said.length === 0) return refused('Nothing to change: give status, tier, note, ticket, pr, branch or revision.')
 
   const base = `${id}: ${said.join(', ')}.`
   const lost = isNowFailed ? lostWith(raw, id) : []

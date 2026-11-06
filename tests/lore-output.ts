@@ -159,3 +159,10 @@ Calculating deltas 2 -> 1
 Verifying 1 changes with local file system
 Switched to branch conductor/S-1-spike revision ${REV_MAIN}
 `
+
+/** A push of the run branch after a merge into it (same shape as PUSH_FIRST, on an existing branch). */
+export const PUSH_RUN = `Pushing 6 fragment(s)
+Pushed 6 fragment(s), 595 bytes
+Pushing ${REV_RUN} to branch conductor/S-1-spike
+Pushed revision 3 -> ${REV_RUN} to branch conductor/S-1-spike
+`

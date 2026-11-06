@@ -33,8 +33,9 @@ import type { TaskRow } from './board'
 import { dashboardSvg } from './dashboard'
 import { KEEP, ROTATE_AT, carried, handover } from './handover'
 import { LINEAR_KEY, RUN_ID, STATUSES, TIERS, parseLedger } from './ledger'
+import { conflicted, letGo, loreReady, onRunBranch, rev7, startLoreMerge } from './lore-merge'
 import { LINEAR_API, M_CREATE, M_UPDATE, Q_ISSUE, Q_TEAM, apiKeyOf, createdOf, errorsOf, issueOf, issueText, stateFor, teamOf, updatedOf } from './linear'
-import { branchInfoOf, ignoreRules, pushOf, repositoryInfoOf, statusOf } from './lore'
+import { branchInfoOf, ignoreRules, mergeOf, pushOf, repositoryInfoOf, statusOf } from './lore'
 import { CONFIG_PATH, LORE_DEFAULTS, PLACEHOLDER_SNIPPET, hasPlaceholder, parseConfig, runsIgnored } from './project'
 import { isInside, removals, runBranchOf, runWorkspaceOf, taskBranchOf, topLevel, workspaceOf, workspacesOf } from './workspace'
 import type { RepositoryInfo } from './lore'
@@ -1482,6 +1483,94 @@ async function settle($: EngineInterface, path: string, change: (raw: Raw) => Ou
 }
 
 /**
+ * `merge` and `merge_check` in a Lore run: a judged task's branch into the
+ * run branch, pinned to the revision its worker handed back, one at a time,
+ * in the run's own workspace. `merge_check` stops before the claim and
+ * changes nothing.
+ */
+async function loreMergeTool($: EngineInterface, call: ToolCall, isCheckOnly: boolean): Promise<{ result: string; text: string; isError?: true }> {
+  const fail = (reason: string) => ({ isError: true as const, result: `${NOT_DONE} ${reason}`, text: `${NOT_DONE} ${reason}` })
+  const say = (text: string) => ({ result: text, text })
+  const path = await boundLedger($)
+  if (path === undefined) return fail(NOT_BOUND)
+  await remember($, path)
+  const ledger = parseLedger((await textAt($, path)) ?? '').ledger
+  if (ledger === undefined) return fail('The ledger does not read.')
+  const runLore = ledger.run.lore
+  if (runLore?.workspace === undefined) return fail('This run has no Lore workspace yet: it is made when the owner approves the plan with /approve.')
+  const run = runLore.workspace
+  const now = await $.clock.now()
+  const asked = loreReady(ledger, callerOf(call.agentId), call, await flights($, ledger.run.id, now))
+  if ('error' in asked) return fail(asked.error)
+  const { task, branch, revision } = asked
+  const id = task.id
+  const blocks = [...asked.blocks]
+  const head = branchInfoOf((await lore($, ['branch', 'info', branch], run)).out)?.remoteLatest
+  if (head === undefined) blocks.push(`lore did not say where ${branch} stands on the server.`)
+  else if (head !== revision) blocks.push(`${branch} moved since it was judged: it is at ${rev7(head)}, and ${rev7(revision)} was judged. Judge it again.`)
+  if (blocks.length > 0) return isCheckOnly ? say([`${id} cannot merge yet:`, ...blocks.map(one => `- ${one}`)].join('\n')) : fail([`${id} cannot merge yet:`, ...blocks.map(one => `- ${one}`)].join('\n'))
+  if (isCheckOnly) return say(`${id} may merge now: its branch ${branch} is at ${rev7(revision)}, as it was judged. It merges into ${runLore.branch}.`)
+
+  const at = iso(now)
+  const claimed = await mutate($, path, raw => {
+    const outcome = startLoreMerge(raw, at, { task: id, revision, target: 'run' })
+
+    return { value: outcome, isChanged: outcome.isChanged }
+  })
+  if (claimed.error !== undefined) return fail(claimed.error)
+  if (claimed.value.isError) return fail(claimed.value.text)
+  const giveUp = async (why: string) => {
+    const outcome = await settle($, path, raw => letGo(raw, why))
+
+    return fail(outcome?.text ?? `${id} was not merged: ${why}.`)
+  }
+  const synced = await lore($, ['branch', 'switch', runLore.branch, '--reset'], run, LONG_MS)
+  if (synced.exitCode !== 0) return giveUp(`the run's workspace could not be brought to ${runLore.branch}: ${lastLine(synced)}`)
+  const merged = await lore($, ['branch', 'merge', branch, '--message', `${id}: ${task.title}`], run, LONG_MS)
+  const outcome = mergeOf(merged.exitCode, merged.out)
+  if (outcome.kind === 'conflict') {
+    await lore($, ['branch', 'merge', 'abort'], run, LONG_MS)
+    const said = await settle($, path, raw => conflicted(raw, at, id, outcome.files))
+
+    return fail(said?.text ?? `${id} conflicts with the run branch; nothing was merged.`)
+  }
+  if (outcome.kind === 'failed') {
+    await lore($, ['branch', 'merge', 'abort'], run, LONG_MS)
+
+    return giveUp(`lore did not merge it: ${outcome.reason}`)
+  }
+  const pushed = await lore($, ['push'], run, LONG_MS)
+  const sent = pushOf(pushed.exitCode, pushed.out)
+  if (sent.kind !== 'pushed') return giveUp(`the merge could not be pushed: ${sent.kind === 'refused' ? sent.text : 'lore pushed nothing'}`)
+  // Its locks are let go, and its workspace removed when everything in it is in Lore.
+  await lore($, ['lock', 'release', '--branch', branch], run)
+  let workspaceLine = ''
+  if (task.workspace !== undefined) {
+    const scanned = await lore($, ['status', '--scan'], task.workspace, LONG_MS)
+    const status = statusOf(scanned.out)
+    if (status?.isClean === true && status.isInSync && isInside(workspacesOf((await backendOf($))?.root ?? '', ledger.run.config?.lore?.workspaces), task.workspace)) {
+      await runProgram($, ['rm', '-rf', '--', task.workspace], LONG_MS)
+      workspaceLine = 'Its workspace is removed: everything in it is in Lore.'
+    } else {
+      workspaceLine = `Its workspace is kept at ${task.workspace}: ${status === undefined ? 'lore could not read it' : 'it holds changes that are not pushed'}. Look at it before you remove it.`
+    }
+  }
+  const removed = workspaceLine.startsWith('Its workspace is removed')
+  const done = await settle($, path, raw => {
+    const result = onRunBranch(raw, iso(now), id, sent.revision, runLore.branch, workspaceLine)
+    const kept = raw.tasks.find(one => one.id === id)
+    if (removed && kept !== undefined) delete kept.workspace
+
+    return result
+  })
+  isolated.delete(id)
+  workspaces.delete(id)
+  await issueDone($, path, id)
+
+  return say(done?.text ?? `Merged: ${id} is on ${runLore.branch} as ${rev7(sent.revision)}, but the board could not be written.`)
+}
+
+/**
  * `merge` and `merge_check`: the one way a pull request of a run reaches the
  * base branch. The board's own side first, then GitHub's facts read just now,
  * then the claim, then the merge pinned to the head those facts graded.
@@ -1501,6 +1590,7 @@ async function mergeTool(
   const path = await boundLedger($)
   if (path === undefined) return fail(NOT_BOUND)
   // Before anything is asked of GitHub: a pull request's number means something only in a repository on GitHub.
+  if ((await backendOf($))?.kind === 'lore') return loreMergeTool($, call, isCheckOnly)
   if (!(await isAtForge($))) return fail(elsewhere(origin))
   await remember($, path)
   let ledger: Ledger
@@ -1830,6 +1920,7 @@ export const register: Register = (on, options) => {
           ticket: { anyOf: [{ type: 'integer', minimum: 1 }, { type: 'string', pattern: TICKET_PATTERN }], description: 'The issue it belongs to, a GitHub number or a Linear key like ABC-12; the orchestrator\'s to set.' },
           pr: { type: 'integer', minimum: 1, description: 'The pull request\'s number.' },
           branch: { type: 'string' },
+          revision: { type: 'string', pattern: '^[0-9a-f]{64}$', description: 'In Lore: the revision its branch was pushed at, which the merge is pinned to.' },
         },
         required: ['task'],
         additionalProperties: false,
