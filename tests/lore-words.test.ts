@@ -37,6 +37,36 @@ describe('a lore command by hand, in a bound Lore run', () => {
   })
 })
 
+describe('the guard fails closed where it cannot read a command', () => {
+  test('a substitution, another shell or a wrapper around lore is refused, for anyone', () => {
+    for (const command of ['echo $(lore branch merge x)', 'echo `lore push`', 'bash -c "lore push x"', 'sh -c \'lore sync\'', 'eval lore push', 'env lore push x', 'sudo lore branch unprotect main', 'xargs lore push < list', 'time lore push', 'nohup lore push &']) {
+      expect(loreByHand(command, WORKER), command).toBeDefined()
+      expect(loreByHand(command, ORCH), command).toBeDefined()
+    }
+  })
+
+  test('commands split on & and |& too, and an unknown option before the subcommand is refused', () => {
+    expect(loreByHand(`lore status & lore push ${RUN_BRANCH}/t2`, WORKER)).toBeDefined()
+    expect(loreByHand(`lore status |& lore push ${RUN_BRANCH}/t2`, WORKER)).toBeDefined()
+    expect(loreByHand('lore --weird branch merge x', WORKER)).toBeDefined()
+    expect(loreByHand('lore --non-interactive --log-level info status', ORCH)).toBeUndefined()
+  })
+
+  test('a worker may only what its own branch needs: an allowlist', () => {
+    for (const command of ['lore status --scan', 'lore stage --scan Source', 'lore commit "t1: fix"', 'lore diff a.txt', 'lore lock acquire Content/A.uasset', 'lore history --oneline 3', 'lore branch info']) {
+      expect(loreByHand(command, WORKER), command).toBeUndefined()
+    }
+    for (const command of ['lore layer add other', 'lore link add x y', `lore push --branch ${RUN_BRANCH}/t2`, `lore push --branch=${RUN_BRANCH}/t2`, `lore lock release --branch ${RUN_BRANCH}/t2`]) {
+      expect(loreByHand(command, WORKER), command).toBeDefined()
+    }
+    expect(loreByHand('lore push', { ...WORKER, ownBranch: undefined }), 'no own branch, no push').toBeDefined()
+  })
+
+  test('--scan= is a scan', () => {
+    expect(loreByHand('lore status --scan=true', ORCH)).toBeDefined()
+  })
+})
+
 describe('what a Lore run is told', () => {
   const RUNNING: Ledger = {
     ...RUN,
@@ -64,6 +94,12 @@ describe('what a Lore run is told', () => {
     expect(text).toContain(RUN_BRANCH)
     expect(text).not.toContain('pull request')
     expect(text).not.toContain('git status')
+  })
+
+  test('a helper the board knows of no task gets the read-only rules, not a worker\'s', async ($, on) => {
+    await lored($, on, RUNNING)
+    expect((await bash($, 'lore push', 'helper-9')).deny).toContain('/approve-main')
+    expect((await bash($, 'echo lorem ipsum')).deny, 'a word that only contains lore is no lore command').toBeUndefined()
   })
 
   test('a by-hand lore merge is refused in a bound session, and a worker pushing another branch too', async ($, on) => {

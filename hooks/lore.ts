@@ -312,64 +312,99 @@ const READS: readonly string[][] = [
   ['link', 'info'],
 ]
 
-/** What a worker may not run, even in its own workspace: whatever moves a branch other than its own. */
-const WORKER_NEVER: readonly string[][] = [
-  ['branch', 'merge'],
-  ['branch', 'switch'],
-  ['branch', 'create'],
-  ['branch', 'protect'],
-  ['branch', 'unprotect'],
-  ['branch', 'archive'],
-  ['branch', 'reset'],
-  ['branch', 'push'],
-  ['sync'],
-  ['revision', 'sync'],
-  ['revision', 'cherry-pick'],
-  ['revision', 'revert'],
-  ['revision', 'restore'],
-  ['repository', 'create'],
-  ['repository', 'delete'],
+/** What a worker may run in its own workspace: building on its own branch and reading. Anything else is refused. */
+const WORKER_MAY: readonly string[][] = [
+  ...READS,
+  ['stage'],
+  ['unstage'],
+  ['dirty'],
+  ['reset'],
+  ['commit'],
+  ['push'],
+  ['revision', 'commit'],
+  ['revision', 'amend'],
+  ['lock', 'acquire'],
+  ['lock', 'release'],
+  ['file', 'hash'],
+  ['repository', 'status'],
 ]
+
+/** Lore's global flags that take no value. */
+const FLAGS = new Set(['--non-interactive', '-d', '--debug', '-f', '--force', '--dry-run', '-P', '--no-pager', '--offline', '--remote', '--local'])
+
+/** Programs that run another program: lore behind one of them is not read, so it is refused. */
+const WRAPPERS = new Set(['env', 'command', 'sudo', 'doas', 'xargs', 'time', 'nohup', 'nice', 'exec', 'builtin', 'timeout', 'caffeinate', 'watch', 'parallel'])
 
 /** The words of one shell command, quotes taken off; a quote left open runs to the end. */
 const tokens = (segment: string): string[] => [...segment.matchAll(/"([^"]*)"?|'([^']*)'?|(\S+)/g)].map(found => found[1] ?? found[2] ?? found[3] ?? '')
 
+const isLore = (word: string | undefined): boolean => /(^|\/)lore$/.test(word ?? '')
+
+/** The value a command gives an option, as `--name value` or `--name=value`. */
+function optionValue(words: readonly string[], name: string): string | undefined {
+  for (let at = 0; at < words.length; at += 1) {
+    const word = words[at] ?? ''
+    if (word === name) return words[at + 1] ?? ''
+    if (word.startsWith(`${name}=`)) return word.slice(name.length + 1)
+  }
+
+  return undefined
+}
+
 /**
  * Whether a shell line runs `lore` by hand in a way a bound Lore run refuses:
- * a worker moving any branch but its own, or the orchestrator writing at all
- * (the mod does the Lore writes; the owner's workspace is only read). Answers
- * what the command does, or undefined. It reads the command's text, so a
- * `lore` hidden inside a script is not seen.
+ * a worker doing anything but build on its own branch, or the orchestrator
+ * (and any agent that is no task's worker) writing at all: the mod does the
+ * Lore writes, and the owner's workspace is only read. It fails closed: a
+ * line that runs lore inside a substitution, another shell or a wrapper, or
+ * with an option it does not know before the subcommand, is refused. Answers
+ * what the command does, or undefined. It reads the command's text, so lore
+ * run from inside a script file is not seen.
  */
 export function loreByHand(command: string, ctx: { base: string; runBranch?: string; ownBranch?: string; caller: 'orchestrator' | 'worker' }): string | undefined {
-  for (const segment of command.split(/&&|\|\||;|\||\n/)) {
+  if (!/(^|[^A-Za-z0-9_])lore($|[^A-Za-z0-9_])/.test(command)) return undefined
+  if (/\$\(|`|<\(|>\(/.test(command) || /(^|[\s;&|(])(?:bash|sh|zsh|dash|ksh|fish)\s+-[a-z]*c\b/.test(command) || /(^|[\s;&|(])eval\s/.test(command)) {
+    return 'runs lore inside a substitution or another shell, which the board cannot read'
+  }
+  for (const segment of command.split(/&&|\|\||\|&|;|\||&|\n/)) {
     const words = tokens(segment.trim())
     let at = 0
     while (at < words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[at] ?? '')) at += 1
-    if (!/(^|\/)lore$/.test(words[at] ?? '')) continue
+    if (!isLore(words[at])) {
+      if (words.some(isLore)) return WRAPPERS.has((words[at] ?? '').split('/').pop() ?? '') ? `runs lore behind ${words[at] ?? ''}` : 'runs lore in a way the board cannot read'
+      continue
+    }
     at += 1
-    const rest: string[] = []
+    // Lore's own options come before the subcommand: one the board does not know is not read past.
     for (; at < words.length; at += 1) {
       const word = words[at] ?? ''
+      if (!word.startsWith('-')) break
+      if (FLAGS.has(word)) continue
       if (VALUE_OPTIONS.has(word)) {
         at += 1
         continue
       }
-      if (word.startsWith('--') && word.includes('=')) continue
-      rest.push(word)
+      if ([...VALUE_OPTIONS].some(one => word.startsWith(`${one}=`))) continue
+
+      return `runs lore with an option the board does not know: ${word}`
     }
+    const rest = words.slice(at)
     const positional = rest.filter(one => !one.startsWith('-'))
     const is = (path: readonly string[]): boolean => path.every((one, index) => positional[index] === one)
-    const name = positional.slice(0, 2).join(' ')
+    const name = positional.slice(0, 2).join(' ') || '(nothing)'
+    const isScan = rest.some(one => one === '--scan' || one.startsWith('--scan='))
     if (ctx.caller === 'worker') {
-      if (WORKER_NEVER.some(is)) return `runs lore ${name}`
+      if (!WORKER_MAY.some(is)) return `runs lore ${name}`
+      const branch = optionValue(rest, '--branch') ?? optionValue(rest, '-b')
+      if (branch !== undefined && branch !== ctx.ownBranch) return `names the branch ${branch || '(none)'}`
       if (is(['push'])) {
+        if (ctx.ownBranch === undefined) return 'pushes, and this worker has no branch of its own yet'
         const target = positional[1]
         if (target !== undefined && target !== ctx.ownBranch) return `pushes ${target}`
       }
       continue
     }
-    if (!READS.some(is) || (is(['status']) && rest.includes('--scan'))) return `runs lore ${name === '' ? '(nothing)' : name}${rest.includes('--scan') ? ' --scan' : ''}`
+    if (!READS.some(is) || (is(['status']) && isScan)) return `runs lore ${name}${isScan ? ' --scan' : ''}`
   }
 
   return undefined

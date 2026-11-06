@@ -2682,11 +2682,14 @@ export const register: Register = (on, options) => {
     }
     const taskId = call.agentId === undefined ? undefined : agents.get(call.agentId)
     // In a bound Lore run the mod does the Lore writes: a worker moves only its own branch, the orchestrator only reads.
-    if (call.tool === 'Bash' && typeof call.command === 'string' && /(^|[\s/;&|])lore(\s|$)/.test(call.command) && (await backendOf($))?.kind === 'lore') {
+    if (call.tool === 'Bash' && typeof call.command === 'string' && call.command.includes('lore') && (await backendOf($))?.kind === 'lore') {
       const path = await boundLedger($).catch(() => undefined)
-      const runLore = path === undefined ? undefined : parseLedger((await textAt($, path)) ?? '').ledger?.run.lore
+      const boundRun = path === undefined ? undefined : parseLedger((await textAt($, path)) ?? '').ledger
+      const runLore = boundRun?.run.lore
       if (runLore !== undefined) {
-        const isWorker = call.agentId !== undefined
+        // A worker is an agent that holds a task with a workspace of its own; any other agent (a helper, a worker's own
+        // subagent the board does not know) gets the orchestrator's read-only rules.
+        const isWorker = call.agentId !== undefined && taskId !== undefined && (isolated.has(taskId) || boundRun?.tasks.find(one => one.id === taskId)?.workspace !== undefined)
         const own = isWorker && taskId !== undefined ? taskBranchOf(runLore.branch, taskId) : undefined
         const what = loreByHand(call.command, { base: runLore.base, runBranch: runLore.branch, ownBranch: own, caller: isWorker ? 'worker' : 'orchestrator' })
         if (what !== undefined) {
