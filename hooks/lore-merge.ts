@@ -7,7 +7,7 @@
 
 import type { Ledger, Task } from '../types'
 import type { Flight } from './merge'
-import { afterDone, lookLines } from './problems'
+import { afterDone, lookLines, named, unsettled } from './problems'
 import { changed, refused } from './signals'
 import type { Caller, Outcome, Raw } from './signals'
 
@@ -111,4 +111,52 @@ export function letGo(raw: Raw, why: string): Outcome {
   const text = `Run board: ${String(flight.task)} was not merged: ${why}. The claim is let go; it stands where it stood.`
 
   return { ...changed(text), tell: text }
+}
+
+/**
+ * What stands in the way of the run branch going into the base branch: a
+ * task not merged into the run branch yet, an open blocker or warning, a
+ * merge in flight, a pause, or the project's check not passed on the run
+ * branch's head. Empty means ready.
+ */
+export function readyForBase(ledger: Ledger, head: string | undefined): string[] {
+  const base = ledger.run.lore?.base ?? 'the base branch'
+  const blocks = ledger.tasks.filter(one => one.status !== 'done').map(one => `${one.id} is ${one.status}: every task is merged into the run branch first.`)
+  const open = unsettled(ledger)
+  if (open.length > 0) blocks.push(`${named(open.map(one => one.id))} ${open.length === 1 ? 'is' : 'are'} open: a run with a blocker or a warning open does not go into ${base}.`)
+  if (ledger.merge !== undefined) blocks.push(`${ledger.merge.task} is still merging.`)
+  if (ledger.run.pausedAt !== undefined) blocks.push(`The run is paused since ${ledger.run.pausedAt}: nothing is merged until /unpause.`)
+  const check = ledger.run.config?.check
+  if (check !== undefined && head !== undefined && (ledger.run.check?.revision !== head || ledger.run.check.verdict !== 'passed')) {
+    blocks.push(`the check (${check.argv.join(' ')}) has not passed on the run branch's head ${rev7(head)}.`)
+  }
+
+  return blocks
+}
+
+/** The owner's approval of the run branch's revision, and where the base stood then. */
+export function approvedMain(raw: Raw, at: string, approval: { revision: string; base: string }): Outcome {
+  const run = raw.run as Loose
+  run.approval = { revision: approval.revision, base: approval.base, at }
+
+  return changed(`Approved ${rev7(approval.revision)} for the base branch.`)
+}
+
+/** The run branch is on the base branch: the run is merged. */
+export function onBase(raw: Raw, at: string, revision: string, base: string): Outcome {
+  const run = raw.run as Loose
+  run.merged = { revision, at }
+  delete (raw as { merge?: Loose }).merge
+
+  return changed(`Merged: run ${String(run.id)} is on ${base} as ${rev7(revision)}.`)
+}
+
+/** The base branch was brought into the run branch: what it took in is kept, and an approval made before it covers it no more. */
+export function baseBroughtIn(raw: Raw, baseAt: string): Outcome {
+  const run = raw.run as Loose & { lore?: Loose }
+  if (run.lore === undefined) return refused('This run has no Lore branch.')
+  run.lore.baseAt = baseAt
+  delete run.approval
+
+  return changed(`The run branch took in the base branch at ${rev7(baseAt)}.`)
 }

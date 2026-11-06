@@ -208,4 +208,26 @@ describe('Linear states the mod moves itself', () => {
     expect(said.text).toContain(`is on main as ${mergeCommit(548).slice(0, 7)}`)
     expect(engine.linear.updated).toEqual([{ id: 'issue-ABC-13', input: { stateId: 's-done' } }])
   })
+
+  test("in git, the run's own issue moves to completed once its last task is done", async ($, on) => {
+    mock.clock(on, { now: NOW })
+    const only = LEDGER.tasks.filter(one => one.id === 't395-1').map(one => ({ ...one, ticket: 'ABC-13', dependsOn: undefined }))
+    const ledger: Ledger = { ...LEDGER, run: { ...LEDGER.run, tickets: 'linear', source: 'ABC-12' }, tasks: only, problems: [], posts: [], rulings: [] }
+    const files: Files = { [ledgerPath('demo')]: file(ledger, 1) }
+    const engine = world(on, files)
+    engine.env.LINEAR_API_KEY = LINEAR_TOKEN
+    engine.linear.issues['ABC-12'] = issue('ABC-12', { state: { name: 'In Progress', type: 'started' } })
+    engine.linear.issues['ABC-13'] = issue('ABC-13', { state: { name: 'In Progress', type: 'started' } })
+    engine.forge.pulls[548] = pull('b'.repeat(40), { title: 'Daily cap thresholds', body: 'Two thresholds per UTC day.\n\nCloses #395' })
+    engine.forge.checks['b'.repeat(40)] = ci('success')
+    await start($)
+    await board($, 'demo')
+
+    await call($, 'merge', { task: 't395-1', told: [], closes: [395] })
+    expect(engine.linear.updated).toEqual([
+      { id: 'issue-ABC-13', input: { stateId: 's-done' } },
+      { id: 'issue-ABC-12', input: { stateId: 's-done' } },
+    ])
+  })
 })
+

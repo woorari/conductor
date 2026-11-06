@@ -428,7 +428,8 @@ function check(ledger: Ledger): void {
       throw new Refused(`post ${one.id}: from names ${show(one.from)}, which is neither a task of this run nor the orchestrator`)
     }
   }
-  if (ledger.merge !== undefined && !known.has(ledger.merge.task)) {
+  // A Lore merge into the base branch is the run's own: its task names the run.
+  if (ledger.merge !== undefined && ledger.merge.target !== 'base' && !known.has(ledger.merge.task)) {
     throw new Refused(`merge: task names ${show(ledger.merge.task)}, which is no task of this run`)
   }
   const loop = cycle(ledger.tasks)

@@ -33,7 +33,7 @@ import type { TaskRow } from './board'
 import { dashboardSvg } from './dashboard'
 import { KEEP, ROTATE_AT, carried, handover } from './handover'
 import { LINEAR_KEY, RUN_ID, STATUSES, TIERS, parseLedger } from './ledger'
-import { conflicted, letGo, loreReady, onRunBranch, rev7, startLoreMerge } from './lore-merge'
+import { approvedMain, baseBroughtIn, conflicted, letGo, loreReady, onBase, onRunBranch, readyForBase, rev7, startLoreMerge } from './lore-merge'
 import { LINEAR_API, M_CREATE, M_UPDATE, Q_ISSUE, Q_TEAM, apiKeyOf, createdOf, errorsOf, issueOf, issueText, stateFor, teamOf, updatedOf } from './linear'
 import { branchInfoOf, ignoreRules, mergeOf, pushOf, repositoryInfoOf, statusOf } from './lore'
 import { CONFIG_PATH, LORE_DEFAULTS, PLACEHOLDER_SNIPPET, hasPlaceholder, parseConfig, runsIgnored } from './project'
@@ -1297,11 +1297,21 @@ async function moveIssue($: EngineInterface, path: string, key: string, type: 's
   }
 }
 
-/** A task that is done moves its Linear issue to completed, when its ticket is one. Never throws. */
+/**
+ * A task that is done moves its Linear issue to completed, when its ticket is
+ * one. In a git run with its tickets in Linear, the run's own issue follows
+ * once every task is done; a Lore run's moves when it reaches the base
+ * branch. Never throws.
+ */
 async function issueDone($: EngineInterface, path: string, taskId: string): Promise<void> {
   try {
-    const ticket = parseLedger(await $.fs.read(path)).ledger?.tasks.find(one => one.id === taskId)?.ticket
+    const ledger = parseLedger(await $.fs.read(path)).ledger
+    const ticket = ledger?.tasks.find(one => one.id === taskId)?.ticket
     if (typeof ticket === 'string') await moveIssue($, path, ticket, 'completed')
+    if (ledger === undefined || ledger.run.tickets !== 'linear' || ledger.run.lore !== undefined) return
+    if (!ledger.tasks.every(one => one.status === 'done')) return
+    const issue = ledger.run.issue ?? (LINEAR_KEY.test(ledger.run.source ?? '') ? ledger.run.source : undefined)
+    if (issue !== undefined && issue !== ticket) await moveIssue($, path, issue, 'completed')
   } catch {
     // Nothing to move.
   }
@@ -1480,6 +1490,153 @@ async function settle($: EngineInterface, path: string, change: (raw: Raw) => Ou
   carry(written.value)
 
   return written.value
+}
+
+/** The origins of a command that are the owner's own hand: the terminal, the desktop app, the owner's Remote Control. */
+const OWNER_ORIGINS: ReadonlySet<string> = new Set(['composer', 'sdk', 'bridge'])
+
+/** What a run's Lore side is, read for its base-branch commands; or why there is none. */
+async function loreRunOf($: EngineInterface): Promise<{ path: string; ledger: Ledger; runLore: NonNullable<Ledger['run']['lore']>; run: string } | { text: string }> {
+  const path = await boundLedger($)
+  if (path === undefined) return { text: await unbound($) }
+  const ledger = parseLedger((await textAt($, path)) ?? '').ledger
+  if (ledger === undefined) return { text: 'The ledger does not read.' }
+  const runLore = ledger.run.lore
+  if (runLore?.workspace === undefined) return { text: 'This run has no Lore workspace yet: it is made when the owner approves the plan with /approve.' }
+
+  return { path, ledger, runLore, run: runLore.workspace }
+}
+
+/**
+ * `/approve-main`: the owner approves the run branch's revision for the base
+ * branch, and the mod merges exactly that revision into the protected base,
+ * protecting it again whatever happens. Refused while anything stands in the
+ * way, when the run branch moved, or when the base moved since the run branch
+ * last took it in.
+ */
+async function approveMain($: EngineInterface, origin: string): Promise<string> {
+  if (!OWNER_ORIGINS.has(origin)) return 'Not done. /approve-main is the owner\'s: only the owner types it, in the terminal, the desktop app or Remote Control. Nothing was merged.'
+  const found = await loreRunOf($)
+  if ('text' in found) return found.text
+  const { path, ledger, runLore, run } = found
+  const base = runLore.base
+  const head = branchInfoOf((await lore($, ['branch', 'info', runLore.branch], run)).out)?.remoteLatest
+  const baseNow = branchInfoOf((await lore($, ['branch', 'info', base], run)).out)?.remoteLatest
+  if (head === undefined || baseNow === undefined) return `Nothing was merged: lore did not say where ${head === undefined ? runLore.branch : base} stands on the server.`
+  const blocks = readyForBase(ledger, head)
+  if (blocks.length > 0) return [`The run cannot go into ${base} yet:`, ...blocks.map(one => `- ${one}`)].join('\n')
+  if (baseNow !== runLore.baseAt) {
+    return `Nothing was merged: ${base} moved since the run branch last took it in (it is at ${rev7(baseNow)}; the run branch took in ${runLore.baseAt === undefined ? 'no revision of it on record' : rev7(runLore.baseAt)}). Merging into it now would land a result nobody approved. Ask the orchestrator to bring it in with mcp__conductor__run_sync_base, then approve again.`
+  }
+  const at = iso(await $.clock.now())
+  const claimed = await mutate($, path, raw => {
+    approvedMain(raw, at, { revision: head, base: baseNow })
+    const outcome = startLoreMerge(raw, at, { task: ledger.run.id, revision: head, target: 'base' })
+
+    return { value: outcome, isChanged: true }
+  })
+  if (claimed.error !== undefined) return `Nothing was merged: ${claimed.error}`
+  if (claimed.value.isError) return `Nothing was merged: ${claimed.value.text}`
+  const giveUp = async (why: string): Promise<string> => (await settle($, path, raw => letGo(raw, why)))?.text ?? `Nothing was merged: ${why}.`
+  const synced = await lore($, ['branch', 'switch', runLore.branch, '--reset'], run, LONG_MS)
+  const status = statusOf((await lore($, ['status'], run)).out)
+  if (synced.exitCode !== 0 || status === undefined) return giveUp(`the run's workspace could not be brought to ${runLore.branch}`)
+  if (status.revision !== head) return giveUp(`${runLore.branch} moved after the approval (it is at ${rev7(status.revision)}, ${rev7(head)} was approved): approve again`)
+  const unprotected = await lore($, ['branch', 'unprotect', base], run)
+  if (unprotected.exitCode !== 0) return giveUp(`${base} could not be unprotected for the merge: ${lastLine(unprotected)}`)
+  let outcome: ReturnType<typeof mergeOf> = { kind: 'failed', reason: 'it did not run' }
+  let protectedAgain: Ran | undefined
+  try {
+    const merged = await lore($, ['branch', 'merge', 'into', base, `Run ${ledger.run.id}: ${ledger.run.title}`], run, LONG_MS)
+    outcome = mergeOf(merged.exitCode, merged.out)
+  } finally {
+    // Whatever the merge did, the base branch is protected again.
+    protectedAgain = await lore($, ['branch', 'protect', base], run)
+  }
+  let protectLine = ''
+  if (protectedAgain.exitCode !== 0) {
+    protectLine = ` ${base} could not be protected again (${lastLine(protectedAgain)}): it is a blocker on the board. Protect it by hand with lore branch protect ${base}.`
+    const failedAt = iso(await $.clock.now())
+    await mutate($, path, raw => {
+      const outcome2 = reportProblem(raw, failedAt, { kind: 'orchestrator' }, { text: `${base} is not protected: lore branch protect ${base} failed after the run's merge (${lastLine(protectedAgain!)}). Protect it by hand.`, severity: 'blocker' })
+
+      return { value: outcome2, isChanged: outcome2.isChanged }
+    })
+  }
+  if (outcome.kind !== 'merged') return `${await giveUp(`lore did not merge it into ${base}: ${outcome.kind === 'conflict' ? `conflicts in ${outcome.files.join(', ')}` : outcome.reason}`)}${protectLine}`
+  const landed = outcome.revision
+  const done = await settle($, path, raw => onBase(raw, at, landed, base))
+  const issue = ledger.run.issue ?? (LINEAR_KEY.test(ledger.run.source ?? '') ? ledger.run.source : undefined)
+  if (issue !== undefined) await moveIssue($, path, issue, 'completed')
+  const notArchived: string[] = []
+  for (const one of ledger.tasks) {
+    if (one.branch === undefined) continue
+    const archived = await lore($, ['branch', 'archive', taskBranchOf(runLore.branch, one.id)], run)
+    if (archived.exitCode !== 0) notArchived.push(one.id)
+  }
+  const kept: string[] = []
+  for (const folder of [...ledger.tasks.flatMap(one => (one.workspace === undefined ? [] : [one.workspace])), run]) {
+    const scanned = statusOf((await lore($, ['status', '--scan'], folder, LONG_MS)).out)
+    const here = await backendOf($)
+    if (scanned?.isClean === true && scanned.isInSync && here !== null && isInside(workspacesOf(here.root, ledger.run.config?.lore?.workspaces), folder)) await runProgram($, ['rm', '-rf', '--', folder], LONG_MS)
+    else kept.push(folder)
+  }
+  const tail = [
+    notArchived.length === 0 ? "Its tasks' branches are archived." : `The branches of ${notArchived.join(', ')} could not be archived.`,
+    kept.length === 0 ? 'Its workspaces are removed.' : `Kept, with changes not pushed: ${kept.join(', ')}.`,
+  ].join(' ')
+
+  return `${done?.text ?? `Merged: run ${ledger.run.id} is on ${base} as ${rev7(landed)}.`} ${tail}${protectLine}`
+}
+
+/** `run_sync_base`: the orchestrator has the mod bring the base branch into the run branch, so the run can be approved again. */
+async function runSyncBase($: EngineInterface, call: ToolCall): Promise<{ result: string; text: string; isError?: true }> {
+  const fail = (reason: string) => ({ isError: true as const, result: `${NOT_DONE} ${reason}`, text: `${NOT_DONE} ${reason}` })
+  const say = (text: string) => ({ result: text, text })
+  if (callerOf(call.agentId).kind !== 'orchestrator') return fail('Only the orchestrator brings the base branch in.')
+  const found = await loreRunOf($)
+  if ('text' in found) return fail(found.text)
+  const { path, ledger, runLore, run } = found
+  const base = runLore.base
+  if (ledger.merge !== undefined) return fail(`${ledger.merge.task} is still merging: one merge at a time.`)
+  const baseNow = branchInfoOf((await lore($, ['branch', 'info', base], run)).out)?.remoteLatest
+  if (baseNow === undefined) return fail(`lore did not say where ${base} stands on the server.`)
+  const synced = await lore($, ['branch', 'switch', runLore.branch, '--reset'], run, LONG_MS)
+  if (synced.exitCode !== 0) return fail(`the run's workspace could not be brought to ${runLore.branch}: ${lastLine(synced)}.`)
+  const runHead = branchInfoOf((await lore($, ['branch', 'info', runLore.branch], run)).out)?.remoteLatest
+  const merged = await lore($, ['branch', 'merge', base, `--message=Bring ${base} into ${runLore.branch}`], run, LONG_MS)
+  const outcome = mergeOf(merged.exitCode, merged.out)
+  const at = iso(await $.clock.now())
+  if (outcome.kind === 'conflict') {
+    await lore($, ['branch', 'merge', 'abort'], run, LONG_MS)
+    const files = outcome.files.join(', ') || 'files lore did not name'
+    await mutate($, path, raw => {
+      const reported = reportProblem(raw, at, { kind: 'orchestrator' }, { text: `Bringing ${base} into ${runLore.branch} conflicts in: ${files}. Give it a task that resolves it on the run branch, then call run_sync_base again.`, severity: 'blocker' })
+
+      return { value: reported, isChanged: reported.isChanged }
+    })
+
+    return fail(`${base} conflicts with ${runLore.branch} in: ${files}. Nothing was merged; it is a blocker on the board.`)
+  }
+  if (outcome.kind === 'failed') {
+    await lore($, ['branch', 'merge', 'abort'], run, LONG_MS)
+
+    return fail(`lore did not bring ${base} in: ${outcome.reason}.`)
+  }
+  if (outcome.source !== undefined && outcome.source !== baseNow) {
+    if (runHead !== undefined) await lore($, ['branch', 'reset', runHead, '--branch', runLore.branch], run)
+    await lore($, ['branch', 'switch', runLore.branch, '--reset'], run, LONG_MS)
+
+    return fail(`${base} moved while it was brought in. Nothing was pushed: call run_sync_base again.`)
+  }
+  const sent = await lore($, ['push'], run, LONG_MS)
+  const result = pushOf(sent.exitCode, sent.out)
+  if (result.kind === 'refused') return fail(`the run branch could not be pushed: ${result.text}.`)
+  const written = await settle($, path, raw => baseBroughtIn(raw, baseNow))
+  if (written === undefined) return fail('the board could not be written.')
+  const landed = result.kind === 'pushed' ? rev7(result.revision) : rev7(outcome.revision)
+
+  return say(`Brought ${base} into ${runLore.branch} as ${landed}. A new approval is needed: tell the owner what changed and ask them to type /approve-main.`)
 }
 
 /**
@@ -2122,6 +2279,19 @@ export const register: Register = (on, options) => {
       },
       isDeferred: false,
     })
+    if ((await backendOf($))?.kind === 'lore') {
+      await listCommand($, {
+        name: 'approve-main',
+        description: 'Approve the run branch for the base branch: the mod merges exactly its revision now, and protects the base again',
+      })
+      await listTool($, {
+        name: 'run_sync_base',
+        description:
+          "Run board: the orchestrator has the mod bring the base branch into the run branch, when it moved since the run branch last took it in. A conflict is a blocker on the board. Afterwards the owner approves again with /approve-main.",
+        inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+        isDeferred: false,
+      })
+    }
     if (await wantsLinear($)) {
       await listTool($, {
         name: 'ticket_read',
@@ -2459,6 +2629,7 @@ export const register: Register = (on, options) => {
   on('tool.call', { tool: /^mcp__conductor__problem_resolve$/ }, ($, e) =>
     answer($, e as unknown as ToolCall, (raw, _at, caller, input) => resolveProblem(raw, caller, input)),
   ).catch(broke)
+  on('tool.call', { tool: /^mcp__conductor__run_sync_base$/ }, ($, e) => runSyncBase($, e as unknown as ToolCall)).catch(broke)
   on('tool.call', { tool: /^mcp__conductor__ticket_read$/ }, ($, e) => ticketRead($, e as unknown as ToolCall)).catch(broke)
   on('tool.call', { tool: /^mcp__conductor__ticket_file$/ }, ($, e) => ticketFile($, e as unknown as ToolCall)).catch(broke)
   on('tool.call', { tool: /^mcp__conductor__problem_assign$/ }, ($, e) =>
@@ -2666,6 +2837,14 @@ export const register: Register = (on, options) => {
     await refresh($, false)
 
     return { text: written.value.text }
+  })
+
+  on('command.run', { command: 'approve-main' }, async ($, e) => {
+    const text = await approveMain($, e.origin.kind)
+    seen = undefined
+    await refresh($, false)
+
+    return { text }
   })
 
   on('command.run', { command: 'pause' }, $ => hold($, true))
