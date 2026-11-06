@@ -183,3 +183,12 @@ test('once the last task is merged, the run branch\'s own check starts in the ru
   expect(checks.map(one => one.argv[4])).toEqual([RUN_WS])
   expect(checks[0]?.env).toEqual({ OUT: `${LORE_RUNS}/ABC-12/checks/_run-${REV_RUN.slice(0, 7)}.log` })
 })
+
+test('a task is never merged onto a run branch head the board did not leave', async ($, on) => {
+  const { files, engine } = await green($, on, { ...GREEN, run: { ...GREEN.run, lore: { ...GREEN.run.lore!, head: REV_RUN } } })
+
+  const said = await call($, 'merge', MERGE)
+  expect(said.text).toContain('nobody judged')
+  expect(ranIn(engine, RUN_WS).some(one => one.startsWith(`branch merge ${T1_BRANCH}`))).toBe(false)
+  expect(stored(files).merge).toBeUndefined()
+})

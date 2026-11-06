@@ -171,3 +171,53 @@ test('a run branch head the board did not merge is never approved', async ($, on
   expect(ranIn(engine, RUN_WS)).not.toContain('branch unprotect main')
   expect(stored(files).run.approval).toBeUndefined()
 })
+
+test('a failed unprotect still protects the base again', async ($, on) => {
+  const { files, engine } = await finished($, on)
+  engine.lore.unshift(answers(['branch', 'unprotect'], { exitCode: 1, stdout: '[Error] Request handler timeout exceeded' }))
+
+  const said = await approveMain($)
+  expect(said.text).toContain('could not be unprotected')
+  const ran = ranIn(engine, RUN_WS)
+  expect(ran.indexOf('branch protect main')).toBeGreaterThan(ran.indexOf('branch unprotect main'))
+  expect(stored(files).merge).toBeUndefined()
+})
+
+test('another run merging holds /approve-main', async ($, on) => {
+  const { files, engine } = await finished($, on)
+  const other: Ledger = { ...RUN, run: { ...RUN.run, id: 'other' }, merge: { task: 'other', revision: REV_RUN, target: 'base', state: 'merging', startedAt: '2026-10-09T10:29:00.000Z' } }
+  files['/work/Big Game 5.8/.claude/conductor/runs/other/ledger.json'] = { text: JSON.stringify(other), mtimeMs: 1 }
+
+  const said = await approveMain($)
+  expect(said.text).toContain('Run other is merging')
+  expect(ranIn(engine, RUN_WS)).not.toContain('branch unprotect main')
+})
+
+test('a base that moves during the approval is not merged into, and is protected again', async ($, on) => {
+  const { files, engine } = await finished($, on)
+  let looks = 0
+  engine.lore.unshift({
+    match: argv => argv.slice(1).filter(one => one !== '--non-interactive').join(' ') === 'branch info main',
+    answer: () => {
+      looks += 1
+
+      return { exitCode: 0, stdout: info('main', looks === 1 ? REV_MAIN : REV_ON_MAIN) }
+    },
+  })
+
+  const said = await approveMain($)
+  expect(said.text).toContain('moved')
+  const ran = ranIn(engine, RUN_WS)
+  expect(ran.some(one => one.startsWith('branch merge into'))).toBe(false)
+  expect(ran.at(-1)).toBe('branch protect main')
+  expect(stored(files).run.merged).toBeUndefined()
+})
+
+test('run_sync_base never builds on a run branch head the board did not leave', async ($, on) => {
+  const { engine } = await finished($, on)
+  engine.lore.unshift(answers(['branch', 'info', RUN_BRANCH], ok(info(RUN_BRANCH, REV_MAIN))))
+
+  const said = await call($, 'run_sync_base', {})
+  expect(said.text).toContain('nobody judged')
+  expect(ranIn(engine, RUN_WS).some(one => one.startsWith('branch merge main'))).toBe(false)
+})

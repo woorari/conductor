@@ -732,13 +732,15 @@ async function loreApprove($: EngineInterface, path: string): Promise<string | u
   const baseAt = branchInfoOf((await lore($, ['branch', 'info', runLore.base], workspace)).out)?.remoteLatest
   if (baseAt === undefined) return `lore did not say where ${runLore.base} stands.`
   const runHead = branchInfoOf((await lore($, ['branch', 'info', runLore.branch], workspace)).out)?.remoteLatest
+  // A run branch that was there already is taken only when it stands where the board knows it: else it may hold work nobody judged.
+  if (runHead !== (runLore.head ?? baseAt)) return `${runLore.branch} is at ${runHead === undefined ? 'a revision lore did not say' : rev7(runHead)}, not at ${rev7(runLore.head ?? baseAt)} where the board expects it: it holds work nobody judged. Archive it (lore branch archive ${runLore.branch}) or start the run under another name.`
   const written = await mutate($, path, raw => {
     const kept = (raw.run as { lore?: Record<string, unknown> }).lore
     if (kept === undefined) return { value: false, isChanged: false }
     kept.workspace = workspace
     kept.baseAt = baseAt
     // A run branch just made from the base stands where the base stands; one made before keeps the head it had.
-    kept.head ??= runHead ?? baseAt
+    kept.head ??= baseAt
 
     return { value: true, isChanged: true }
   })
@@ -1694,6 +1696,8 @@ async function approveMain($: EngineInterface, origin: string): Promise<string> 
   if (head === undefined || baseNow === undefined) return `Nothing was merged: lore did not say where ${head === undefined ? runLore.branch : base} stands on the server.`
   const blocks = readyForBase(ledger, head)
   if (blocks.length > 0) return [`The run cannot go into ${base} yet:`, ...blocks.map(one => `- ${one}`)].join('\n')
+  const other = (await flights($, ledger.run.id, await $.clock.now()))[0]
+  if (other !== undefined) return `Nothing was merged: Run ${other.run} is merging ${other.task} since ${other.startedAt}. One merge at a time, across runs too: approve again once it is settled.`
   if (baseNow !== runLore.baseAt) {
     return `Nothing was merged: ${base} moved since the run branch last took it in (it is at ${rev7(baseNow)}; the run branch took in ${runLore.baseAt === undefined ? 'no revision of it on record' : rev7(runLore.baseAt)}). Merging into it now would land a result nobody approved. Ask the orchestrator to bring it in with mcp__conductor__run_sync_base, then approve again.`
   }
@@ -1711,13 +1715,21 @@ async function approveMain($: EngineInterface, origin: string): Promise<string> 
   const status = statusOf((await lore($, ['status'], run)).out)
   if (synced.exitCode !== 0 || status === undefined) return giveUp(`the run's workspace could not be brought to ${runLore.branch}`)
   if (status.revision !== head) return giveUp(`${runLore.branch} moved after the approval (it is at ${rev7(status.revision)}, ${rev7(head)} was approved): approve again`)
-  const unprotected = await lore($, ['branch', 'unprotect', base], run)
-  if (unprotected.exitCode !== 0) return giveUp(`${base} could not be unprotected for the merge: ${lastLine(unprotected)}`)
   let outcome: ReturnType<typeof mergeOf> = { kind: 'failed', reason: 'it did not run' }
   let protectedAgain: Ran | undefined
   try {
-    const merged = await lore($, ['branch', 'merge', 'into', base, `Run ${ledger.run.id}: ${ledger.run.title}`], run, LONG_MS)
-    outcome = mergeOf(merged.exitCode, merged.out)
+    // Even an unprotect that failed may have gone through on the server before it timed out: the finally protects again.
+    const unprotected = await lore($, ['branch', 'unprotect', base], run)
+    if (unprotected.exitCode !== 0) outcome = { kind: 'failed', reason: `${base} could not be unprotected for the merge: ${lastLine(unprotected)}` }
+    else {
+      // The base is read once more right before the merge: another merge may have landed since the look above.
+      const baseAgain = branchInfoOf((await lore($, ['branch', 'info', base], run)).out)?.remoteLatest
+      if (baseAgain !== baseNow) outcome = { kind: 'failed', reason: `${base} moved during the approval (it is at ${baseAgain === undefined ? 'a revision lore did not say' : rev7(baseAgain)}): bring it in with run_sync_base and approve again` }
+      else {
+        const merged = await lore($, ['branch', 'merge', 'into', base, `Run ${ledger.run.id}: ${ledger.run.title}`], run, LONG_MS)
+        outcome = mergeOf(merged.exitCode, merged.out)
+      }
+    }
   } finally {
     // Whatever the merge did, the base branch is protected again.
     protectedAgain = await lore($, ['branch', 'protect', base], run)
@@ -1732,7 +1744,7 @@ async function approveMain($: EngineInterface, origin: string): Promise<string> 
       return { value: outcome2, isChanged: outcome2.isChanged }
     })
   }
-  if (outcome.kind !== 'merged') return `${await giveUp(`lore did not merge it into ${base}: ${outcome.kind === 'conflict' ? `conflicts in ${outcome.files.join(', ')}` : outcome.reason}`)}${protectLine}`
+  if (outcome.kind !== 'merged') return `${await giveUp(outcome.kind === 'conflict' ? `lore did not merge it into ${base}: conflicts in ${outcome.files.join(', ')}` : outcome.reason)}${protectLine}`
   const landed = outcome.revision
   const done = await settle($, path, raw => onBase(raw, at, landed, base))
   const issue = ledger.run.issue ?? (LINEAR_KEY.test(ledger.run.source ?? '') ? ledger.run.source : undefined)
@@ -1773,6 +1785,9 @@ async function runSyncBase($: EngineInterface, call: ToolCall): Promise<{ result
   const synced = await lore($, ['branch', 'switch', runLore.branch, '--reset'], run, LONG_MS)
   if (synced.exitCode !== 0) return fail(`the run's workspace could not be brought to ${runLore.branch}: ${lastLine(synced)}.`)
   const runHead = branchInfoOf((await lore($, ['branch', 'info', runLore.branch], run)).out)?.remoteLatest
+  if (runHead === undefined || (runLore.head !== undefined && runHead !== runLore.head)) {
+    return fail(`${runLore.branch} is at ${runHead === undefined ? 'a revision lore did not say' : rev7(runHead)}, but the board left it at ${runLore.head === undefined ? 'no revision it knows of' : rev7(runLore.head)}: something nobody judged is on it. Nothing was merged; look at lore history --branch ${runLore.branch}.`)
+  }
   const merged = await lore($, ['branch', 'merge', base, `--message=Bring ${base} into ${runLore.branch}`], run, LONG_MS)
   const outcome = mergeOf(merged.exitCode, merged.out)
   const at = iso(await $.clock.now())
@@ -1860,6 +1875,8 @@ async function loreMergeTool($: EngineInterface, call: ToolCall, isCheckOnly: bo
   if (synced.exitCode !== 0) return giveUp(`the run's workspace could not be brought to ${runLore.branch}: ${lastLine(synced)}`)
   const runHead = branchInfoOf((await lore($, ['branch', 'info', runLore.branch], run)).out)?.remoteLatest
   if (runHead === undefined) return giveUp(`lore did not say where ${runLore.branch} stands on the server`)
+  // A task is merged only onto what the board itself left on the run branch: anything else would be carried along unjudged.
+  if (runLore.head !== undefined && runHead !== runLore.head) return giveUp(`${runLore.branch} is at ${rev7(runHead)}, but the board left it at ${rev7(runLore.head)}: something nobody judged is on it. Nothing was merged; look at lore history --branch ${runLore.branch}`)
   const merged = await lore($, ['branch', 'merge', branch, `--message=${id}: ${task.title}`], run, LONG_MS)
   const outcome = mergeOf(merged.exitCode, merged.out)
   // Lore merges a branch's latest: one pushed between the look above and the merge is not the judged revision.

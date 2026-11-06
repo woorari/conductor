@@ -18,7 +18,15 @@ const inOrder = (ran: readonly string[], wanted: readonly string[]): boolean => 
 
 test('approve makes the run branch from the base, protects the base, and keeps where the base stood', async ($, on) => {
   const { files, engine } = await lored($, on, PROPOSED)
-  engine.lore.unshift(answers(['branch', 'info', 'main'], ok(BRANCH_INFO_MAIN_UNSYNCED)))
+  let isPushed = false
+  engine.lore.unshift(
+    answers(['branch', 'info', 'main'], ok(BRANCH_INFO_MAIN_UNSYNCED)),
+    { match: (argv, cwd) => cwd === RUN_WS && argv.at(-1) === 'push', answer: () => ((isPushed = true), { exitCode: 0, stdout: `Pushed revision 1 -> ${REV_ON_MAIN} to branch ${RUN_BRANCH}\n` }) },
+    {
+      match: argv => argv.slice(1).filter(one => one !== '--non-interactive').join(' ') === `branch info ${RUN_BRANCH}`,
+      answer: () => ({ exitCode: 0, stdout: `Branch ${RUN_BRANCH}\n  ID: 01a1b056f6bb701783e7a1beb2aa49a0\n  Latest: ${REV_ON_MAIN}\n  Remote Latest: ${isPushed ? REV_ON_MAIN : '0'.repeat(64)}\n` }),
+    },
+  )
 
   const said = await command($, 'approve')
   expect(said.text).toContain('Plan approved')
@@ -51,14 +59,15 @@ test('a base that cannot be protected keeps the plan proposed', async ($, on) =>
   expect(stored(files).run.plan).toBe('proposed')
 })
 
-test('approving again after a failure reuses a pushed run branch', async ($, on) => {
+test('approving again reuses a pushed run branch, and refuses one that holds work nobody judged', async ($, on) => {
   const { engine } = await lored($, on, PROPOSED)
   engine.lore.unshift(answers(['branch', 'info', RUN_BRANCH], ok(BRANCH_INFO_PUSHED)), answers(['branch', 'info', 'main'], ok(BRANCH_INFO_MAIN_UNSYNCED)))
 
-  await command($, 'approve')
+  const said = await command($, 'approve')
   const ran = ranIn(engine, RUN_WS)
   expect(ran).toContain(`branch switch ${RUN_BRANCH} --reset`)
   expect(ran.some(one => one.startsWith('branch create'))).toBe(false)
+  expect(said.text, 'it stands at a revision of a task, not at the base').toContain('holds work nobody judged')
 })
 
 test('a git run is approved as before: nothing of Lore runs', async ($, on) => {
