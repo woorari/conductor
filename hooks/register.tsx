@@ -2572,7 +2572,6 @@ export const register: Register = (on, options) => {
     const here = await backendOf($)
     const runLore = read.ledger.run.lore
     if (decided.kind === 'worker' && here?.kind === 'lore' && runLore !== undefined) {
-      unlock = await exclusive()
       const project = read.ledger.run.config
       const taskId = decided.taskId
       const workspacesBase = workspacesOf(here.root, project?.lore?.workspaces)
@@ -2592,11 +2591,13 @@ export const register: Register = (on, options) => {
             taskId,
           })
       if (made.error !== undefined) {
-        unlock()
         await release()
 
         return { deny: `conductor: ${taskId}'s Lore workspace could not be made, so no worker was started: ${made.error}.` }
       }
+      // Each start makes its own workspace side by side with the others; only handing it to the engine is one at a time,
+      // since the engine names the workspace it asks for after the agent. A wait here counts against this hook's time.
+      unlock = await exclusive()
       prepared.set(taskId, workspace)
       awaitingWorktree.push({ taskId, path: workspace })
     }

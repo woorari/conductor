@@ -141,3 +141,14 @@ test('in git, WorktreeCreate answers nothing and the engine makes its own worktr
 
   expect(await worktree($, 'agent-a1')).toEqual({})
 })
+
+test('workspaces of two starts in one message are made side by side, not one after the other', async ($, on) => {
+  const { engine } = await lored($, on)
+  engine.agentIds.push('a1', 'a2')
+
+  await Promise.all([spawn($, 't1'), spawn($, 't2')])
+  const order = engine.calls.map(one => `${one.argv[0]} ${one.cwd ?? one.argv.at(-1) ?? ''}`)
+  const firstOfT2 = order.findIndex(one => one.includes('/ABC-12/t2'))
+  const lastOfT1 = order.map((one, at) => (one.includes('/ABC-12/t1') ? at : -1)).reduce((a, b) => Math.max(a, b), -1)
+  expect(firstOfT2, 'the second copy starts before the first workspace is finished').toBeLessThan(lastOfT1)
+})

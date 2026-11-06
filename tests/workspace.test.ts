@@ -78,3 +78,16 @@ describe('nothing outside a run\'s workspaces is ever removed', () => {
     expect(removals('../outside.log\nSource/../../x.log\nSource/ok.log\n', rules, [])).toEqual(['Source/ok.log'])
   })
 })
+
+describe('removals at the size of a real workspace', () => {
+  test('a listing of 200,000 paths is read in well under a second, and the copy\'s own .lore is never touched', () => {
+    const rules = ignoreRules('*.log\n**/cache/\n')
+    const lines = ['.lore/', '.lore/cache/', '.lore/cache/x', '.lore/store.log']
+    for (let at = 0; at < 200_000; at += 1) lines.push(`Content/Maps/Area${at % 500}/Asset${at}.uasset`)
+    lines.push('Content/build.log')
+    const started = Date.now()
+    const out = removals(lines.join('\n'), rules, [])
+    expect(Date.now() - started).toBeLessThan(1500)
+    expect(out).toEqual(['Content/build.log'])
+  })
+})

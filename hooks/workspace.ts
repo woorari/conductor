@@ -81,9 +81,19 @@ export function removals(listing: string, rules: readonly IgnoreRule[], carry: r
     .filter(one => one.path !== '' && one.path.split('/').every(part => part !== '' && part !== '.' && part !== '..'))
     .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
   const out: string[] = []
+  const gone = new Set<string>()
   for (const one of paths) {
-    if (out.some(gone => one.path === gone || one.path.startsWith(`${gone}/`))) continue
-    if (isIgnored(rules, one.path, one.isDir) && !isCarried(carry, one.path)) out.push(one.path)
+    // The copy's own Lore state is the copy: no ignore rule of the project's applies to it.
+    if (one.path === '.lore' || one.path.startsWith('.lore/')) continue
+    // What lies in a folder that comes out is not named again: its ancestors are looked up, one by one.
+    const parts = one.path.split('/')
+    let isUnderGone = false
+    for (let depth = 1; depth < parts.length && !isUnderGone; depth += 1) isUnderGone = gone.has(parts.slice(0, depth).join('/'))
+    if (isUnderGone) continue
+    if (isIgnored(rules, one.path, one.isDir) && !isCarried(carry, one.path)) {
+      out.push(one.path)
+      gone.add(one.path)
+    }
   }
 
   return out
