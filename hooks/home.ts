@@ -30,14 +30,26 @@ const isWithin = (outer: string, inner: string): boolean => inner.startsWith(`${
 const holds = (root: string, path: string): boolean => path === root || isWithin(root, path)
 
 /**
- * The nearest home at or above the session's folder. A repository root with
- * `.claude/conductor` is a repository home, as before. A folder with it that is
- * no repository root, and lies inside no repository, is a folder home. Inside
- * a repository below its root the folder means nothing. Neither `/` nor the
- * user's home folder is ever a home.
+ * The nearest home at or above the session's folder.
+ *
+ * A repository home is what it was before: the session's own git repository
+ * (as git names it) or a Lore workspace (a folder with `.lore`), with
+ * `.claude/conductor` at its root. Any other `.git` folder makes nothing a
+ * home: git did not name it for this session.
+ *
+ * A folder home is a folder with `.claude/conductor` that is no repository
+ * root, lies inside no repository, and lies strictly inside the user's own
+ * home folder, by its path and by its real path. A folder above or outside the
+ * home folder may be one another user can write, and a config there names
+ * programs that run. With no home folder known there is no folder home.
+ * Inside a repository below its root `.claude/conductor` means nothing.
+ * Neither `/` nor the user's home folder is ever a home.
  */
 export async function findHome(io: Io, cwd: string, gitRoot: string | null): Promise<Home | null> {
-  const isRoot = async (dir: string): Promise<boolean> => dir === gitRoot || (await io.exists(`${dir}/.git`)) || (await io.exists(`${dir}/.lore`))
+  const userHome = io.userHome === undefined ? undefined : trimmed(io.userHome)
+  const userReal = userHome === undefined || userHome === '' ? undefined : await io.real(userHome)
+  const isRepository = async (dir: string): Promise<boolean> => dir === gitRoot || (await io.exists(`${dir}/.lore`))
+  const isRoot = async (dir: string): Promise<boolean> => (await isRepository(dir)) || (await io.exists(`${dir}/.git`))
   const insideRepository = async (dir: string): Promise<boolean> => {
     for (let above = parentOf(dir); above !== ''; above = parentOf(above)) {
       if (await isRoot(above)) return true
@@ -45,10 +57,16 @@ export async function findHome(io: Io, cwd: string, gitRoot: string | null): Pro
 
     return false
   }
+  const isFolderHome = async (dir: string): Promise<boolean> => {
+    if (userHome === undefined || userReal === undefined || !isWithin(userHome, dir) || (await isRoot(dir)) || (await insideRepository(dir))) return false
+    const real = await io.real(dir)
+
+    return real !== undefined && isWithin(userReal, real)
+  }
   for (let dir = trimmed(cwd); dir !== ''; dir = parentOf(dir)) {
-    if (dir === io.userHome || !(await io.exists(`${dir}/${CONDUCTOR}`))) continue
-    if (await isRoot(dir)) return { kind: 'repository', root: dir }
-    if (!(await insideRepository(dir))) return { kind: 'folder', root: dir }
+    if (dir === userHome || !(await io.exists(`${dir}/${CONDUCTOR}`))) continue
+    if (await isRepository(dir)) return { kind: 'repository', root: dir }
+    if (await isFolderHome(dir)) return { kind: 'folder', root: dir }
   }
 
   return null

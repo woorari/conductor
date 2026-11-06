@@ -69,6 +69,8 @@ The mod walks up from the session's folder. At each folder:
 - If it is the root of a repository without `.claude/conductor/`, the walk goes on above it. (Today the mod stops there and registers nothing.)
 - If it holds `.claude/conductor/` and is no repository root, it is a **folder home**. The one exception is a folder inside a repository that is not the repository's root: there, as today, `.claude/conductor/` means nothing and the walk goes on.
 - The user's own home folder is never a conductor home: its `.claude/` belongs to Claude Code itself.
+- A folder home lies strictly inside the user's own home folder, by its path and by its real path. A folder above or outside it may be one another user can write, such as `/tmp`, and a config there names programs that run. With no home folder known, there is no folder home. (Added after a security review on 2026-11-06.)
+- A repository home is the session's own git repository, as git names it, or a Lore workspace, as today. Any other `.git` folder makes nothing a home.
 
 The nearest home wins. A repository with its own `.claude/conductor/` inside a folder home stays its own home for sessions started inside it.
 

@@ -35,7 +35,7 @@ function tree(paths: readonly string[], more: { links?: Record<string, string>; 
   }
 }
 
-const HOME = '/work'
+const HOME = '/home/owner/work'
 const CONDUCTOR = `${HOME}/.claude/conductor`
 const LORE_WS = `${HOME}/game/code/Big Game 5.8`
 const PLACES: Place[] = [
@@ -82,6 +82,30 @@ describe('finding the home', () => {
     const io = tree(['/repo/.claude/conductor', '/repo/src'])
     expect(await findHome(io, '/repo/src', '/repo')).toEqual({ kind: 'repository', root: '/repo' })
     expect(await findHome(tree(['/ws/.lore', '/ws/.claude/conductor']), '/ws', null)).toEqual({ kind: 'repository', root: '/ws' })
+  })
+})
+
+describe('a folder home lies in the user\'s own home folder', () => {
+  test('findHome: a folder home above or outside the user\'s home folder is never taken', async () => {
+    expect(await findHome(tree(['/tmp/.claude/conductor', '/tmp/x']), '/tmp/x', null), 'a shared folder another user could write').toBeNull()
+    expect(await findHome(tree(['/home/.claude/conductor', '/home/owner/x']), '/home/owner/x', null), 'above the home folder').toBeNull()
+    expect(await findHome(tree([CONDUCTOR]), HOME, null), 'inside it').toEqual({ kind: 'folder', root: HOME })
+    expect(await findHome(tree([CONDUCTOR], { userHome: '/home/owner/' }), HOME, null), 'a home folder given with a trailing slash').toEqual({ kind: 'folder', root: HOME })
+  })
+
+  test('findHome: with no user home folder known there is no folder home', async () => {
+    const io = { ...tree([CONDUCTOR]), userHome: undefined }
+    expect(await findHome(io, HOME, null)).toBeNull()
+  })
+
+  test('findHome: a folder home whose real path leads out of the user\'s home folder is not taken', async () => {
+    const io = tree([CONDUCTOR, '/srv/shared/.claude/conductor'], { links: { [HOME]: '/srv/shared' } })
+    expect(await findHome(io, HOME, null)).toBeNull()
+  })
+
+  test('findHome: a .git folder git did not name for the session is no repository home', async () => {
+    const io = tree(['/tmp/x/.git', '/tmp/x/.claude/conductor', '/tmp/x/y'])
+    expect(await findHome(io, '/tmp/x/y', null)).toBeNull()
   })
 })
 

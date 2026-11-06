@@ -149,7 +149,7 @@ return null
   - `ioOf($): Io`, where `real` runs `['/bin/pwd', '-P']` with `cwd: path` and answers the trimmed stdout, or `undefined` on any failure, and `userHome` comes from `$.env.get('HOME')`;
   - `rootOf($)` now answers the home's root, so ledgers, config and `brief.md` come from the home;
   - in `tests/folder-world.ts`:
-    - the paths `HOME_ROOT = '/work'`, `LORE_WS = '/work/game/code/Big Game 5.8'` and `GIT_WS = '/work/studio'`;
+    - the paths `HOME_ROOT = '/home/owner/work'` (inside the test world's user home, `/home/owner`), `LORE_WS = HOME_ROOT + '/game/code/Big Game 5.8'` and `GIT_WS = HOME_ROOT + '/studio'`;
     - `FOLDER_CONFIG`: the spec §5.2 example with folders `studio`, `game/code` and `game/art`, the art place holding no workspace;
     - `folderWorld(on, files, more?: { cwd?: string })`, which wraps `world(on, files, null)` with `homes: ['/work']`, the Lore and git roots in `dirs`, the `/bin/pwd -P` answer as identity, Lore's `repository info` answered, and `cwd` `/work`;
     - `folderLedgerPath(run)`: `/work/.claude/conductor/runs/<run>/ledger.json`.
