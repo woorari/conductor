@@ -106,7 +106,7 @@ describe('the guard reads options the way lore does (security review after the m
     for (const command of ['lore --repository /work/Big\\ Game\\ 5.8 commit x', `lore --repository=/elsewhere push`, 'cd /work/Big\\ Game\\ 5.8 && lore commit x', 'pushd /tmp; lore push', 'lore commit x --repository /elsewhere']) {
       expect(loreByHand(command, OWN), command).toBeDefined()
     }
-    for (const command of [`lore --repository "${OWN.ownWorkspace}" commit x`, 'builtin cd /x && lore commit x', 'command pushd /x; lore push', 'lo\\\nre push x']) {
+    for (const command of [`lore --repository "${OWN.ownWorkspace}" commit x`, 'builtin cd /x && lore commit x', '(cd /x && lore commit x)', '/usr/bin/cd /x; lore push', 'command pushd /x; lore push', 'lo\\\nre push x']) {
       expect(loreByHand(command, OWN), command).toBeDefined()
     }
     expect(loreByHand('lore commit "t1: fix" && lore push', OWN)).toBeUndefined()
@@ -160,9 +160,9 @@ describe('what a Lore run is told', () => {
     const { engine } = await lored($, on, RUNNING)
 
     expect((await bash($, 'lore commit "t1: fix"', 'a1')).deny).toBeUndefined()
-    expect(engine.bash.at(-1)).toBe(`cd -- '${BASE}/ABC-12/t1' && lore commit "t1: fix"`)
+    expect(engine.bash.at(-1)).toBe(`cd -- '${BASE}/ABC-12/t1' || exit 97\nlore commit "t1: fix"`)
     await bash($, 'ls -la', 'a1')
-    expect(engine.bash.at(-1), 'a command without lore is left as it is').toBe('ls -la')
+    expect(engine.bash.at(-1), 'every command of a worker runs in its own workspace').toBe(`cd -- '${BASE}/ABC-12/t1' || exit 97\nls -la`)
   })
 
   test('the board shows a Lore task by its revision and its check', () => {

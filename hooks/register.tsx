@@ -2877,9 +2877,9 @@ export const register: Register = (on, options) => {
           }
         }
         // What a worker runs with lore runs in its own workspace, wherever its shell was left standing.
-        if (isWorker && ownWorkspace !== undefined && /(^|[^A-Za-z0-9_])lore($|[^A-Za-z0-9_])/i.test(call.command)) {
-          pinnedCommand = `cd -- '${ownWorkspace.replace(/'/g, "'\\''")}' && ${call.command}`
-        }
+        // Every command of a worker runs in its own workspace, wherever its shell was left standing: the folder change stands on a
+        // line of its own, so nothing in the command (a background &, a group) runs before it or outside it.
+        if (isWorker && ownWorkspace !== undefined) pinnedCommand = `cd -- '${ownWorkspace.replace(/'/g, "'\\''")}' || exit 97\n${call.command}`
       }
     }
     // A Lore worker that was not handed a workspace of its own would build in the owner's: it may not write at all.

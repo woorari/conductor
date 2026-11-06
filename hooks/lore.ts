@@ -474,7 +474,7 @@ export function loreByHand(
       return `runs ${first}, and lore through it cannot be read`
     }
     // A worker's lore is pinned to its own workspace: no change of folder may stand on the same line, behind a wrapper or not.
-    if (ctx.caller === 'worker' && segments.some(one => one.some(word => /^(?:cd|pushd|popd)$/.test(word)))) return 'changes folder on a line that runs lore: lore runs in your own workspace'
+    if (ctx.caller === 'worker' && segments.some(one => one.some(word => /^(?:cd|pushd|popd)$/.test(word.replace(/^[({]+|[)}]+$/g, '').split('/').pop() ?? '')))) return 'changes folder on a line that runs lore: lore runs in your own workspace'
     // Outside a lore invocation, lore may not show up at all: inside a script, behind a wrapper, as an argument.
     if (!isLore(first) && words.some(word => word.split(/[^A-Za-z0-9_./-]+/).some(part => isLore(part)))) {
       return WRAPPERS.has(first.split('/').pop() ?? '') ? `runs lore behind ${first}` : 'runs lore in a way the board cannot read'
