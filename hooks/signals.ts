@@ -1,5 +1,5 @@
-import type { Activity, ModelTier, ProblemSeverity, TaskStatus } from '../types'
-import { RUN_ID, STATUSES, TIERS } from './ledger'
+import type { Activity, ModelTier, ProblemSeverity, TaskStatus, Ticket } from '../types'
+import { LINEAR_KEY, RUN_ID, STATUSES, TIERS } from './ledger'
 import { LOOK_AGAIN_MIN, afterDone, dueForLook, isUnderway, lostWith, named, standing, standingText } from './problems'
 
 /**
@@ -83,6 +83,15 @@ const NOTE_MAX = 200
 const PROBLEM_MAX = 500
 const FILES_MAX = 40
 /** The most files or folders one task may be expected to change (proposed, not measured). */
+const TICKET_HELP = 'ticket is the issue’s number, a whole number from 1, or its Linear key, like ABC-12.'
+
+/** A GitHub issue's number or a Linear issue's key. */
+export const isTicket = (value: unknown): value is Ticket =>
+  (typeof value === 'number' && Number.isInteger(value) && value >= 1) || (typeof value === 'string' && LINEAR_KEY.test(value))
+
+/** How a ticket is named in what the board says: `#391` on GitHub, `ABC-12` in Linear. */
+export const ticketName = (ticket: Ticket): string => (typeof ticket === 'number' ? `#${ticket}` : ticket)
+
 export const FILES_PER_TASK = 12
 
 /** A path as the board compares it: no `./` in front, no `/` behind, single slashes. */
@@ -372,9 +381,7 @@ export function addTask(raw: Raw, caller: Caller, input: Record<string, unknown>
   if (!Array.isArray(dependsOn) || dependsOn.some(one => typeof one !== 'string')) return refused('dependsOn is a list of task ids.')
   const missing = (dependsOn as string[]).find(one => !raw.tasks.some(task => task.id === one))
   if (missing !== undefined) return refused(`dependsOn names ${missing}, which is no task of this run.`)
-  if (input.ticket !== undefined && (typeof input.ticket !== 'number' || !Number.isInteger(input.ticket) || input.ticket < 1)) {
-    return refused('ticket is the issue’s number, a whole number from 1.')
-  }
+  if (input.ticket !== undefined && !isTicket(input.ticket)) return refused(TICKET_HELP)
   const files = input.files === undefined ? [] : fileList(input.files)
   if (files === undefined) return refused(`files is a list of at most ${FILES_MAX} files or folders, relative to the repository.`)
   // One task is one change a single worker can finish without filling its context.
@@ -461,9 +468,7 @@ export function updateTask(raw: Raw, at: string, caller: Caller, input: Record<s
   }
   if (input.ticket !== undefined) {
     if (caller.kind !== 'orchestrator') return refused('Only the orchestrator sets a task’s ticket.')
-    if (typeof input.ticket !== 'number' || !Number.isInteger(input.ticket) || input.ticket < 1) {
-      return refused('ticket is the issue’s number, a whole number from 1.')
-    }
+    if (!isTicket(input.ticket)) return refused(TICKET_HELP)
     task.ticket = input.ticket
     said.push(`ticket ${input.ticket}`)
   }
@@ -610,15 +615,13 @@ export function assignProblem(raw: Raw, caller: Caller, input: Record<string, un
       )
     }
   } else {
-    if (typeof input.ticket !== 'number' || !Number.isInteger(input.ticket) || input.ticket < 1) {
-      return refused('ticket is the issue’s number, a whole number from 1.')
-    }
+    if (!isTicket(input.ticket)) return refused(TICKET_HELP)
     const carrying = raw.tasks.filter(one => one.ticket === input.ticket && goes(one))
     if (carrying.length === 0) {
-      return refused(`No task of this run that still goes on carries ticket #${input.ticket}, so the run does not conduct it. Add a task for it with task_add (ticket, addresses): a problem is not left with a ticket nobody here conducts.`)
+      return refused(`No task of this run that still goes on carries ticket ${ticketName(input.ticket)}, so the run does not conduct it. Add a task for it with task_add (ticket, addresses): a problem is not left with a ticket nobody here conducts.`)
     }
     if (carrying.length > 1) {
-      return refused(`Ticket #${input.ticket} is carried by ${carrying.map(one => one.id).join(', ')}: name the task that deals with ${problem.id}.`)
+      return refused(`Ticket ${ticketName(input.ticket)} is carried by ${carrying.map(one => one.id).join(', ')}: name the task that deals with ${problem.id}.`)
     }
     task = carrying[0]
   }
@@ -626,5 +629,5 @@ export function assignProblem(raw: Raw, caller: Caller, input: Record<string, un
   if (problem.addressedBy === task.id) return refused(`${problem.id} is addressed by ${task.id} already.`)
   problem.addressedBy = task.id
 
-  return changed(`${problem.id} is addressed by ${task.id} (${task.status}${typeof task.ticket === 'number' ? `, ticket #${task.ticket}` : ''}).`)
+  return changed(`${problem.id} is addressed by ${task.id} (${task.status}${isTicket(task.ticket) ? `, ticket ${ticketName(task.ticket)}` : ''}).`)
 }

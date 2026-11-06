@@ -1,5 +1,7 @@
+import { REVISION } from './lore'
 import type {
   Activity,
+  CheckRecord,
   Ledger,
   Merge,
   ModelTier,
@@ -8,8 +10,10 @@ import type {
   Problem,
   ProblemSeverity,
   Ruling,
+  ProjectConfig,
   Task,
   TaskStatus,
+  Ticket,
 } from '../types'
 
 export const TIERS: readonly ModelTier[] = ['opus', 'sonnet', 'haiku']
@@ -33,6 +37,9 @@ export type Parsed = { ledger: Ledger; error?: undefined } | { ledger?: undefine
 type Fields = Record<string, unknown>
 
 class Refused extends Error {}
+
+/** A Linear issue's key, as Linear writes it: the team's key, a dash, the issue's number. */
+export const LINEAR_KEY = /^[A-Z][A-Z0-9]{0,9}-[1-9][0-9]{0,8}$/
 
 /** A commit as a person writes it: the whole id or its first digits. */
 export const COMMIT = /^[0-9a-f]{7,40}$/
@@ -124,6 +131,86 @@ function texts(value: unknown, where: string): string[] | undefined {
   })
 }
 
+/** A GitHub issue's number or a Linear issue's key. */
+function optionalTicket(from: Fields, key: string, where: string): Ticket | undefined {
+  const value = from[key]
+  if (value === undefined) return undefined
+  if (typeof value === 'number' && Number.isInteger(value) && value >= 1) return value
+  if (typeof value === 'string' && LINEAR_KEY.test(value)) return value
+  refuse(`${where}.${key}`, 'a whole number from 1 or an issue key like ABC-12', value)
+}
+
+function optionalKey(from: Fields, key: string, where: string): string | undefined {
+  const value = optionalText(from, key, where)
+  if (value !== undefined && !LINEAR_KEY.test(value)) refuse(`${where}.${key}`, 'an issue key like ABC-12', value)
+
+  return value
+}
+
+function optionalRevision(from: Fields, key: string, where: string): string | undefined {
+  const value = optionalText(from, key, where)
+  if (value !== undefined && !REVISION.test(value)) refuse(`${where}.${key}`, 'a Lore revision (64 hex)', value)
+
+  return value
+}
+
+function revisionOf(from: Fields, key: string, where: string): string {
+  const value = optionalRevision(from, key, where)
+  if (value === undefined) refuse(`${where}.${key}`, 'a Lore revision (64 hex)', from[key])
+
+  return value
+}
+
+function timeOf(from: Fields, key: string, where: string): string {
+  const value = optionalTime(from, key, where)
+  if (value === undefined) refuse(`${where}.${key}`, 'an ISO 8601 time', from[key])
+
+  return value
+}
+
+function checkRecord(value: unknown, where: string): CheckRecord | undefined {
+  if (value === undefined) return undefined
+  const from = fields(value, where)
+
+  return {
+    revision: revisionOf(from, 'revision', where),
+    verdict: oneOf(from, 'verdict', where, ['running', 'passed', 'failed'] as const),
+    at: timeOf(from, 'at', where),
+    line: optionalText(from, 'line', where),
+  }
+}
+
+function loreRun(value: unknown): Ledger['run']['lore'] {
+  if (value === undefined) return undefined
+  const where = 'run.lore'
+  const from = fields(value, where)
+
+  return {
+    remote: text(from, 'remote', where),
+    repository: text(from, 'repository', where),
+    base: text(from, 'base', where),
+    branch: text(from, 'branch', where),
+    workspace: optionalText(from, 'workspace', where),
+    baseAt: optionalRevision(from, 'baseAt', where),
+  }
+}
+
+function approval(value: unknown): Ledger['run']['approval'] {
+  if (value === undefined) return undefined
+  const where = 'run.approval'
+  const from = fields(value, where)
+
+  return { revision: revisionOf(from, 'revision', where), base: revisionOf(from, 'base', where), at: timeOf(from, 'at', where) }
+}
+
+function mergedRun(value: unknown): Ledger['run']['merged'] {
+  if (value === undefined) return undefined
+  const where = 'run.merged'
+  const from = fields(value, where)
+
+  return { revision: revisionOf(from, 'revision', where), at: timeOf(from, 'at', where) }
+}
+
 function post(value: unknown, where: string): Post {
   const from = fields(value, where)
   const at = text(from, 'at', where)
@@ -194,7 +281,7 @@ function task(value: unknown, where: string): Task {
     tierReason: optionalText(from, 'tierReason', where),
     tierBy: from.tierBy === undefined ? undefined : oneOf(from, 'tierBy', where, ['owner'] as const),
     status: oneOf(from, 'status', where, STATUSES),
-    ticket: optionalNumber(from, 'ticket', where),
+    ticket: optionalTicket(from, 'ticket', where),
     dependsOn,
     files: texts(from.files, `${where}.files`),
     touched: texts(from.touched, `${where}.touched`),
@@ -207,6 +294,9 @@ function task(value: unknown, where: string): Task {
     contextTokens: optionalCount(from, 'contextTokens', where),
     branch: optionalText(from, 'branch', where),
     pr: optionalNumber(from, 'pr', where),
+    revision: optionalRevision(from, 'revision', where),
+    workspace: optionalText(from, 'workspace', where),
+    check: checkRecord(from.check, `${where}.check`),
     startedAt: optionalTime(from, 'startedAt', where),
     finishedAt: optionalTime(from, 'finishedAt', where),
     note: optionalText(from, 'note', where),
@@ -229,7 +319,8 @@ function merge(value: unknown): Merge | undefined {
   const where = 'merge'
   const from = fields(value, where)
   const pr = optionalNumber(from, 'pr', where)
-  if (pr === undefined) refuse(`${where}.pr`, 'a whole number from 1', from.pr)
+  const revision = optionalRevision(from, 'revision', where)
+  if (pr === undefined && revision === undefined) refuse(`${where}.pr`, 'a whole number from 1', from.pr)
   const startedAt = optionalTime(from, 'startedAt', where)
   if (startedAt === undefined) refuse(`${where}.startedAt`, 'an ISO 8601 time', from.startedAt)
   const closes = from.closes === undefined ? undefined : list(from.closes, `${where}.closes`).map((one, at) => {
@@ -237,16 +328,17 @@ function merge(value: unknown): Merge | undefined {
 
     return one
   })
-
-  return {
+  const common = {
     task: text(from, 'task', where),
-    pr,
-    head: text(from, 'head', where),
     state: oneOf(from, 'state', where, ['merging'] as const),
     startedAt,
     told: from.told === undefined ? undefined : list(from.told, `${where}.told`).map(String),
     closes,
   }
+  if (pr !== undefined) return { ...common, pr, head: text(from, 'head', where) }
+
+  // A Lore merge: the revision it is pinned to, and where it goes.
+  return { ...common, revision: revision as string, target: oneOf(from, 'target', where, ['run', 'base'] as const) }
 }
 
 function problem(value: unknown, where: string): Problem {
@@ -369,6 +461,13 @@ export function parseLedger(source: string): Parsed {
         maxParallel: optionalNumber(run, 'maxParallel', 'run'),
         workerHandbackTokens: optionalNumber(run, 'workerHandbackTokens', 'run'),
         pausedAt: optionalTime(run, 'pausedAt', 'run'),
+        tickets: run.tickets === undefined ? undefined : oneOf(run, 'tickets', 'run', ['github', 'linear'] as const),
+        issue: optionalKey(run, 'issue', 'run'),
+        config: run.config === undefined ? undefined : (fields(run.config, 'run.config') as ProjectConfig),
+        lore: loreRun(run.lore),
+        approval: approval(run.approval),
+        merged: mergedRun(run.merged),
+        check: checkRecord(run.check, 'run.check'),
       },
       orchestrator: orchestrator(from.orchestrator),
       tasks: list(from.tasks, 'tasks').map((one, at) => task(one, `tasks[${at}]`)),

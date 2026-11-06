@@ -227,7 +227,7 @@ export const closes = (text: string): number[] =>
 export const mayClose = (text: string): number[] => numbers(prose(text).matchAll(/\b(?:clos|fix|resolv)[a-z]*[\s:]+#(\d+)/gi))
 
 /** Another run's merge in flight. */
-export type Flight = { run: string; task: string; pr: number; startedAt: string }
+export type Flight = { run: string; task: string; pr?: number; revision?: string; startedAt: string }
 
 /** The merges other runs have in flight, as far as they are fresh enough to wait for. */
 export function flightsOf(ledgers: readonly Ledger[], own: string, nowMs: number): Flight[] {
@@ -236,7 +236,7 @@ export function flightsOf(ledgers: readonly Ledger[], own: string, nowMs: number
     if (flight === undefined || one.run.id === own) return []
     const age = nowMs - Date.parse(flight.startedAt)
 
-    return age >= 0 && age < FLIGHT_FRESH_MIN * MINUTE ? [{ run: one.run.id, task: flight.task, pr: flight.pr, startedAt: flight.startedAt }] : []
+    return age >= 0 && age < FLIGHT_FRESH_MIN * MINUTE ? [{ run: one.run.id, task: flight.task, ...(flight.pr === undefined ? { revision: flight.revision } : { pr: flight.pr }), startedAt: flight.startedAt }] : []
   })
 }
 

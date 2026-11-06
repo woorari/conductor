@@ -32,7 +32,7 @@ import { DONE_SHOWN, boardView, clock, detail, orchestratorLine, problemDetail, 
 import type { TaskRow } from './board'
 import { dashboardSvg } from './dashboard'
 import { KEEP, ROTATE_AT, carried, handover } from './handover'
-import { RUN_ID, STATUSES, TIERS, parseLedger } from './ledger'
+import { LINEAR_KEY, RUN_ID, STATUSES, TIERS, parseLedger } from './ledger'
 import { repositoryInfoOf } from './lore'
 import type { RepositoryInfo } from './lore'
 import { pauseRun, unpauseRun } from './pause'
@@ -101,6 +101,8 @@ const TOOL_REPORT = 'mcp__conductor__problem_report'
 const TOOL_RESOLVE = 'mcp__conductor__problem_resolve'
 const TOOL_ASSIGN = 'mcp__conductor__problem_assign'
 const NOT_DONE = 'Not done.'
+/** A ticket in a tool's schema: a GitHub issue's number, or a Linear issue's key. */
+const TICKET_PATTERN = LINEAR_KEY.source
 /** After a merge the base branch's checks are watched this long at most, in minutes (proposed): a branch nothing checks has nothing to wait for. */
 const MAIN_WATCH_MIN = 60
 /**
@@ -1439,7 +1441,7 @@ export const register: Register = (on, options) => {
           tier: { type: 'string', enum: [...TIERS], description: 'Only before the task starts, and only by the orchestrator.' },
           tierReason: { type: 'string', description: 'One line: why this tier. Required with tier.' },
           note: { type: 'string', description: 'One line: what it is doing now, or why it is blocked. An empty string clears it.' },
-          ticket: { type: 'integer', minimum: 1, description: 'The issue it belongs to; the orchestrator\'s to set.' },
+          ticket: { anyOf: [{ type: 'integer', minimum: 1 }, { type: 'string', pattern: TICKET_PATTERN }], description: 'The issue it belongs to, a GitHub number or a Linear key like ABC-12; the orchestrator\'s to set.' },
           pr: { type: 'integer', minimum: 1, description: 'The pull request\'s number.' },
           branch: { type: 'string' },
         },
@@ -1459,7 +1461,7 @@ export const register: Register = (on, options) => {
           title: { type: 'string', description: 'What the task delivers, in a few words.' },
           tier: { type: 'string', enum: [...TIERS] },
           tierReason: { type: 'string', description: 'One line: why this tier.' },
-          ticket: { type: 'integer', minimum: 1, description: 'The issue it belongs to.' },
+          ticket: { anyOf: [{ type: 'integer', minimum: 1 }, { type: 'string', pattern: TICKET_PATTERN }], description: 'The issue it belongs to: a GitHub number or a Linear key like ABC-12.' },
           dependsOn: { type: 'array', items: { type: 'string' }, description: 'Ids of tasks that must be done first.' },
           files: { type: 'array', items: { type: 'string' }, description: 'The files or folders the task is expected to change, relative to the repository. Findings on them reach its worker, and a second task on the same file is flagged.' },
           addresses: { type: 'array', items: { type: 'string' }, description: 'The ids of open problems this task is to deal with, e.g. ["P3"]: each then has this task, and is resolved once it is done and the fix holds.' },
@@ -1624,7 +1626,7 @@ export const register: Register = (on, options) => {
         properties: {
           problem: { type: 'string', description: 'The problem\'s id, e.g. P3.' },
           task: { type: 'string', description: 'The id of a task of this run that is not done.' },
-          ticket: { type: 'integer', minimum: 1, description: 'The issue\'s number, when one task of this run still carries it.' },
+          ticket: { anyOf: [{ type: 'integer', minimum: 1 }, { type: 'string', pattern: TICKET_PATTERN }], description: 'The issue\'s number or Linear key, when one task of this run still carries it.' },
         },
         required: ['problem'],
         additionalProperties: false,
