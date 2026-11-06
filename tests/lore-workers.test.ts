@@ -189,3 +189,12 @@ test('a half-made workspace (its .lore copied, never finished) is made again; a 
   await spawn($, 't2')
   expect(engine.calls.filter(one => one.argv[0] === 'cp').length, 'a finished one is reused as it is').toBe(copiesBefore)
 })
+
+test("in git, the person's own WorktreeCreate hook still answers", async ($, on) => {
+  mock.clock(on, { now: NOW })
+  const engine = world(on, {})
+  engine.worktree = { worktreePath: '/custom/worktrees/agent-a1' }
+  await start($)
+
+  expect(await worktree($, 'agent-a1')).toEqual({ worktreePath: '/custom/worktrees/agent-a1' })
+})

@@ -207,6 +207,8 @@ export type World = {
   dirs: string[]
   /** The session's working directory, as `$.session.cwd()` answers it. */
   cwd: string
+  /** What the person's own WorktreeCreate settings hook answers, beneath the mod; none answers nothing. */
+  worktree: { worktreePath?: string }
   /** Every command and tool the mod registered. */
   registered: string[]
   /** What each registered tool takes, by its name: the schema the engine holds a call to before the mod sees it. */
@@ -264,6 +266,7 @@ export function world(on: On, files: Files, repo: { root: string } | null = { ro
     programs: [],
     calls: [],
     listings: {},
+    worktree: {},
     dirs: [],
     cwd: repo?.root ?? ROOT,
     registered: [],
@@ -422,6 +425,7 @@ export function world(on: On, files: Files, repo: { root: string } | null = { ro
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
   on('fs.exists', (_$, e) => ({ value: e.path.endsWith('.claude/conductor') ? state.isHome : files[e.path] !== undefined || state.dirs.includes(e.path) }))
   on('session.cwd', () => ({ value: state.cwd }))
+  on('classic.WorktreeCreate', () => ({ ...state.worktree }))
   on('command.register', (_$, e) => {
     if (state.builtins.has(e.name)) return { deny: `"/${e.name}" refused: it is the built-in /${e.name}` }
     state.registered.push(`/${e.name}`)

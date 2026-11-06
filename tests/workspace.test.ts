@@ -80,14 +80,19 @@ describe('nothing outside a run\'s workspaces is ever removed', () => {
 })
 
 describe('removals at the size of a real workspace', () => {
-  test('a listing of 200,000 paths is read in well under a second, and the copy\'s own .lore is never touched', () => {
-    const rules = ignoreRules('*.log\n**/cache/\n')
-    const lines = ['.lore/', '.lore/cache/', '.lore/cache/x', '.lore/store.log']
-    for (let at = 0; at < 200_000; at += 1) lines.push(`Content/Maps/Area${at % 500}/Asset${at}.uasset`)
-    lines.push('Content/build.log')
+  test('a listing of 200,000 paths with 20,000 to remove is read in seconds, not minutes', () => {
+    const rules = ignoreRules('*.log\n')
+    const lines: string[] = []
+    for (let at = 0; at < 180_000; at += 1) lines.push(`Content/Maps/Area${at % 500}/Asset${at}.uasset`)
+    for (let at = 0; at < 20_000; at += 1) lines.push(`Logs/Run${at % 50}/step${at}.log`)
     const started = Date.now()
     const out = removals(lines.join('\n'), rules, [])
-    expect(Date.now() - started).toBeLessThan(1500)
-    expect(out).toEqual(['Content/build.log'])
+    expect(out).toHaveLength(20_000)
+    expect(Date.now() - started, 'linear in the paths, not in paths times removals').toBeLessThan(3000)
+  })
+
+  test("the copy's own .lore is never touched by the project's ignore rules", () => {
+    const rules = ignoreRules('*.log\n**/cache/\n')
+    expect(removals('.lore/\n.lore/cache/\n.lore/cache/x\n.lore/store.log\nContent/build.log\n', rules, [])).toEqual(['Content/build.log'])
   })
 })

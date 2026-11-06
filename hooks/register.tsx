@@ -2789,11 +2789,13 @@ export const register: Register = (on, options) => {
   }).catch(unrouted)
 
   // Outside git, Claude Code asks for a worker's isolated copy here. In a Lore run the mod made it already;
-  // in git the mod answers nothing and the engine makes its own worktree, as it does unhooked.
+  // in git the event goes on to the person's own hooks and the engine, as it does without the mod (checked in the real
+  // engine on 2026-11-06: with no hook of the person's, the engine still makes its git worktree).
   on('classic.WorktreeCreate', async ($, e, next) => {
     try {
       const here = await backendOf($)
-      if (here?.kind !== 'lore') return {}
+      // In git the mod has nothing to say: the person's own hook beneath, or the engine's own worktree, answers.
+      if (here?.kind !== 'lore') return next(e)
       // The engine names the workspace after the agent: a worker it started already is found by its id, else it is the start in flight.
       const agentId = /^agent-(.+)$/.exec(e.name)?.[1]
       let taskId = agentId === undefined ? undefined : agents.get(agentId)
