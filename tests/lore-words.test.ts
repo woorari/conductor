@@ -73,13 +73,13 @@ describe('the guard fails closed where it cannot read a command', () => {
     for (const command of ['env python3 -c "import os; os.system(\'lore push x\')"', 'python3.11 -c "os.system(\'lore push x\')"', 'env -i PATH=/bin lore push x', 'L=lo; R=re; $L$R push x', '${L}${R} push x']) {
       expect(loreByHand(command, WORKER), command).toBeDefined()
     }
-    for (const command of ['cat Docs/lore-notes.md', './Script/build.sh --fast', '/Users/me/bin/build.sh', 'lore commit "update the lore docs"']) {
+    for (const command of ['cat Docs/lore-notes.md', './Script/build.sh --fast', '/Users/me/bin/build.sh', 'lore commit "update the lore docs"', '{ lore status; }', 'lore status 2>/dev/null']) {
       expect(loreByHand(command, WORKER), command).toBeUndefined()
     }
   })
 
   test('lore in any case is lore (APFS is case-insensitive), and a program the shell works out is refused', () => {
-    for (const command of ['LORE push x', 'Lore branch merge y', '/Users/me/.local/bin/LoRe push x', '"$HOME/bin/build.sh" --fast', '/usr/*/bin/lore push x', '~/.local/bin/lo?e push x', '/bin/{lore,true} push x', '/bin/lor{e..e} push x']) {
+    for (const command of ['LORE push x', 'Lore branch merge y', '/Users/me/.local/bin/LoRe push x', '"$HOME/bin/build.sh" --fast', '/usr/*/bin/lore push x', '~/.local/bin/lo?e push x', '/bin/{lore,true} push x', '/bin/lor{e..e} push x', '{lore,} push x', '! lore push x', 'if lore push x; then true; fi', 'while lore push x; do break; done', '2>/dev/null lore push x', '> out lore push x', 'FOO=1 2>&1 lore push x', '2>/dev/null $L$R push x', '! $L push x', 'if $L push x; then true; fi', '{lo,}re push x', '(lo{r,}e push x)']) {
       expect(loreByHand(command, WORKER), command).toBeDefined()
     }
   })

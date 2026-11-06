@@ -355,6 +355,30 @@ function optionValue(words: readonly string[], name: string): string | undefined
   return undefined
 }
 
+/** Words of the shell's own grammar that may stand before a command: the command is the word after them. */
+const RESERVED = new Set(['!', '{', '}', '(', ')', 'if', 'then', 'elif', 'else', 'fi', 'while', 'until', 'do', 'done', 'esac', 'time', 'coproc', '[[', ']]', 'function'])
+
+/**
+ * The word a shell runs as the program: past assignments, grouping, reserved
+ * words and redirections, as it stands (a leading `(` aside, a subshell),
+ * so a brace or a variable in it is seen.
+ */
+function commandWord(words: readonly string[]): string {
+  for (let at = 0; at < words.length; at += 1) {
+    const word = words[at] ?? ''
+    if (word === '' || RESERVED.has(word) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) continue
+    if (/^[0-9]*(?:[<>]|&>)/.test(word)) {
+      // A redirection: its target follows when it is the operator alone.
+      if (/^[0-9]*(?:[<>]{1,2}|&>{1,2}|[<>]&)$/.test(word)) at += 1
+      continue
+    }
+
+    return word.replace(/^\(+/, '')
+  }
+
+  return ''
+}
+
 /**
  * Whether a shell line runs `lore` by hand in a way a bound Lore run refuses:
  * a worker doing anything but build on its own branch, or the orchestrator
@@ -370,8 +394,8 @@ export function loreByHand(command: string, ctx: { base: string; runBranch?: str
   const plain = command.replace(/\\(.)/g, '$1').replace(/["']/g, '')
   // A program named only by variables (`$L$R`) could be lore whatever the line says: refused in a bound Lore run.
   for (const segment of plain.split(/&&|\|\||\|&|;|\||&|\n/)) {
-    const first = tokens(segment.trim()).map(one => one.replace(/^[({]+/, '')).find(one => one !== '' && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(one)) ?? ''
-    if (/[$*?[{]/.test(first)) return 'runs a program whose name the shell works out (a variable, a pattern or braces), which the board cannot read'
+    const first = commandWord(tokens(segment.trim()))
+    if (/[$*?[{}]/.test(first)) return 'runs a program whose name the shell works out (a variable, a pattern or braces), which the board cannot read'
   }
   if (!/(^|[^A-Za-z0-9_])lore($|[^A-Za-z0-9_])/i.test(plain)) return undefined
   if (/\$\(|`|<\(|>\(/.test(command) || /(^|[\s;&|(])eval\s/.test(plain)) {
