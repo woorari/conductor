@@ -270,8 +270,8 @@ The folder must lie inside your home folder, and it must not be inside a reposit
 ```json
 {
   "places": [
-    { "folder": "studio", "teams": ["ABC"], "about": "the studio's own tools", "check": { "argv": ["npm", "test"], "timeoutMin": 20 } },
-    { "folder": "game/code", "teams": ["DEF"], "about": "engine and game code", "lore": { "branchPrefix": "conductor/" } },
+    { "folder": "studio", "teams": ["ABC"], "about": "the studio's own tools" },
+    { "folder": "game/code", "teams": ["DEF"], "about": "engine and game code", "lore": { "branchPrefix": "conductor/" }, "check": { "argv": ["./Script/check.sh"], "timeoutMin": 45 } },
     { "folder": "game/art", "teams": ["DEF"], "about": "3D art and source assets" }
   ]
 }
@@ -280,13 +280,13 @@ The folder must lie inside your home folder, and it must not be inside a reposit
 - `folder`: a folder inside the home, given relative to it. Absolute paths, `~`, `..` and symlinks that lead out of the home are refused. Places may not overlap.
 - `teams`: the Linear teams whose tickets may land there.
 - `about`: one line on what belongs there. The orchestrator reads it when it picks.
-- `base`, `lore`, `check` (optional): the settings of that place's workspaces, as a repository's own config has them. `base` falls back to the mod's base branch option.
+- `base`, `lore`, `check` (optional): the settings of that place's workspaces, as a repository's own config has them. `base` falls back to the mod's base branch option. `check` runs in Lore workspaces only; a git run's checks are its pull requests' on GitHub.
 
 Add the `WorktreeCreate` placeholder shown under [Lore](#lore) to `.claude/settings.local.json` of the folder you start sessions in. Outside git, Claude Code lets the mod make workers' workspaces only then. Run ledgers stay in the home, so no project needs a `.loreignore` or `.gitignore` line for them.
 
 ### How a run finds its workspace
 
-- A place's workspaces are found, never configured: the place itself and its direct subfolders, wherever they are a git repository or a Lore workspace.
+- A place's workspaces are found, never configured: the place itself and its direct subfolders, wherever they are a git repository or a Lore workspace. A workspace inside another one is left out, because its workers' copies, made beside it, would land inside the outer one.
 - `/conduct ABC-12` takes the places of team ABC. With one workspace there, the run works in it. With several, the orchestrator reads the ticket and picks one with `run_workspace` before it plans, and the plan names it, so you see it when you `/approve`. A new pick after the plan is proposed sends the plan back to a draft.
 - `/conduct path/to/spec.md` works in the nearest workspace that holds the spec.
 - A ticket whose work lies in no workspace isn't run. Put that folder into Lore or git first.

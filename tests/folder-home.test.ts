@@ -171,7 +171,11 @@ describe('the candidates for a ticket', () => {
 
   test('workspaceOfSpec: the nearest root that holds the spec wins, and a spec in no workspace is refused', async () => {
     const io = tree([...HERE, `${LORE_WS}/docs`, `${HOME}/game/code/.lore`, `${HOME}/game/code/notes`])
-    expect(await workspaceOfSpec(io, HOME, PLACES, 'game/code/Big Game 5.8/docs/x.md')).toEqual({
+    expect(await workspaceOfSpec(io, HOME, PLACES, 'game/code/Big Game 5.8/docs/x.md'), 'a workspace nested in another is left out: the outer one holds the spec').toEqual({
+      candidate: { kind: 'lore', root: `${HOME}/game/code`, place: 'game/code', about: 'engine and game code' },
+      team: 'DEF',
+    })
+    expect(await workspaceOfSpec(tree([...HERE, `${LORE_WS}/docs`]), HOME, PLACES, 'game/code/Big Game 5.8/docs/x.md'), 'the nearest root').toEqual({
       candidate: { kind: 'lore', root: LORE_WS, place: 'game/code', about: 'engine and game code' },
       team: 'DEF',
     })
@@ -184,6 +188,26 @@ describe('the candidates for a ticket', () => {
     })
     expect(await workspaceOfSpec(io, HOME, PLACES, '/elsewhere/z.md')).toEqual({
       error: 'No run was started. /elsewhere/z.md lies in no workspace of a place in .claude/conductor/config.json.',
+    })
+  })
+})
+
+describe('final review fixes', () => {
+  test('findHome: a session in a linked git worktree finds its repository home, as before', async () => {
+    const io = tree(['/code/X/.git', '/code/X/.claude/conductor', '/code/X-wt/src'])
+    expect(await findHome(io, '/code/X-wt/src', '/code/X')).toEqual({ kind: 'repository', root: '/code/X' })
+  })
+
+  test('candidatesFor: a workspace inside another one is left out, since its workers\' copies would land inside the outer one', async () => {
+    const io = tree([CONDUCTOR, `${HOME}/game/code/.lore`, `${LORE_WS}/.lore`, `${HOME}/studio/.git`, `${HOME}/game/art`])
+    expect(await candidatesFor(io, HOME, PLACES, 'DEF')).toEqual({
+      candidates: [{ kind: 'lore', root: `${HOME}/game/code`, place: 'game/code', about: 'engine and game code' }],
+      left: [`${LORE_WS} lies inside the workspace ${HOME}/game/code, so its workers' copies would land inside that one`],
+    })
+    const submodule = tree([CONDUCTOR, `${HOME}/studio/.git`, `${HOME}/studio/vendor/lib/.git`])
+    const deep = await candidatesFor(submodule, HOME, [{ folder: 'studio/vendor', teams: ['ABC'], about: 'vendored code' }], 'ABC')
+    expect(deep, 'a place inside a repository, holding a submodule').toEqual({
+      error: 'No run was started. studio/vendor holds no git or Lore workspace. Put the folder the work needs into Lore or git first, then give /conduct again.',
     })
   })
 })

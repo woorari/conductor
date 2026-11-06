@@ -64,6 +64,9 @@ export async function findHome(io: Io, cwd: string, gitRoot: string | null): Pro
 
     return userReal !== undefined && real !== undefined && isWithin(userReal, real)
   }
+  // The session's own git repository is its home whenever its root holds `.claude/conductor`, as before: git names
+  // the main working tree's root from a linked worktree, and the real path from a folder reached through a symlink.
+  if (gitRoot !== null && (await io.exists(`${gitRoot}/${CONDUCTOR}`))) return { kind: 'repository', root: gitRoot }
   for (let dir = trimmed(cwd); dir !== ''; dir = parentOf(dir)) {
     if (dir === userHome || !(await io.exists(`${dir}/${CONDUCTOR}`))) continue
     if (await isRepository(dir)) return { kind: 'repository', root: dir }
@@ -108,6 +111,32 @@ export async function workspacesIn(io: Io, placeReal: string): Promise<{ found: 
   return { found, left }
 }
 
+/**
+ * The workspace a root lies inside, between it and the home, or undefined.
+ * Its workers' copies are made beside it, so they would land inside that one.
+ */
+async function enclosingRoot(io: Io, homeReal: string, root: string): Promise<string | undefined> {
+  for (let above = parentOf(root); above !== '' && isWithin(homeReal, above); above = parentOf(above)) {
+    if ((await kindOf(io, above)) !== undefined) return above
+  }
+
+  return undefined
+}
+
+/** A place's workspaces, without those nested in another workspace: said in `left`. */
+async function ownWorkspaces(io: Io, homeReal: string, placeReal: string): Promise<{ found: { kind: WorkspaceKind; root: string }[]; left: string[] }> {
+  const inside = await workspacesIn(io, placeReal)
+  const found: { kind: WorkspaceKind; root: string }[] = []
+  const left = [...inside.left]
+  for (const one of inside.found) {
+    const outer = await enclosingRoot(io, homeReal, one.root)
+    if (outer === undefined) found.push(one)
+    else left.push(`${one.root} lies inside the workspace ${outer}, so its workers' copies would land inside that one`)
+  }
+
+  return { found, left }
+}
+
 const folderMessage = (at: number): string => `config.json: places[${at}].folder must be a folder inside this home, given relative to it.`
 
 /** A place's real path, strictly inside the home's; or why the run cannot start. Fails closed. */
@@ -140,7 +169,7 @@ export async function candidatesFor(io: Io, home: string, places: readonly Place
   for (const place of ours) {
     const where = await placeReal(io, home, homeReal, places, place)
     if ('error' in where) return where
-    const inside = await workspacesIn(io, where.real)
+    const inside = await ownWorkspaces(io, homeReal, where.real)
     candidates.push(...inside.found.map(one => ({ ...one, place: place.folder, about: place.about })))
     left.push(...inside.left)
   }
@@ -170,7 +199,7 @@ export async function workspaceOfSpec(io: Io, home: string, places: readonly Pla
     const where = await placeReal(io, home, homeReal, places, place)
     if ('error' in where) return where
     if (!holds(where.real, folder)) continue
-    const nearest = (await workspacesIn(io, where.real)).found.filter(one => holds(one.root, folder)).sort((one, other) => other.root.length - one.root.length)[0]
+    const nearest = (await ownWorkspaces(io, homeReal, where.real)).found.filter(one => holds(one.root, folder)).sort((one, other) => other.root.length - one.root.length)[0]
     if (nearest === undefined) return nowhere
 
     return { candidate: { ...nearest, place: place.folder, about: place.about }, team: place.teams[0] ?? '' }

@@ -125,3 +125,8 @@ test('a branch to build on that is no plain branch name reaches no git command',
   expect(started.deny).toContain('is no plain branch name')
   expect(gitRan(engine).filter(one => one[3] === 'fetch' || one[3] === 'worktree'), 'neither fetch nor worktree ran').toEqual([])
 })
+
+test("a push to the base by hand is refused when the repository's path holds spaces", async ($, on) => {
+  await gitBound($, on)
+  expect((await bash($, "git -C '/home/owner/work/Big Game 5.8' push origin main")).deny).toContain('pushes to main')
+})

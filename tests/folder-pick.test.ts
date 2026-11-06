@@ -117,3 +117,11 @@ test("the guard follows a new pick: Lore writes are refused once the run works i
   await pick($, LORE_WS)
   expect((await bash('lore branch merge x')).deny, 'the guard reads the workspace picked last').toBeDefined()
 })
+
+test('while the pick is open the orchestrator only reads: lore writes and pushes to the base by hand are refused', async ($, on) => {
+  await open($, on)
+  const bash = (command: string) => callTool($, { tool: 'Bash', tool_use_id: 'bash', command, description: 'A command' }) as Promise<{ deny?: string }>
+  expect((await bash(`cd -- '${LORE_WS}' && lore push`)).deny).toBeDefined()
+  expect((await bash('git push origin main')).deny).toBeDefined()
+  expect((await bash(`cd -- '${LORE_WS}' && lore status`)).deny).toBeUndefined()
+})

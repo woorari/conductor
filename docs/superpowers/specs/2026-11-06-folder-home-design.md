@@ -81,8 +81,8 @@ A git repository's root is found as today (`$.session.repo()`). A Lore root is a
 ```json
 {
   "places": [
-    { "folder": "studio", "teams": ["ABC"], "about": "the studio's own tools", "check": { "argv": ["npm", "test"], "timeoutMin": 20 } },
-    { "folder": "game/code", "teams": ["DEF"], "about": "engine and game code", "lore": { "branchPrefix": "conductor/" } },
+    { "folder": "studio", "teams": ["ABC"], "about": "the studio's own tools" },
+    { "folder": "game/code", "teams": ["DEF"], "about": "engine and game code", "lore": { "branchPrefix": "conductor/" }, "check": { "argv": ["./Script/check.sh"], "timeoutMin": 45 } },
     { "folder": "game/art", "teams": ["DEF"], "about": "3D art and source assets" }
   ]
 }
@@ -112,6 +112,8 @@ A place's workspaces are found when they are needed, never configured. They are:
 - each of its direct subfolders that is a git or Lore root.
 
 A folder that has both counts as git, as today. Every workspace's real path must lie inside its place's real path. One that doesn't is left out, and the board says so.
+
+A workspace that lies inside another workspace is left out too, and the board says so (added after the final review on 2026-11-06). Its workers' copies are made beside it, so they would land inside the outer workspace, which nothing keeps them out of. So a spec in such a nested workspace runs in the outer one.
 
 ### 5.4 Choosing the workspace for a run
 

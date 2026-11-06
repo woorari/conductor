@@ -131,3 +131,11 @@ test('a repository home refuses places', async ($, on) => {
   await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
   expect((await conductIn($, 'ABC-12')).text).toBe('No run was started: config.json: places is for a home that is not itself a repository. Here the repository is the workspace: remove places.')
 })
+
+test('a git run names no check command: checks run for Lore workspaces only', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  placed(on)
+  await startAt($)
+  const answer = await conductIn($, 'ABC-12')
+  expect(answer.text).not.toContain('check command')
+})

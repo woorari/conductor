@@ -3205,6 +3205,17 @@ export const register: Register = (on, options) => {
         }
       }
     }
+    // While a folder home's run has no workspace picked, nothing is written by hand: no lore write, no push to the base.
+    if (call.tool === 'Bash' && typeof call.command === 'string' && (await isFolderHome($))) {
+      const openPath = await boundLedger($).catch(() => undefined)
+      const openRun = openPath === undefined ? undefined : parseLedger((await textAt($, openPath)) ?? '').ledger
+      if (openRun?.run.candidates !== undefined && openRun.run.workspace === undefined) {
+        const what = loreByHand(call.command, { base: config.base, caller: 'orchestrator' }) ?? byHand(call.command, config.base)
+        if (what !== undefined) {
+          return { deny: `conductor: this command ${what} by hand. This run's workspace is not picked yet, so it only reads: pick it with mcp__conductor__run_workspace, then plan. /board none lets go of the run.` }
+        }
+      }
+    }
     const taskId = call.agentId === undefined ? undefined : agents.get(call.agentId)
     // In a bound Lore run the mod does the Lore writes: a worker moves only its own branch, the orchestrator only reads.
     let pinnedCommand: string | undefined
@@ -3588,7 +3599,8 @@ export const register: Register = (on, options) => {
     asks.push(planning(id, source, title))
 
     // The mod runs the project's check itself, without Claude Code's permission prompt: the owner sees the program now.
-    const check = placed === undefined ? project.check : placed.config.check
+    // The mod runs a check only in a Lore workspace: a git run's checks are its pull request's on GitHub.
+    const check = placed === undefined ? project.check : placed.workspace?.kind === 'lore' ? placed.config.check : undefined
     const checkLine = check === undefined ? '' : ` Its check command, which the mod runs on each judged revision: ${check.argv.join(' ')}.`
 
     return {
