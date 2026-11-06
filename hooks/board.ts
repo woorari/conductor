@@ -182,6 +182,9 @@ export function detail(row: TaskRow): string {
   if (row.contextTokens !== undefined && row.status === 'building') parts.push(`${thousands(row.contextTokens)} tokens`)
   if (row.builtOn !== undefined && row.status !== 'done') parts.push(`built on ${row.builtOn}`)
   if (row.pr !== undefined) parts.push(`PR ${row.pr}`)
+  // A Lore task stands at a revision, and its check on it, where a GitHub task has a pull request.
+  else if (row.revision !== undefined && row.status !== 'done') parts.push(`rev ${row.revision.slice(0, 7)}`)
+  if (row.check !== undefined && row.status !== 'done') parts.push(`check ${row.check.verdict}`)
   if (row.ticket !== undefined) parts.push(`ticket ${row.ticket}`)
   if (row.waitsFor.length > 0) parts.push(`after ${row.waitsFor.join(', ')}`)
   const doing = row.note ?? row.activity?.text

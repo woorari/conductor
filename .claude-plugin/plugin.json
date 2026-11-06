@@ -1,18 +1,35 @@
 {
   "name": "conductor",
-  "version": "0.1.0",
-  "description": "Conducts a larger piece of work in Claude Code: a live run board, a model router for worker agents, board messaging, context rotation, and a GitHub merge loop pinned to the checked head.",
-  "author": { "name": "René Rieck" },
+  "version": "0.2.0",
+  "description": "Conducts a larger piece of work in Claude Code: a live run board, a model router for worker agents, board messaging, context rotation, and a merge loop: GitHub pull requests pinned to the checked head, or Lore branches merged into the base only on your approval. Tickets from GitHub or Linear.",
+  "author": {
+    "name": "René Rieck"
+  },
   "homepage": "https://github.com/woorari/conductor",
   "repository": "https://github.com/woorari/conductor",
   "license": "MIT",
-  "keywords": ["orchestration", "agents", "github", "pull-requests", "board"],
+  "keywords": [
+    "orchestration",
+    "agents",
+    "github",
+    "pull-requests",
+    "board",
+    "lore",
+    "linear"
+  ],
   "types": "./types/index.d.ts",
   "userConfig": {
     "githubToken": {
       "type": "string",
       "title": "GitHub token",
       "description": "A token that can read checks and merge pull requests in your repositories. Leave it empty to use GH_TOKEN, GITHUB_TOKEN or the token of gh auth login.",
+      "sensitive": true,
+      "required": false
+    },
+    "linearApiKey": {
+      "type": "string",
+      "title": "Linear API key",
+      "description": "A Linear API key for runs whose tickets are in Linear. Leave it empty to use LINEAR_API_KEY.",
       "sensitive": true,
       "required": false
     },
@@ -26,8 +43,18 @@
       "type": "string",
       "title": "Merge method",
       "description": "How GitHub merges a run's pull requests.",
-      "options": ["merge", "squash", "rebase"],
+      "options": [
+        "merge",
+        "squash",
+        "rebase"
+      ],
       "default": "merge"
+    },
+    "loreBin": {
+      "type": "string",
+      "title": "Lore program",
+      "description": "The full path of the lore program, for a Lore workspace where it is neither on the PATH nor in ~/.local/bin. Leave it empty to look there, or set LORE_BIN.",
+      "required": false
     }
   }
 }

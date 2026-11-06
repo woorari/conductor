@@ -1,0 +1,195 @@
+Real output of lore 0.12.0+1967, captured 2026-11-06 in the spikes of
+docs/superpowers/specs/2026-11-06-lore-and-linear-design.md (section 7).
+The server is renamed lore.example.test and local paths are renamed /work/...;
+nothing else is changed. Tests turn these into fixtures (tests/lore-output.ts).
+Each block: the command, its exit code, then stdout+stderr as printed.
+
+=== repository info  [exit 0]
+conductor-spike (01a1b056c981721b88ecc4b6b66d6f45)
+
+Throwaway repo for conductor Lore spikes
+
+Remote URL: lores://lore.example.test:41337
+Default branch: main (e726318bbc3fd75ac8733a7e030cc35b)
+Creator: <unknown>
+Created: Fri, 6 Nov 2026 10:10:40 +0000
+Instance: 01a1b056ccb5739b90b2a9717ed6f5da
+
+=== branch create conductor/S-1-spike/t1  [exit 0]
+Created branch conductor/S-1-spike/t1 at revision cc15628114af5f4e7aee07e0a99a54af1c6693360dbac442cf1d88458e547efd
+
+=== branch info  (on a pushed task branch)  [exit 0]
+Branch conductor/S-1-spike/t1
+  ID: 01a1b056ff7174b1841d5932e6e467f1
+  Latest: 53f36f46d397c857021153a9cfb67ea7122d263d45f2d347088fdc416c582aaa
+  Remote Latest: 53f36f46d397c857021153a9cfb67ea7122d263d45f2d347088fdc416c582aaa
+  Parent: conductor/S-1-spike at cc15628114af5f4e7aee07e0a99a54af1c6693360dbac442cf1d88458e547efd
+          main at cc15628114af5f4e7aee07e0a99a54af1c6693360dbac442cf1d88458e547efd
+  Created: Fri, 6 Nov 2026 10:10:55 +0000
+
+=== branch info  (a new branch, not pushed yet)  [exit 0]
+Branch conductor/S-1-spike
+  ID: 01a1b056f6bb701783e7a1beb2aa49a0
+  Latest: cc15628114af5f4e7aee07e0a99a54af1c6693360dbac442cf1d88458e547efd
+  Remote Latest: 0000000000000000000000000000000000000000000000000000000000000000
+  Parent: main at cc15628114af5f4e7aee07e0a99a54af1c6693360dbac442cf1d88458e547efd
+  Created: Fri, 6 Nov 2026 10:10:51 +0000
+
+=== branch info main  (from a workspace that never synced main)  [exit 0]
+Branch main
+  ID: e726318bbc3fd75ac8733a7e030cc35b
+  Latest: 0000000000000000000000000000000000000000000000000000000000000000
+  Remote Latest: f8e27cef89404cecc4b071b12de342aa899fe52eed9fad7e820fc302c3003e68
+  Creator: <unknown>
+  Created: Fri, 6 Nov 2026 10:10:40 +0000
+
+=== branch list  [exit 0]
+Local branches:
+* conductor/S-1-spike
+  conductor/S-1-spike/t2
+  conductor/S-1-spike/t1
+  main
+Remote branches:
+  conductor/S-1-spike/t2
+  conductor/S-1-spike
+  main
+  conductor/S-1-spike/t1
+
+=== stage --scan .  [exit 0]
+Staging file system changes
+Staging 1 files (1 modified, 0 added, 0 deleted, 0 moved)
+Staged repository state a35e238ee37780a3a09b2133532dd196a9409317e9b15e60997b99ba9b23d966
+
+=== commit "t1: change line2"  [exit 0]
+Fragmenting files and updating tree hashes
+Committing staged changes
+Committed 1/1 directories, 1/1 files, 26 bytes/26 bytes (1 modified, 0 deleted)
+Stored history for 4 nodes
+Repository: 01a1b056c981721b88ecc4b6b66d6f45
+Revision  : 2
+Signature : 53f36f46d397c857021153a9cfb67ea7122d263d45f2d347088fdc416c582aaa
+Parent    : cc15628114af5f4e7aee07e0a99a54af1c6693360dbac442cf1d88458e547efd
+Branch    : 01a1b056ff7174b1841d5932e6e467f1
+Date      : Fri, 6 Nov 2026 10:10:54 +0000
+    t1: change line2
+Commit succeeded
+
+=== push  (first push of a new branch)  [exit 0]
+Creating branch conductor/S-1-spike/t1 at cc15628114af5f4e7aee07e0a99a54af1c6693360dbac442cf1d88458e547efd
+Pushing 1 fragment(s)
+Pushed 1 fragment(s), 261 bytes
+Pushing 53f36f46d397c857021153a9cfb67ea7122d263d45f2d347088fdc416c582aaa to branch conductor/S-1-spike/t1
+Pushed revision 2 -> 53f36f46d397c857021153a9cfb67ea7122d263d45f2d347088fdc416c582aaa to branch conductor/S-1-spike/t1
+
+=== push  (to a protected branch)  [exit 17]
+Local branch is 1 revision(s) ahead of remote, pushing all revisions
+Repository 01a1b056c981721b88ecc4b6b66d6f45
+Pushing 19bdb02e179e7c693d5ca14a97a65703224e0bb6425780110b91e679dbccb63b to branch main
+[Error] Not authorized to access repository
+  at lore-transport/src/error.rs:34:46
+  at lore-revision/src/branch/push.rs:1938 - pushing branch to remote
+
+=== push main  (server head moved)  [exit 255]
+Revision is already pushed and remote has moved forward
+[Error] Branch has diverged, sync to merge remote changes
+  at lore-revision/src/branch/push.rs:1047:24
+
+=== push  (nothing new)  [exit 0]
+Revision is already pushed and at remote latest
+
+=== status  (clean, in sync)  [exit 0]
+Repository 01a1b056c981721b88ecc4b6b66d6f45
+On branch conductor/S-1-spike/t1 revision 2 -> 53f36f46d397c857021153a9cfb67ea7122d263d45f2d347088fdc416c582aaa
+Remote revision 2 -> 53f36f46d397c857021153a9cfb67ea7122d263d45f2d347088fdc416c582aaa
+Local branch in sync with remote
+No tracked changes
+
+=== status --scan  (an untracked file)  [exit 0]
+On branch conductor/S-1-spike revision 3 -> 33bd575ba4252770aa7ddc25c1ddc5d5dd53bc1cf3c1d1f14c8357e8c290e22f
+Remote revision 3 -> 33bd575ba4252770aa7ddc25c1ddc5d5dd53bc1cf3c1d1f14c8357e8c290e22f
+Local branch in sync with remote
+Untracked files:
+A untracked.txt
+Tracked changes: 1 added
+
+=== branch merge conductor/S-1-spike/t1 --message "Merge t1"  (clean)  [exit 0]
+Starting merge of branch 01a1b056ff7174b1841d5932e6e467f1 revision 53f36f46d397c857021153a9cfb67ea7122d263d45f2d347088fdc416c582aaa
+Merged files, 1 updated, 0 deleted, 0 merged, 0 conflicted
+Staged merged repository state 87d256054b5adc53a5d22385d0394fcfb4fdc9869d60757a3f64a116acaac658
+Fragmenting files and updating tree hashes
+Stored history for 5 nodes
+Committed merged repository state 3 -> 33bd575ba4252770aa7ddc25c1ddc5d5dd53bc1cf3c1d1f14c8357e8c290e22f
+
+=== branch merge conductor/S-1-spike/t2 --message "Merge t2"  (conflict; note exit 0)  [exit 0]
+Starting merge of branch 01a1b057635c768db883b14edaff63d4 revision 7dc1ead21fef369b9a51fac838168962d0349980fcbd3856fa552fadb499c8f3
+Merged files, 1 updated, 0 deleted, 0 merged, 1 conflicted
+Staged merged repository state f0bc69f9e6a682f7f7f329418380551ca098ef30d8e51e42cbb7c1f1a4bb8c9f
+Files in conflict:
+a.txt
+
+=== status  (during the conflicted merge)  [exit 0]
+Repository 01a1b056c981721b88ecc4b6b66d6f45
+On branch conductor/S-1-spike revision 3 -> 33bd575ba4252770aa7ddc25c1ddc5d5dd53bc1cf3c1d1f14c8357e8c290e22f
+Remote revision 3 -> 33bd575ba4252770aa7ddc25c1ddc5d5dd53bc1cf3c1d1f14c8357e8c290e22f
+Local branch in sync with remote
+Pending merge, incoming revision 7dc1ead21fef369b9a51fac838168962d0349980fcbd3856fa552fadb499c8f3
+Changes staged for commit:
+A dir/c.txt (M)
+Changes in conflict:
+M  a.txt (M)!
+
+=== branch merge abort  [exit 0]
+Merge abort from staged revision f0bc69f9e6a682f7f7f329418380551ca098ef30d8e51e42cbb7c1f1a4bb8c9f to current revision 33bd575ba4252770aa7ddc25c1ddc5d5dd53bc1cf3c1d1f14c8357e8c290e22f
+Merge abort reverted changes
+
+=== branch protect main  [exit 0]
+Branch main protected
+
+=== branch unprotect main  [exit 0]
+Branch main unprotected
+
+=== branch merge into main "Merge run S-1 into main"  (while main is protected)  [exit 17]
+Found 1 files and/or directories potentially affected by merge into
+a.txt
+Fragmenting files and updating tree hashes
+Stored history for 5 nodes
+Query 5 fragment(s)
+Pushed 5 fragment(s)
+[Error] Not authorized to access repository
+  at lore-transport/src/error.rs:34:46
+  at lore-revision/src/branch/merge.rs:4717 - pushing branch
+
+=== branch merge into main "Merge run S-1 into main"  (after unprotect)  [exit 0]
+Found 1 files and/or directories potentially affected by merge into
+a.txt
+Fragmenting files and updating tree hashes
+Stored history for 5 nodes
+Query 3 fragment(s)
+Pushed 2 fragment(s)
+Revision  : 4
+Signature : f8e27cef89404cecc4b071b12de342aa899fe52eed9fad7e820fc302c3003e68
+
+=== branch switch conductor/S-1-spike  [exit 0]
+Switching branch to conductor/S-1-spike, using current remote latest revision cc15628114af5f4e7aee07e0a99a54af1c6693360dbac442cf1d88458e547efd
+Calculating deltas 2 -> 1
+Verifying 1 changes with local file system
+Switched to branch conductor/S-1-spike revision cc15628114af5f4e7aee07e0a99a54af1c6693360dbac442cf1d88458e547efd
+
+=== repository update-path  [exit 0]
+(no output)
+
+=== repository instance list  (in a copy, after update-path)  [exit 0]
+01a1b056ccb5739b90b2a9717ed6f5da /work/copy-t2 conductor/S-1-spike/t2 7dc1ead21fef369b9a51fac838168962d0349980fcbd3856fa552fadb499c8f3
+
+=== history --branch main --oneline 5  [exit 0]
+4 Merge run S-1 into main
+1 spike: initial files
+
+=== classic.WorktreeCreate event, as a mod received it (Claude Code 2.1.318)
+{"session_id":"4b8c070c-...","transcript_path":"/home/.../4b8c070c-....jsonl","cwd":"/work/project","scratchpad_dir":"/tmp/.../scratchpad","prompt_id":"aef04936-...","hook_event_name":"WorktreeCreate","name":"agent-a71d3ca93f7d1fe45"}
+
+=== Agent start refused, no WorktreeCreate hook configured, outside git
+Cannot create agent worktree: not in a git repository and no WorktreeCreate hooks are configured.
+
+=== Agent start refused, placeholder hook in the mod's hooks.json, git repository, mod answered {}
+WorktreeCreate hook failed: hook is configured but did not run (workspace not trusted or matcher mismatch)

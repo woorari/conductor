@@ -1,5 +1,6 @@
-import type { Activity, ModelTier, ProblemSeverity, TaskStatus } from '../types'
-import { RUN_ID, STATUSES, TIERS } from './ledger'
+import type { Activity, ModelTier, ProblemSeverity, TaskStatus, Ticket } from '../types'
+import { LINEAR_KEY, RUN_ID, STATUSES, TIERS } from './ledger'
+import { REVISION } from './lore'
 import { LOOK_AGAIN_MIN, afterDone, dueForLook, isUnderway, lostWith, named, standing, standingText } from './problems'
 
 /**
@@ -83,6 +84,15 @@ const NOTE_MAX = 200
 const PROBLEM_MAX = 500
 const FILES_MAX = 40
 /** The most files or folders one task may be expected to change (proposed, not measured). */
+const TICKET_HELP = 'ticket is the issue’s number, a whole number from 1, or its Linear key, like ABC-12.'
+
+/** A GitHub issue's number or a Linear issue's key. */
+export const isTicket = (value: unknown): value is Ticket =>
+  (typeof value === 'number' && Number.isInteger(value) && value >= 1) || (typeof value === 'string' && LINEAR_KEY.test(value))
+
+/** How a ticket is named in what the board says: `#391` on GitHub, `ABC-12` in Linear. */
+export const ticketName = (ticket: Ticket): string => (typeof ticket === 'number' ? `#${ticket}` : ticket)
+
 export const FILES_PER_TASK = 12
 
 /** A path as the board compares it: no `./` in front, no `/` behind, single slashes. */
@@ -372,9 +382,7 @@ export function addTask(raw: Raw, caller: Caller, input: Record<string, unknown>
   if (!Array.isArray(dependsOn) || dependsOn.some(one => typeof one !== 'string')) return refused('dependsOn is a list of task ids.')
   const missing = (dependsOn as string[]).find(one => !raw.tasks.some(task => task.id === one))
   if (missing !== undefined) return refused(`dependsOn names ${missing}, which is no task of this run.`)
-  if (input.ticket !== undefined && (typeof input.ticket !== 'number' || !Number.isInteger(input.ticket) || input.ticket < 1)) {
-    return refused('ticket is the issue’s number, a whole number from 1.')
-  }
+  if (input.ticket !== undefined && !isTicket(input.ticket)) return refused(TICKET_HELP)
   const files = input.files === undefined ? [] : fileList(input.files)
   if (files === undefined) return refused(`files is a list of at most ${FILES_MAX} files or folders, relative to the repository.`)
   // One task is one change a single worker can finish without filling its context.
@@ -422,6 +430,8 @@ export function updateTask(raw: Raw, at: string, caller: Caller, input: Record<s
     return refused(`You are ${describe(caller)} and may only update that task, not ${id}.`)
   }
   const said: string[] = []
+  // A green task whose revision moved: its judgement no longer covers it.
+  let movedFromGreen = false
   // What the status change does to the problems that hang on this task: said once the change is made.
   let isNowDone = false
   let isNowFailed = false
@@ -431,6 +441,14 @@ export function updateTask(raw: Raw, at: string, caller: Caller, input: Record<s
     if (status === undefined) return refused(`status is one of ${STATUSES.join(', ')}.`)
     if (caller.kind === 'worker' && !WORKER_STATUSES.includes(status)) {
       return refused(`A worker sets its task to ${WORKER_STATUSES.join(', ')}; ${status} is the orchestrator's to set.`)
+    }
+    // A Lore task is handed back with the revision its worker pushed: what its merge is pinned to.
+    const isLore = typeof (raw.run as Record<string, unknown> | undefined)?.lore === 'object'
+    if (status === 'review' && isLore && (input.revision ?? task.revision) === undefined) {
+      return refused(`${id} is handed back with the revision it pushed: {"task": "${id}", "status": "review", "revision": "<64 hex>"}. lore branch info shows it as Remote Latest once lore push went through.`)
+    }
+    if (status === 'done' && task.status !== 'done' && (input.revision ?? task.revision) !== undefined) {
+      return refused(`${id} has a branch with code on it, so it is done once that is merged into the run branch: call mcp__conductor__merge for it.`)
     }
     // A task with a pull request is done once that is merged: the merge loop's to say, not a claim.
     if (status === 'done' && task.status !== 'done' && (input.pr ?? task.pr) !== undefined) {
@@ -461,9 +479,7 @@ export function updateTask(raw: Raw, at: string, caller: Caller, input: Record<s
   }
   if (input.ticket !== undefined) {
     if (caller.kind !== 'orchestrator') return refused('Only the orchestrator sets a task’s ticket.')
-    if (typeof input.ticket !== 'number' || !Number.isInteger(input.ticket) || input.ticket < 1) {
-      return refused('ticket is the issue’s number, a whole number from 1.')
-    }
+    if (!isTicket(input.ticket)) return refused(TICKET_HELP)
     task.ticket = input.ticket
     said.push(`ticket ${input.ticket}`)
   }
@@ -474,18 +490,41 @@ export function updateTask(raw: Raw, at: string, caller: Caller, input: Record<s
     task.pr = input.pr
     said.push(`PR ${input.pr}`)
   }
+  const inLore = typeof (raw.run as Record<string, unknown> | undefined)?.lore === 'object'
+  if (input.branch !== undefined && inLore && caller.kind === 'worker') {
+    return refused(`The mod names a task's branch in a Lore run: ${id}'s is ${String(task.branch ?? 'made when its worker starts')}. Hand back with the revision you pushed.`)
+  }
   if (input.branch !== undefined) {
     if (typeof input.branch !== 'string' || tidy(input.branch) === '') return refused('branch is the branch’s name.')
     task.branch = tidy(input.branch)
     said.push(`branch ${task.branch}`)
   }
-  if (said.length === 0) return refused('Nothing to change: give status, tier, note, ticket, pr or branch.')
+  if (input.revision !== undefined) {
+    if (typeof input.revision !== 'string' || !REVISION.test(input.revision)) return refused('revision is the Lore revision its branch was pushed at: 64 hex characters.')
+    // A new revision is a new change: a check run on another one says nothing of it, and a judgement of another
+    // one does not cover it. A green task whose revision moves is back in review until it is judged again.
+    const isNew = task.revision !== input.revision
+    if (isNew) delete task.check
+    task.revision = input.revision
+    said.push(`revision ${input.revision.slice(0, 7)}`)
+    if (isNew && task.status === 'green' && input.status === undefined) {
+      task.status = 'review'
+      said.push('back in review')
+      movedFromGreen = true
+    }
+  }
+  if (said.length === 0) return refused('Nothing to change: give status, tier, note, ticket, pr, branch or revision.')
 
   const base = `${id}: ${said.join(', ')}.`
   const lost = isNowFailed ? lostWith(raw, id) : []
   const lostText = lost.length === 0 ? '' : `${named(lost)} ${lost.length === 1 ? 'has' : 'have'} no task now.`
   // A worker that gives its task up is told no more than it did; the orchestrator hears what that leaves loose.
-  if (caller.kind === 'worker') return { ...changed(base), ...(lostText === '' ? {} : { tell: `Run board: ${id} failed. ${lostText}` }) }
+  const movedText = movedFromGreen ? `Run board: ${id}'s branch moved to a revision nobody judged: it is back in review, so judge it again before it is merged.` : ''
+  if (caller.kind === 'worker') {
+    const tell = [lostText === '' ? '' : `Run board: ${id} failed. ${lostText}`, movedText].filter(one => one !== '').join(' ')
+
+    return { ...changed(base), ...(tell === '' ? {} : { tell }) }
+  }
 
   return changed([base, isNowDone ? afterDone(raw, id) : '', lostText].filter(one => one !== '').join(' '))
 }
@@ -610,15 +649,13 @@ export function assignProblem(raw: Raw, caller: Caller, input: Record<string, un
       )
     }
   } else {
-    if (typeof input.ticket !== 'number' || !Number.isInteger(input.ticket) || input.ticket < 1) {
-      return refused('ticket is the issue’s number, a whole number from 1.')
-    }
+    if (!isTicket(input.ticket)) return refused(TICKET_HELP)
     const carrying = raw.tasks.filter(one => one.ticket === input.ticket && goes(one))
     if (carrying.length === 0) {
-      return refused(`No task of this run that still goes on carries ticket #${input.ticket}, so the run does not conduct it. Add a task for it with task_add (ticket, addresses): a problem is not left with a ticket nobody here conducts.`)
+      return refused(`No task of this run that still goes on carries ticket ${ticketName(input.ticket)}, so the run does not conduct it. Add a task for it with task_add (ticket, addresses): a problem is not left with a ticket nobody here conducts.`)
     }
     if (carrying.length > 1) {
-      return refused(`Ticket #${input.ticket} is carried by ${carrying.map(one => one.id).join(', ')}: name the task that deals with ${problem.id}.`)
+      return refused(`Ticket ${ticketName(input.ticket)} is carried by ${carrying.map(one => one.id).join(', ')}: name the task that deals with ${problem.id}.`)
     }
     task = carrying[0]
   }
@@ -626,5 +663,5 @@ export function assignProblem(raw: Raw, caller: Caller, input: Record<string, un
   if (problem.addressedBy === task.id) return refused(`${problem.id} is addressed by ${task.id} already.`)
   problem.addressedBy = task.id
 
-  return changed(`${problem.id} is addressed by ${task.id} (${task.status}${typeof task.ticket === 'number' ? `, ticket #${task.ticket}` : ''}).`)
+  return changed(`${problem.id} is addressed by ${task.id} (${task.status}${isTicket(task.ticket) ? `, ticket ${ticketName(task.ticket)}` : ''}).`)
 }

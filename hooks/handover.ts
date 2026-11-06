@@ -95,7 +95,9 @@ export function handover(ledger: Ledger, moment: Moment): string {
     '- A task that was handed back waits for your judgement: review, green, blocked or failed, or done for a task with no pull request.',
     '- An open blocker or warning is yours until a task of the run has dealt with it: one without a task gets one (mcp__conductor__task_add with addresses, or mcp__conductor__problem_assign to a task or ticket the run still conducts); one whose task is done is checked, then mcp__conductor__problem_resolve. The run is not delivered while one is open. Look whether it still holds before you give it a task: if it does not, resolve it. A task is not merged while a problem found under it waits for that decision.',
     '- A task starts once everything it waits for is green or done; it need not wait for the merge. It is merged only after what it waits for is done.',
-    moment.isElsewhere === true
+    ledger.run.lore !== undefined
+      ? `- In this Lore run a green task is merged into ${ledger.run.lore.branch} with mcp__conductor__merge, pinned to its revision, one at a time; mcp__conductor__merge_check says what stands in the way. Workers commit and push their own branches. Once every task is merged and nothing is open, the owner types /approve-main; when ${ledger.run.lore.base} moved, bring it in first with mcp__conductor__run_sync_base.`
+      : moment.isElsewhere === true
       ? "- The board merges nothing in this repository, whose origin is not on GitHub. A green task's pull request is merged by the repository's own path, one at a time; the task is then done on the owner's word, /merged <task>."
       : '- A green task is merged with mcp__conductor__merge, one at a time; the mod marks it done once GitHub has merged it, and then watches the checks on the base branch. mcp__conductor__merge_check says what stands in the way.',
   ].join('\n')

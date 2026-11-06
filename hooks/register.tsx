@@ -32,7 +32,14 @@ import { DONE_SHOWN, boardView, clock, detail, orchestratorLine, problemDetail, 
 import type { TaskRow } from './board'
 import { dashboardSvg } from './dashboard'
 import { KEEP, ROTATE_AT, carried, handover } from './handover'
-import { RUN_ID, STATUSES, TIERS, parseLedger } from './ledger'
+import { LINEAR_KEY, RUN_ID, STATUSES, TIERS, parseLedger } from './ledger'
+import { approvedMain, baseBroughtIn, conflicted, letGo, loreReady, onBase, onRunBranch, readyForBase, rev7, startLoreMerge } from './lore-merge'
+import { LINEAR_API, M_CREATE, M_UPDATE, Q_ISSUE, Q_TEAM, apiKeyOf, createdOf, errorsOf, issueOf, issueText, stateFor, teamOf, updatedOf } from './linear'
+import { branchInfoOf, ignoreRules, loreByHand, mergeOf, pushOf, repositoryInfoOf, statusOf } from './lore'
+import { CONFIG_PATH, LORE_DEFAULTS, PLACEHOLDER_SNIPPET, hasPlaceholder, parseConfig, runsIgnored } from './project'
+import type { ProjectConfig } from './project'
+import { checkWorkspaceOf, isInside, removals, runBranchOf, runWorkspaceOf, taskBranchOf, topLevel, workspaceOf, workspacesOf } from './workspace'
+import type { RepositoryInfo } from './lore'
 import { pauseRun, unpauseRun } from './pause'
 import { LOOK_AGAIN_MIN, dueForLook, isUnderway, unsettled } from './problems'
 import { APPROVED, PLANNING, conducting, newRun, planning } from './plan'
@@ -99,6 +106,8 @@ const TOOL_REPORT = 'mcp__conductor__problem_report'
 const TOOL_RESOLVE = 'mcp__conductor__problem_resolve'
 const TOOL_ASSIGN = 'mcp__conductor__problem_assign'
 const NOT_DONE = 'Not done.'
+/** A ticket in a tool's schema: a GitHub issue's number, or a Linear issue's key. */
+const TICKET_PATTERN = LINEAR_KEY.source
 /** After a merge the base branch's checks are watched this long at most, in minutes (proposed): a branch nothing checks has nothing to wait for. */
 const MAIN_WATCH_MIN = 60
 /**
@@ -282,11 +291,17 @@ function learn(ledger: Ledger, path: string): void {
     inbox.clear()
     handed.length = 0
     wakes.clear()
+    isolated.clear()
+    workspaces.clear()
     learnedFrom = path
     // What the ledger says still waits for a reader waits again after a reload.
     for (const delivery of waiting(ledger)) inbox.set(delivery.taskId, [...(inbox.get(delivery.taskId) ?? []), delivery])
   }
   for (const task of ledger.tasks) {
+    if (task.workspace !== undefined) {
+      isolated.add(task.id)
+      workspaces.set(task.id, task.workspace)
+    }
     if (task.agentId === undefined) continue
     agents.set(task.agentId, task.id)
     workers.add(task.agentId)
@@ -312,11 +327,557 @@ async function isAtForge($: EngineInterface): Promise<boolean> {
 /** This repository's `owner/name` on GitHub, once `isAtForge` has read its origin. */
 const repoHere = (): string | undefined => githubRepo(origin)
 
+/**
+ * Where the session works: a git repository (GitHub or elsewhere), or a Lore
+ * workspace. A Lore workspace whose `lore` could not be run, or whose
+ * repository could not be read, still has its root: the mod can then say what
+ * is missing instead of staying silent.
+ */
+type LoreBackend = { kind: 'lore'; root: string; bin?: string; info?: RepositoryInfo; problem?: string }
+type Backend = { kind: 'git'; root: string; remote: string | null } | LoreBackend
+
+let backend: Backend | null | undefined
+/** The `lore` binary that ran, once one did: kept for this module's life. */
+let loreFound: string | undefined
+
+const LORE_MISSING =
+  "lore could not be run: not as lore on the PATH, and not as ~/.local/bin/lore. Set its full path in the mod's Lore program option, or export LORE_BIN, then start a new session."
+/** The person's own word on which lore to run: the mod's Lore program option. LORE_BIN comes after it. */
+let loreOption: string | undefined
+/** The key of the mod's Linear API key option; empty when none. LINEAR_API_KEY comes after it. */
+let linearOption = ''
+/** Why the last Linear state change failed, said once as a problem: later ones for the same reason are not said again. */
+let linearFailed: string | undefined
+
+type Ran = { exitCode: number; stdout: string; stderr: string; out: string }
+
+/** The `lore` binary to run: the one that answered `--version`, tried on the PATH and then in ~/.local/bin. */
+async function loreBin($: EngineInterface, cwd: string): Promise<string | undefined> {
+  if (loreFound !== undefined) return loreFound
+  const home = await $.env.get('HOME').catch(() => undefined)
+  // Only the person says which program runs, never the repository: a path they give is the one, and no other is tried in its place.
+  const fromEnv = (await $.env.get('LORE_BIN').catch(() => undefined))?.trim()
+  const configured = loreOption ?? (fromEnv === undefined || fromEnv === '' ? undefined : fromEnv)
+  const candidates = configured !== undefined ? [configured] : ['lore', ...(home === undefined ? [] : [`${home}/.local/bin/lore`])]
+  for (const candidate of candidates) {
+    try {
+      const ran = await $.process.run([candidate, '--version'], { cwd, timeoutMs: 10_000 })
+      if (ran.exitCode === 0) {
+        loreFound = candidate
+
+        return candidate
+      }
+    } catch {
+      // Not this one.
+    }
+  }
+
+  return undefined
+}
+
+/**
+ * Runs `lore --non-interactive <args>` in a folder, without a shell. Never
+ * throws: a program that could not be run, or ran out of time, answers a
+ * non-zero exit with the reason. `out` is what it printed on both streams,
+ * which is what Lore's messages are read from.
+ */
+async function lore($: EngineInterface, args: readonly string[], cwd: string, timeoutMs = 30_000): Promise<Ran> {
+  const bin = await loreBin($, cwd)
+  if (bin === undefined) return { exitCode: 127, stdout: '', stderr: LORE_MISSING, out: LORE_MISSING }
+  try {
+    const ran = await $.process.run([bin, '--non-interactive', ...args], { cwd, timeoutMs })
+
+    return { exitCode: ran.exitCode, stdout: ran.stdout, stderr: ran.stderr, out: `${ran.stdout}${ran.stderr === '' ? '' : `\n${ran.stderr}`}` }
+  } catch (cause) {
+    const reason = because(cause)
+
+    return { exitCode: 1, stdout: '', stderr: reason, out: reason }
+  }
+}
+
+/** The nearest folder at or above the session's own that holds a `.lore` folder. */
+async function loreRoot($: EngineInterface): Promise<string | null> {
+  let dir = (await $.session.cwd().catch(() => '')).replace(/\/+$/, '')
+  while (dir !== '') {
+    if (await $.fs.exists(`${dir}/.lore`).catch(() => false)) return dir
+    dir = dir.slice(0, dir.lastIndexOf('/'))
+  }
+
+  return null
+}
+
+/** Where the session works, read once: git first, as before, then a Lore workspace. Null outside both. */
+async function backendOf($: EngineInterface): Promise<Backend | null> {
+  if (backend !== undefined) return backend
+  const repo = await $.session.repo().catch(() => null)
+  if (repo !== null && repo !== undefined) {
+    backend = { kind: 'git', root: repo.root, remote: repo.remote }
+
+    return backend
+  }
+  const found = await loreRoot($)
+  if (found === null) {
+    backend = null
+
+    return backend
+  }
+  const bin = await loreBin($, found)
+  if (bin === undefined) {
+    // Not kept: lore may be installed meanwhile, and the next look finds it.
+    return { kind: 'lore', root: found, problem: LORE_MISSING }
+  }
+  const asked = await lore($, ['repository', 'info'], found)
+  const info = asked.exitCode === 0 ? repositoryInfoOf(asked.out) : undefined
+  if (info === undefined) return { kind: 'lore', root: found, bin, problem: `lore could not read this workspace's repository: ${asked.out.trim() || `exit ${asked.exitCode}`}` }
+  backend = { kind: 'lore', root: found, bin, info }
+
+  return backend
+}
+
+/** How long a copy, a merge, a push or a listing of a large workspace may take: the engine's ceiling for one program. */
+const LONG_MS = 600_000
+/** Lists a copy's folders (each ending in /) and files into a file; the paths are parameters, never part of the script. */
+const LIST_SCRIPT = 'find "$1" -mindepth 1 -type d -exec printf "%s/\\n" {} + > "$2" && find "$1" -mindepth 1 -type f >> "$2"'
+
+/** Runs a program without a shell. Never throws: one that could not run, or ran out of time, answers a non-zero exit with why. */
+async function runProgram($: EngineInterface, argv: readonly string[], timeoutMs = 30_000, env?: Record<string, string>): Promise<Ran> {
+  try {
+    const ran = await $.process.run([...argv], { timeoutMs, ...(env === undefined ? {} : { env }) })
+
+    return { exitCode: ran.exitCode, stdout: ran.stdout, stderr: ran.stderr, out: `${ran.stdout}${ran.stderr === '' ? '' : `\n${ran.stderr}`}` }
+  } catch (cause) {
+    const reason = because(cause)
+
+    return { exitCode: 1, stdout: '', stderr: reason, out: reason }
+  }
+}
+
+/** The last line a program printed, for saying why it failed. */
+const lastLine = (ran: Ran): string => ran.out.trim().split(/\n/).filter(line => line.trim() !== '').at(-1)?.trim() ?? `exit ${ran.exitCode}`
+
+/** Runs a program on many paths, at most 200 to a call. Answers the first failure, or undefined. */
+async function onPaths($: EngineInterface, head: readonly string[], paths: readonly string[]): Promise<Ran | undefined> {
+  for (let at = 0; at < paths.length; at += 200) {
+    const ran = await runProgram($, [...head, ...paths.slice(at, at + 200)], LONG_MS)
+    if (ran.exitCode !== 0) return ran
+  }
+
+  return undefined
+}
+
+type Making = { root: string; base: string; path: string; branch: string; from: string; carry: readonly string[]; minFreeGB: number; runId: string; taskId: string }
+
+/**
+ * Makes a Lore workspace for one task: a copy-on-write copy of the owner's
+ * workspace that takes the tracked files and the folders the project carries
+ * and nothing else, made a workspace of its own, on its own branch. The
+ * owner's workspace is only read. On any failure the half-made copy is
+ * removed and the reason answered.
+ */
+async function prepareWorkspace($: EngineInterface, at: Making): Promise<{ path: string; error?: undefined } | { error: string }> {
+  // Only a folder the mod makes itself, inside the run's workspaces and outside the owner's workspace, is ever removed.
+  if (!isInside(at.base, at.path) || at.path === at.root || at.path.startsWith(`${at.root}/`)) return { error: `${at.path} is no place for a workspace: it must lie inside ${at.base}, outside ${at.root}` }
+  if (await $.fs.exists(at.path).catch(() => true)) return { error: `${at.path} is there already and is no Lore workspace; it is left as it is. Move it away, then start the worker again` }
+  const fail = async (why: string) => {
+    await runProgram($, ['rm', '-rf', '--', at.path], LONG_MS)
+
+    return { error: why }
+  }
+  const made = await runProgram($, ['mkdir', '-p', at.path])
+  if (made.exitCode !== 0) return fail(`its folder could not be made: ${lastLine(made)}`)
+  // A copy-on-write copy is one only on the same disk: across disks cp -c quietly copies every byte.
+  const [rootDisk, pathDisk] = [await runProgram($, ['stat', '-f', '%d', at.root]), await runProgram($, ['stat', '-f', '%d', at.path])]
+  if (rootDisk.exitCode !== 0 || pathDisk.exitCode !== 0 || rootDisk.stdout.trim() !== pathDisk.stdout.trim()) {
+    return fail(`${at.path} lies on another disk than ${at.root} (or its disk could not be read), so a copy there would be a full copy, not a copy-on-write one. Put the workspaces on the same disk (lore.workspaces in .claude/conductor/config.json)`)
+  }
+  const df = await runProgram($, ['df', '-Pk', at.path])
+  const freeKb = Number(df.stdout.trim().split(/\n/).at(-1)?.trim().split(/\s+/)[3])
+  if (df.exitCode !== 0 || !Number.isFinite(freeKb)) return fail(`df did not say how much disk is free: ${lastLine(df)}`)
+  const freeGb = Math.floor(freeKb / 1024 / 1024)
+  if (freeGb < at.minFreeGB) {
+    return fail(`only ${freeGb} GB are free on the disk that holds ${at.path}, and a worker's workspace needs at least ${at.minFreeGB} GB free (lore.minFreeGB in .claude/conductor/config.json)`)
+  }
+  const rules = ignoreRules((await textAt($, `${at.root}/.loreignore`)) ?? '')
+  const entries = (await $.fs.list(at.root)).map(one => ({ name: one.name, isDir: one.kind === 'dir' }))
+  for (const entry of topLevel(entries, rules, at.carry)) {
+    const copied = await runProgram($, ['cp', '-c', '-R', `${at.root}/${entry}`, `${at.path}/`], LONG_MS)
+    if (copied.exitCode !== 0) return fail(`${entry} could not be copied: ${lastLine(copied)}`)
+  }
+  const listing = `${at.root}/${RUNS_DIR}/${at.runId}/listing-${at.taskId}.txt`
+  const listed = await runProgram($, ['/bin/sh', '-c', LIST_SCRIPT, 'sh', at.path, listing], LONG_MS)
+  if (listed.exitCode !== 0) return fail(`the copy's files could not be listed: ${lastLine(listed)}`)
+  const relativeListing = ((await textAt($, listing)) ?? '')
+    .split('\n')
+    .map(line => (line.startsWith(`${at.path}/`) ? line.slice(at.path.length + 1) : line))
+    .join('\n')
+  const removedFailed = await onPaths($, ['rm', '-rf', '--'], removals(relativeListing, rules, at.carry).map(one => `${at.path}/${one}`).filter(one => isInside(at.path, one)))
+  if (removedFailed !== undefined) return fail(`what the copy must not hold could not be removed: ${lastLine(removedFailed)}`)
+  const step = async (args: readonly string[], timeoutMs = 30_000): Promise<Ran> => lore($, args, at.path, timeoutMs)
+  const updated = await step(['repository', 'update-path'])
+  if (updated.exitCode !== 0) return fail(`lore did not take the copy as a workspace of its own: ${lastLine(updated)}`)
+  const scanned = await step(['status', '--scan'], LONG_MS)
+  const status = statusOf(scanned.out)
+  if (scanned.exitCode !== 0 || status === undefined) return fail(`lore could not read the copy's status: ${lastLine(scanned)}`)
+  const untrackedFailed = await onPaths($, ['rm', '-f', '--'], status.untracked.map(one => `${at.path}/${one}`).filter(one => isInside(at.path, one)))
+  if (untrackedFailed !== undefined) return fail(`the copy's untracked files could not be removed: ${lastLine(untrackedFailed)}`)
+  const from = await step(['branch', 'switch', at.from, '--reset'], LONG_MS)
+  if (from.exitCode !== 0) return fail(`lore could not switch the copy to ${at.from}: ${lastLine(from)}`)
+  const info = branchInfoOf((await step(['branch', 'info', at.branch])).out)
+  if (info?.remoteLatest !== undefined) {
+    // A task started again goes on from what its branch holds.
+    const again = await step(['branch', 'switch', at.branch, '--reset'], LONG_MS)
+    if (again.exitCode !== 0) return fail(`lore could not switch the copy to ${at.branch}: ${lastLine(again)}`)
+  } else {
+    const created = await step(['branch', 'create', at.branch])
+    if (created.exitCode !== 0) return fail(`lore could not make the branch ${at.branch}: ${lastLine(created)}`)
+    const pushed = await step(['push'], LONG_MS)
+    const outcome = pushOf(pushed.exitCode, pushed.out)
+    if (outcome.kind === 'refused') return fail(`lore could not push the new branch ${at.branch}: ${outcome.text}`)
+  }
+
+  return { path: at.path }
+}
+
+/**
+ * Starts the project's check on one revision, detached: the shell starts the
+ * program in the background and returns at once, so a check may run longer
+ * than one program may (the engine's ten minutes). The program and its
+ * arguments are the script's parameters, never part of it. Its output goes to
+ * a log beside the ledger, its exit code to `<log>.exit`, its process id to
+ * `<log>.pid`; the timer reads them.
+ */
+// `set -m` puts the check in a process group of its own, so a check out of time is stopped whole, not only its shell.
+const CHECK_SCRIPT = 'set -m; cd "$1" || exit 97; shift 2; ( "$@" > "$OUT" 2>&1; echo $? > "$OUT.exit" ) > /dev/null 2>&1 < /dev/null & echo $! > "$OUT.pid"'
+
+const checkLog = (root: string, runId: string, target: string, revision: string): string => `${root}/${RUNS_DIR}/${runId}/checks/${target}-${rev7(revision)}.log`
+
+/**
+ * Starts a check for a task (or, with no task, for the run branch) and records
+ * it as running. A task's check runs in the mod's own check workspace, put at
+ * exactly the judged revision and checked to be there: never in the worker's
+ * workspace, which the worker can still change. The run branch's runs in the
+ * run's workspace, at its head. One check runs at a time; the next waits
+ * until it ends. Never throws.
+ */
+let checkChain: Promise<void> = Promise.resolve()
+
+/** One check start at a time, from its claim until its program runs: the check workspace is shared. */
+function startCheck($: EngineInterface, path: string, ledger: Ledger, target: { taskId?: string; cwd: string; revision: string }): Promise<void> {
+  const run = checkChain.then(() => startCheckNow($, path, ledger, target))
+  checkChain = run.catch(() => undefined)
+
+  return run
+}
+
+async function startCheckNow($: EngineInterface, path: string, ledger: Ledger, target: { taskId?: string; cwd: string; revision: string }): Promise<void> {
+  try {
+    const check = ledger.run.config?.check
+    const here = await backendOf($)
+    const runLore = ledger.run.lore
+    if (check === undefined || here === null || here.kind !== 'lore' || runLore === undefined) return
+    const at0 = iso(await $.clock.now())
+    // The slot is claimed in the ledger's own write queue before the workspace is touched: of two asked for at once, one runs.
+    const claimed = await mutate($, path, raw => {
+      const busy = raw.tasks.some(one => (one.check as { verdict?: string } | undefined)?.verdict === 'running') || ((raw.run as Record<string, unknown>).check as { verdict?: string } | undefined)?.verdict === 'running'
+      const holder = target.taskId === undefined ? (raw.run as Record<string, unknown>) : raw.tasks.find(one => one.id === target.taskId)
+      if (busy || holder === undefined) return { value: false, isChanged: false }
+      holder.check = { revision: target.revision, verdict: 'running', at: at0 }
+
+      return { value: true, isChanged: true }
+    })
+    if (claimed.value !== true) return
+    const failed = (line: string) =>
+      mutate($, path, raw => {
+        const holder = target.taskId === undefined ? (raw.run as Record<string, unknown>) : raw.tasks.find(one => one.id === target.taskId)
+        if (holder === undefined) return { value: undefined, isChanged: false }
+        holder.check = { revision: target.revision, verdict: 'failed', at: at0, line: line.slice(0, 200) }
+
+        return { value: undefined, isChanged: true }
+      })
+    // Every check runs in the run's check workspace, the mod's own, put at exactly the revision it checks: a task's on its
+    // branch, the run branch's at its head. Neither a worker's workspace nor the run workspace, which merges reset, is used.
+    const base = workspacesOf(here.root, ledger.run.config?.lore?.workspaces)
+    const cwd = checkWorkspaceOf(base, ledger.run.id)
+    const branch = target.taskId === undefined ? runLore.branch : taskBranchOf(runLore.branch, target.taskId)
+    {
+      {
+        const made = await workspaceFor($, {
+          root: here.root,
+          base,
+          path: cwd,
+          branch,
+          from: branch,
+          carry: ledger.run.config?.lore?.carry ?? LORE_DEFAULTS.carry,
+          minFreeGB: ledger.run.config?.lore?.minFreeGB ?? LORE_DEFAULTS.minFreeGB,
+          runId: ledger.run.id,
+          taskId: '_check',
+        })
+        if (made.error !== undefined) return void (await failed(`the check workspace could not be made: ${made.error}`))
+      }
+      const pinned = await lore($, ['branch', 'switch', branch, target.revision, '--reset'], cwd, LONG_MS)
+      const standing = statusOf((await lore($, ['status'], cwd)).out)
+      if (pinned.exitCode !== 0 || standing?.revision !== target.revision) {
+        return void (await failed(`the check workspace could not be put at ${rev7(target.revision)}: ${lastLine(pinned)}`))
+      }
+    }
+    const log = checkLog(here.root, ledger.run.id, target.taskId ?? '_run', target.revision)
+    await runProgram($, ['mkdir', '-p', log.slice(0, log.lastIndexOf('/'))])
+    const started = await runProgram($, ['/bin/sh', '-c', CHECK_SCRIPT, 'sh', cwd, '--', ...check.argv], 30_000, { OUT: log })
+    if (started.exitCode !== 0) await failed(`the check could not start: ${lastLine(started)}`)
+  } catch {
+    // A check that could not start is started again when its task is judged green again.
+  }
+}
+
+/** A look at the checks under way: each one that ended, or ran out of time, is written down and told. Called by the timer. */
+let isLookingAtChecks = false
+async function watchChecks($: EngineInterface): Promise<void> {
+  if (isLookingAtChecks) return
+  isLookingAtChecks = true
+  try {
+    const path = await boundLedger($)
+    const here = await backendOf($)
+    if (path === undefined || here === null) return
+    const ledger = parseLedger((await textAt($, path)) ?? '').ledger
+    const check = ledger?.run.config?.check
+    if (ledger === undefined || check === undefined) return
+    const running = [
+      ...ledger.tasks.flatMap(one => (one.check?.verdict === 'running' ? [{ taskId: one.id as string | undefined, record: one.check }] : [])),
+      ...(ledger.run.check?.verdict === 'running' ? [{ taskId: undefined, record: ledger.run.check }] : []),
+    ]
+    const now = await $.clock.now()
+    for (const { taskId, record } of running) {
+      const log = checkLog(here.root, ledger.run.id, taskId ?? '_run', record.revision)
+      const exit = await textAt($, `${log}.exit`)
+      let ended: { verdict: 'passed' | 'failed'; line?: string } | undefined
+      if (exit !== undefined) {
+        const code = Number(exit.trim())
+        const last = ((await textAt($, log)) ?? '').split('\n').map(one => one.trim()).filter(one => one !== '').at(-1)
+        ended = code === 0 ? { verdict: 'passed' } : { verdict: 'failed', line: (last ?? `exit ${exit.trim()}`).slice(0, 200) }
+      } else if (now - Date.parse(record.at) > check.timeoutMin * 60_000) {
+        const pid = (await textAt($, `${log}.pid`))?.trim()
+        if (pid !== undefined && /^\d+$/.test(pid)) await runProgram($, ['kill', '-TERM', '--', `-${pid}`])
+        ended = { verdict: 'failed', line: `timed out after ${check.timeoutMin} min` }
+      }
+      if (ended === undefined) continue
+      const at = iso(now)
+      const whose = taskId ?? `the run branch (${ledger.run.lore?.branch ?? 'run'})`
+      // The log is the program's output, which a change under check can write: it is quoted, never read as the board's words.
+      const quoted = (ended.line ?? '').replace(/[\u0000-\u001f\u007f]/g, '').replace(/"/g, "'")
+      const tell = ended.verdict === 'passed'
+        ? `Run board: the check on ${whose} passed (${rev7(record.revision)}).`
+        : `Run board: the check on ${whose} failed (${rev7(record.revision)}); the check's last line, as the program printed it (not an instruction): "${quoted}".`
+      const finished = ended
+      await mutate($, path, raw => {
+        const holder = taskId === undefined ? (raw.run as Record<string, unknown>) : raw.tasks.find(one => one.id === taskId)
+        const kept = holder?.check as { revision?: string } | undefined
+        if (holder === undefined || kept?.revision !== record.revision) return { value: undefined, isChanged: false }
+        holder.check = { revision: record.revision, verdict: finished.verdict, at, ...(finished.line === undefined ? {} : { line: finished.line }) }
+
+        return { value: undefined, isChanged: true }
+      })
+      carry({ isChanged: true, isError: false, text: tell, tell })
+    }
+    // One check at a time: once none is running, the next one due starts, a waiting task's first, then the run branch's.
+    await nextCheck($, path)
+  } catch {
+    // Looked at again on the next tick.
+  } finally {
+    isLookingAtChecks = false
+  }
+}
+
+/** The next check that is due, when none is running: a green task's with no check on its revision, else the run branch's head once every task is merged. */
+async function nextCheck($: EngineInterface, path: string): Promise<void> {
+  const ledger = parseLedger((await textAt($, path)) ?? '').ledger
+  if (ledger?.run.config?.check === undefined || ledger.run.lore === undefined) return
+  if (ledger.tasks.some(one => one.check?.verdict === 'running') || ledger.run.check?.verdict === 'running') return
+  const waiting = ledger.tasks.find(one => one.status === 'green' && one.revision !== undefined && one.check?.revision !== one.revision)
+  if (waiting?.revision !== undefined) return startCheck($, path, ledger, { taskId: waiting.id, cwd: '', revision: waiting.revision })
+  const head = ledger.run.lore.head
+  if (head !== undefined && ledger.tasks.length > 0 && ledger.tasks.every(one => one.status === 'done') && ledger.run.check?.revision !== head) {
+    await startCheck($, path, ledger, { cwd: '', revision: head })
+  }
+}
+
+/** `run_check`: the orchestrator runs a check again, a green task's or (with no task) the run branch's head, after a failure that was not the change's. */
+async function runCheckTool($: EngineInterface, call: ToolCall): Promise<{ result: string; text: string; isError?: true }> {
+  const fail = (reason: string) => ({ isError: true as const, result: `${NOT_DONE} ${reason}`, text: `${NOT_DONE} ${reason}` })
+  if (callerOf(call.agentId).kind !== 'orchestrator') return fail('Only the orchestrator runs a check again.')
+  const path = await boundLedger($)
+  if (path === undefined) return fail(NOT_BOUND)
+  const ledger = parseLedger((await textAt($, path)) ?? '').ledger
+  if (ledger?.run.config?.check === undefined || ledger.run.lore === undefined) return fail('This run has no check to run.')
+  const taskId = typeof call.task === 'string' ? call.task : undefined
+  const task = taskId === undefined ? undefined : ledger.tasks.find(one => one.id === taskId)
+  if (taskId !== undefined && (task === undefined || task.status !== 'green' || task.revision === undefined)) return fail(`${taskId} is no green task with a revision: a check runs on what you judged green.`)
+  if (taskId === undefined && (ledger.run.lore.head === undefined || !ledger.tasks.every(one => one.status === 'done'))) return fail("The run branch's check runs once every task is merged into it.")
+  await mutate($, path, raw => {
+    const holder = taskId === undefined ? (raw.run as Record<string, unknown>) : raw.tasks.find(one => one.id === taskId)
+    if (holder === undefined || (holder.check as { verdict?: string } | undefined)?.verdict === 'running') return { value: undefined, isChanged: false }
+    delete holder.check
+
+    return { value: undefined, isChanged: true }
+  })
+  await nextCheck($, path)
+  const after = parseLedger((await textAt($, path)) ?? '').ledger
+  const record = taskId === undefined ? after?.run.check : after?.tasks.find(one => one.id === taskId)?.check
+  const whose = taskId ?? 'the run branch'
+  const text = record?.verdict === 'running' ? `The check on ${whose} is started again.` : `The check on ${whose} waits for the check under way, and starts once it ends.`
+
+  return { result: text, text }
+}
+
+/** After a task_update: a Lore task judged green whose revision has no check on it gets its check started. Never throws. */
+async function checkOnGreen($: EngineInterface, taskId: unknown): Promise<void> {
+  try {
+    const path = await boundLedger($)
+    if (path === undefined || typeof taskId !== 'string') return
+    const ledger = parseLedger((await textAt($, path)) ?? '').ledger
+    const task = ledger?.tasks.find(one => one.id === taskId)
+    if (ledger?.run.lore === undefined || ledger.run.config?.check === undefined || task === undefined) return
+    // A check that failed is run again when the task is judged green again: the failure may not have been the change's.
+    if (task.status !== 'green' || task.revision === undefined || (task.check?.revision === task.revision && task.check.verdict !== 'failed')) return
+    await startCheck($, path, ledger, { taskId, cwd: task.workspace ?? '', revision: task.revision })
+  } catch {
+    // Nothing started.
+  }
+}
+
+/**
+ * Before the owner's approval of a Lore run's plan takes effect: the run's
+ * own workspace on its own branch, made from the base branch and pushed, the
+ * base branch protected, and where the base stood kept. Answers why it could
+ * not be done, or undefined when it was (or there is nothing of Lore to do).
+ */
+async function loreApprove($: EngineInterface, path: string): Promise<string | undefined> {
+  const ledger = parseLedger((await textAt($, path)) ?? '').ledger
+  const here = await backendOf($)
+  const runLore = ledger?.run.lore
+  if (ledger === undefined || runLore === undefined || ledger.run.plan !== 'proposed' || here?.kind !== 'lore') return undefined
+  const project = ledger.run.config
+  const workspacesBase = workspacesOf(here.root, project?.lore?.workspaces)
+  const workspace = runLore.workspace ?? runWorkspaceOf(workspacesBase, ledger.run.id)
+  if (!(await $.fs.exists(readyMark(here.root, ledger.run.id, '_run')).catch(() => false)) || !(await $.fs.exists(`${workspace}/.lore`).catch(() => false))) {
+    await Promise.resolve($.ui.toast("Run board: making the run's Lore workspace. A large workspace takes a minute or two.")).catch(() => undefined)
+    const made = await workspaceFor($, {
+      root: here.root,
+      base: workspacesBase,
+      path: workspace,
+      branch: runLore.branch,
+      from: runLore.base,
+      carry: project?.lore?.carry ?? LORE_DEFAULTS.carry,
+      minFreeGB: project?.lore?.minFreeGB ?? LORE_DEFAULTS.minFreeGB,
+      runId: ledger.run.id,
+      taskId: '_run',
+    })
+    if (made.error !== undefined) return `the run's Lore workspace could not be made: ${made.error}.`
+  }
+  const protectedNow = await lore($, ['branch', 'protect', runLore.base], workspace)
+  if (protectedNow.exitCode !== 0) return `the base branch ${runLore.base} could not be protected: ${lastLine(protectedNow)}.`
+  const baseAt = branchInfoOf((await lore($, ['branch', 'info', runLore.base], workspace)).out)?.remoteLatest
+  if (baseAt === undefined) return `lore did not say where ${runLore.base} stands.`
+  const runHead = branchInfoOf((await lore($, ['branch', 'info', runLore.branch], workspace)).out)?.remoteLatest
+  // A run branch that was there already is taken only when it stands where the board knows it: else it may hold work nobody judged.
+  if (runHead !== (runLore.head ?? baseAt)) return `${runLore.branch} is at ${runHead === undefined ? 'a revision lore did not say' : rev7(runHead)}, not at ${rev7(runLore.head ?? baseAt)} where the board expects it: it holds work nobody judged. Archive it (lore branch archive ${runLore.branch}) or start the run under another name.`
+  const written = await mutate($, path, raw => {
+    const kept = (raw.run as { lore?: Record<string, unknown> }).lore
+    if (kept === undefined) return { value: false, isChanged: false }
+    kept.workspace = workspace
+    kept.baseAt = baseAt
+    // A run branch just made from the base stands where the base stands; one made before keeps the head it had.
+    kept.head ??= baseAt
+
+    return { value: true, isChanged: true }
+  })
+
+  return written.error ?? (written.value ? undefined : 'the run has no Lore branch any more.')
+}
+
+/** A run's config, checked again as it is read: a hand-edited ledger may hold what /conduct would have refused. */
+function projectOf(ledger: Ledger): ProjectConfig | undefined {
+  const read = parseConfig(JSON.stringify(ledger.run.config ?? {}))
+
+  return 'config' in read ? read.config : undefined
+}
+
+/** Whether a folder is one of this run's own workspaces, safe to remove: inside its workspaces folder, apart from the owner's workspace. */
+function isRemovable(root: string, ledger: Ledger, folder: string): boolean {
+  const project = projectOf(ledger)
+  if (project === undefined) return false
+  const base = workspacesOf(root, project.lore?.workspaces)
+  const isOwners = folder === root || folder.startsWith(`${root}/`) || root.startsWith(`${folder}/`)
+
+  return base !== '' && base !== '/' && isInside(base, folder) && !isOwners
+}
+
+/** The file that says a workspace was finished: only then is a folder there reused. */
+const readyMark = (root: string, runId: string, taskId: string): string => `${root}/${RUNS_DIR}/${runId}/ready-${taskId}`
+
+/**
+ * A workspace to hand on: a finished one is reused as it is; one the mod began
+ * and never finished (its `.lore` is there, its mark is not) is removed and
+ * made again; a folder that is no Lore workspace is left alone and refused by
+ * `prepareWorkspace`.
+ */
+async function workspaceFor($: EngineInterface, making: Making): Promise<{ path: string; error?: undefined } | { error: string }> {
+  const mark = readyMark(making.root, making.runId, making.taskId)
+  const hasLore = await $.fs.exists(`${making.path}/.lore`).catch(() => false)
+  if (hasLore && (await $.fs.exists(mark).catch(() => false))) return { path: making.path }
+  if (hasLore && isInside(making.base, making.path)) await runProgram($, ['rm', '-rf', '--', making.path], LONG_MS)
+  const made = await prepareWorkspace($, making)
+  if (made.error === undefined) await $.fs.write(mark, 'ready\n').catch(() => undefined)
+
+  return made
+}
+
+/** A worker's workspace made and not handed to the engine yet, by task. */
+const prepared = new Map<string, string>()
+/** Starts whose workspace waits for the engine's WorktreeCreate, oldest first. One is in flight at a time. */
+const awaitingWorktree: { taskId: string; path: string }[] = []
+/** The tasks whose worker was handed a workspace of its own: the others' workers may not write. */
+const isolated = new Set<string>()
+/** Each such task's workspace, for reading the paths its worker changes. */
+const workspaces = new Map<string, string>()
+let startChain: Promise<void> = Promise.resolve()
+
+/**
+ * One Lore worker start at a time, from making its workspace until the engine
+ * has started it: the engine names the workspace it asks for after the agent,
+ * not the task, so the start in flight is the one it is for.
+ */
+function exclusive(): Promise<() => void> {
+  let unlock: () => void = () => undefined
+  const mine = new Promise<void>(resolve => {
+    unlock = resolve
+  })
+  const prior = startChain
+  startChain = prior.then(() => mine)
+
+  return prior.then(() => unlock)
+}
+
+/** A file's text, or undefined when it is not there or cannot be read. */
+async function textAt($: EngineInterface, path: string): Promise<string | undefined> {
+  try {
+    return await $.fs.read(path)
+  } catch {
+    return undefined
+  }
+}
+
+/** The root of the repository or workspace the session is in, read again on a rescan; null outside both. */
+async function rootOf($: EngineInterface, rescan = false): Promise<string | null> {
+  if (rescan && backend?.kind !== 'lore') backend = undefined
+
+  return (await backendOf($))?.root ?? null
+}
+
 /** The ledger this session's signals and tools write: the bound run's, or undefined. */
 async function boundLedger($: EngineInterface): Promise<string | undefined> {
   const run = await read($, pinnedRun)
   if (run === null) return undefined
-  if (root === undefined) root = (await $.session.repo())?.root ?? null
+  if (root === undefined) root = await rootOf($)
 
   return root === null ? undefined : ledgerPath(root, run)
 }
@@ -364,7 +925,7 @@ async function rebind($: EngineInterface): Promise<void> {
       return
     }
     if (was === undefined) return
-    if (root === undefined) root = (await $.session.repo())?.root ?? null
+    if (root === undefined) root = await rootOf($)
     // A run that is gone is not one to be bound to.
     if (root === null || !(await $.fs.exists(ledgerPath(root, was)))) {
       await $.store.delete(own)
@@ -496,8 +1057,10 @@ async function heard(
     if (decided.kind === 'child') return
     workers.add(agentId)
     const at = iso(await $.clock.now())
+    let ticket: unknown
     await mutate($, path, raw => {
       const taskId = spawned(raw, at, { name, agentId, model, slot })
+      ticket = raw.tasks.find(one => one.id === taskId)?.ticket
       // The engine has the last word on the model. When it is not the tier's, the board says so.
       if (taskId !== undefined && familyOf(model) !== decided.model) {
         reportProblem(raw, at, { kind: 'orchestrator' }, {
@@ -509,6 +1072,7 @@ async function heard(
 
       return { value: taskId, isChanged: taskId !== undefined }
     })
+    if (typeof ticket === 'string') await moveIssue($, path, ticket, 'started')
   } catch {
     // The worker runs whether or not the board heard of it.
   }
@@ -916,6 +1480,196 @@ async function github($: EngineInterface, path: string, init?: { method?: string
   }
 }
 
+const NO_LINEAR_KEY = "there is no Linear key: set the mod's Linear API key option, or export LINEAR_API_KEY"
+
+/** The key a request to Linear carries: the mod's option, then LINEAR_API_KEY. It goes into the request's header and nowhere else. */
+async function linearKey($: EngineInterface): Promise<string | undefined> {
+  if (linearOption !== '') return linearOption
+  const fromEnv = (await $.env.get('LINEAR_API_KEY').catch(() => undefined))?.trim()
+
+  return fromEnv === undefined || fromEnv === '' ? undefined : fromEnv
+}
+
+/** One GraphQL request to Linear, its `data` or why there is none. Never throws, and never says the key. */
+async function linear($: EngineInterface, query: string, variables: Record<string, unknown>): Promise<{ data: unknown; error?: undefined } | { error: string }> {
+  const key = await linearKey($)
+  if (key === undefined) return { error: NO_LINEAR_KEY }
+  const answered = await ask($, LINEAR_API, {
+    method: 'POST',
+    headers: { Authorization: key, 'Content-Type': 'application/json', 'User-Agent': 'conductor-claude-code-mod' },
+    body: JSON.stringify({ query, variables }),
+  })
+  const scrub = (text: string): string => text.split(key).join('[key]')
+  if (answered.error !== undefined) return { error: scrub(answered.error) }
+  let json: unknown
+  try {
+    json = JSON.parse(answered.text)
+  } catch {
+    return { error: `an answer that is not JSON (HTTP ${answered.status})` }
+  }
+  const errors = errorsOf(json)
+  if (errors !== undefined) return { error: scrub(`${errors}${answered.status === 401 ? ' (HTTP 401: Linear did not take the key)' : ''}`) }
+  if (answered.status >= 400) return { error: `HTTP ${answered.status}` }
+
+  return { data: (json as { data?: unknown }).data }
+}
+
+/** Records, once for each reason, that Linear did not take a state change. Never throws. */
+async function linearProblem($: EngineInterface, path: string, text: string, reason: string): Promise<void> {
+  if (linearFailed === reason) return
+  linearFailed = reason
+  const at = iso(await $.clock.now())
+  await mutate($, path, raw => {
+    const outcome = reportProblem(raw, at, { kind: 'orchestrator' }, { text, severity: 'warning' })
+
+    return { value: outcome, isChanged: outcome.isChanged }
+  })
+}
+
+/**
+ * Moves a Linear issue to its team's first state of a type: started when its
+ * work starts, completed when it is merged. An issue that is there already,
+ * or further on, stays. A failure never stops the run: it is recorded once as
+ * a warning. Never throws.
+ */
+async function moveIssue($: EngineInterface, path: string, key: string, type: 'started' | 'completed'): Promise<void> {
+  try {
+    const fail = (reason: string) => linearProblem($, path, `Linear did not move ${key} to its ${type} state: ${reason}. The run goes on; later changes are not reported while this lasts.`, reason)
+    const read = await linear($, Q_ISSUE, { id: key })
+    if (read.error !== undefined) return await fail(read.error)
+    const view = issueOf(read.data)
+    if (view === undefined) return await fail(`Linear has no issue ${key}`)
+    if (view.state.type === type || (type === 'started' && view.state.type === 'completed')) return
+    const stateId = stateFor(view.team.states, type)
+    if (stateId === undefined) return await fail(`team ${view.team.key} has no ${type} state`)
+    const sent = await linear($, M_UPDATE, { id: view.id, input: { stateId } })
+    if (sent.error !== undefined) return await fail(sent.error)
+    if (!updatedOf(sent.data)) return await fail('Linear did not say the change went through')
+    linearFailed = undefined
+  } catch {
+    // The run goes on whatever Linear does.
+  }
+}
+
+/**
+ * A task that is done moves its Linear issue to completed, when its ticket is
+ * one. In a git run with its tickets in Linear, the run's own issue follows
+ * once every task is done; a Lore run's moves when it reaches the base
+ * branch. Never throws.
+ */
+async function issueDone($: EngineInterface, path: string, taskId: string): Promise<void> {
+  try {
+    const ledger = parseLedger(await $.fs.read(path)).ledger
+    const ticket = ledger?.tasks.find(one => one.id === taskId)?.ticket
+    if (typeof ticket === 'string') await moveIssue($, path, ticket, 'completed')
+    if (ledger === undefined || ledger.run.tickets !== 'linear' || ledger.run.lore !== undefined) return
+    if (!ledger.tasks.every(one => one.status === 'done')) return
+    const issue = ledger.run.issue ?? (LINEAR_KEY.test(ledger.run.source ?? '') ? ledger.run.source : undefined)
+    if (issue !== undefined && issue !== ticket) await moveIssue($, path, issue, 'completed')
+  } catch {
+    // Nothing to move.
+  }
+}
+
+/**
+ * After the owner approved a Linear run's plan: a run from a spec gets its own
+ * issue in the project's team, filed now, and the run's issue moves to
+ * started. Never throws, and never holds up the approval.
+ */
+async function linearApproved($: EngineInterface, path: string): Promise<void> {
+  try {
+    const ledger = parseLedger(await $.fs.read(path)).ledger
+    if (ledger === undefined || ledger.run.tickets !== 'linear') return
+    let key = ledger.run.issue ?? (LINEAR_KEY.test(ledger.run.source ?? '') ? ledger.run.source : undefined)
+    if (key === undefined) {
+      const teamKey = ledger.run.config?.linear?.team
+      const fail = (reason: string) =>
+        linearProblem($, path, `Linear did not file this run's own issue in team ${teamKey ?? '(none)'}: ${reason}. File it by hand, then give its key with task_update on a task, or set the run's issue.`, reason)
+      if (teamKey === undefined) return await fail('the project config names no linear.team')
+      const team = await linear($, Q_TEAM, { key: teamKey })
+      if (team.error !== undefined) return await fail(team.error)
+      const found = teamOf(team.data)
+      if (found === undefined) return await fail(`Linear has no team ${teamKey}`)
+      const made = await linear($, M_CREATE, { input: { teamId: found.id, title: ledger.run.title, description: `Spec: ${ledger.run.source ?? ''}` } })
+      if (made.error !== undefined) return await fail(made.error)
+      const created = createdOf(made.data)
+      if (created === undefined) return await fail('Linear did not say which issue it made')
+      key = created.key
+      const filed = created.key
+      await mutate($, path, raw => {
+        ;(raw.run as Record<string, unknown>).issue = filed
+
+        return { value: undefined, isChanged: true }
+      })
+    }
+    await moveIssue($, path, key, 'started')
+  } catch {
+    // The approval stands whatever Linear does.
+  }
+}
+
+/** `ticket_read`: an issue in Linear, as the orchestrator reads it. */
+async function ticketRead($: EngineInterface, call: ToolCall) {
+  const fail = (reason: string) => ({ isError: true as const, result: `${NOT_DONE} ${reason}`, text: `${NOT_DONE} ${reason}` })
+  const key = call.key
+  if (typeof key !== 'string' || !LINEAR_KEY.test(key)) return fail('key is a Linear issue key, like ABC-12.')
+  const read = await linear($, Q_ISSUE, { id: key })
+  if (read.error !== undefined) return fail(`Linear could not be read: ${read.error}.`)
+  const view = issueOf(read.data)
+  if (view === undefined) return fail(`Linear has no issue ${key}.`)
+  const text = issueText(view)
+
+  return { result: text, text }
+}
+
+/** `ticket_file`: the orchestrator files a drafted ticket as a sub-issue of the run's issue, after the owner approved the plan. */
+async function ticketFile($: EngineInterface, call: ToolCall) {
+  const fail = (reason: string) => ({ isError: true as const, result: `${NOT_DONE} ${reason}`, text: `${NOT_DONE} ${reason}` })
+  const path = await boundLedger($)
+  if (path === undefined) return fail(NOT_BOUND)
+  if (callerOf(call.agentId).kind !== 'orchestrator') return fail('Only the orchestrator files a ticket.')
+  const { title, description, task } = call
+  if (typeof title !== 'string' || title.trim() === '') return fail('Give the ticket a title.')
+  if (description !== undefined && typeof description !== 'string') return fail('description is text.')
+  const ledger = parseLedger(await $.fs.read(path)).ledger
+  if (ledger === undefined) return fail('The ledger does not read.')
+  if (ledger.run.plan !== 'approved' && ledger.run.plan !== undefined) {
+    return fail('The plan is not approved yet: drafted tickets are filed only after the owner approves the plan with /approve.')
+  }
+  if (task !== undefined && !ledger.tasks.some(one => one.id === task)) return fail(`There is no task ${String(task)} in this run.`)
+  const parent = ledger.run.issue ?? (LINEAR_KEY.test(ledger.run.source ?? '') ? ledger.run.source : undefined)
+  if (parent === undefined) return fail("This run has no Linear issue of its own to file under. It is filed when the owner approves the plan of a Linear run.")
+  const read = await linear($, Q_ISSUE, { id: parent })
+  if (read.error !== undefined) return fail(`Linear could not be read: ${read.error}.`)
+  const view = issueOf(read.data)
+  if (view === undefined) return fail(`Linear has no issue ${parent}.`)
+  const made = await linear($, M_CREATE, { input: { teamId: view.team.id, title: title.trim(), description: (description ?? '').trim(), parentId: view.id } })
+  if (made.error !== undefined) return fail(`Linear did not file it: ${made.error}.`)
+  const created = createdOf(made.data)
+  if (created === undefined) return fail('Linear did not say which issue it made.')
+  if (typeof task === 'string') {
+    await mutate($, path, raw => {
+      const found = raw.tasks.find(one => one.id === task)
+      if (found !== undefined) found.ticket = created.key
+
+      return { value: undefined, isChanged: found !== undefined }
+    })
+    seen = undefined
+  }
+  const text = `Filed ${created.key} under ${parent}: ${created.url}.${typeof task === 'string' ? ` ${task} carries it.` : ''}`
+
+  return { result: text, text }
+}
+
+/** Whether this project's tickets may be in Linear: its config says so, or a Linear key is set. */
+async function wantsLinear($: EngineInterface): Promise<boolean> {
+  if ((await linearKey($)) !== undefined) return true
+  if (root === undefined || root === null) return false
+  const read = parseConfig(await textAt($, `${root}/${CONFIG_PATH}`))
+
+  return 'config' in read && read.config.tickets === 'linear'
+}
+
 /** A commit's checks, check runs and commit statuses both, and their verdict. */
 async function checksAt($: EngineInterface, sha: string): Promise<Verdict | { error: string }> {
   const [runs, status] = await Promise.all([github($, `/commits/${sha}/check-runs?per_page=100`), github($, `/commits/${sha}/status?per_page=100`)])
@@ -992,6 +1746,281 @@ async function settle($: EngineInterface, path: string, change: (raw: Raw) => Ou
   return written.value
 }
 
+/** The origins of a command that are the owner's own hand: the terminal, the desktop app, the owner's Remote Control. */
+const OWNER_ORIGINS: ReadonlySet<string> = new Set(['composer', 'sdk', 'bridge'])
+
+/** What a run's Lore side is, read for its base-branch commands; or why there is none. */
+async function loreRunOf($: EngineInterface): Promise<{ path: string; ledger: Ledger; runLore: NonNullable<Ledger['run']['lore']>; run: string } | { text: string }> {
+  const path = await boundLedger($)
+  if (path === undefined) return { text: await unbound($) }
+  const ledger = parseLedger((await textAt($, path)) ?? '').ledger
+  if (ledger === undefined) return { text: 'The ledger does not read.' }
+  const runLore = ledger.run.lore
+  if (runLore?.workspace === undefined) return { text: 'This run has no Lore workspace yet: it is made when the owner approves the plan with /approve.' }
+
+  return { path, ledger, runLore, run: runLore.workspace }
+}
+
+/**
+ * `/approve-main`: the owner approves the run branch's revision for the base
+ * branch, and the mod merges exactly that revision into the protected base,
+ * protecting it again whatever happens. Refused while anything stands in the
+ * way, when the run branch moved, or when the base moved since the run branch
+ * last took it in.
+ */
+async function approveMain($: EngineInterface, origin: string): Promise<string> {
+  if (!OWNER_ORIGINS.has(origin)) return 'Not done. /approve-main is the owner\'s: only the owner types it, in the terminal, the desktop app or Remote Control. Nothing was merged.'
+  const found = await loreRunOf($)
+  if ('text' in found) return found.text
+  const { path, ledger, runLore, run } = found
+  const base = runLore.base
+  const head = branchInfoOf((await lore($, ['branch', 'info', runLore.branch], run)).out)?.remoteLatest
+  const baseNow = branchInfoOf((await lore($, ['branch', 'info', base], run)).out)?.remoteLatest
+  if (head === undefined || baseNow === undefined) return `Nothing was merged: lore did not say where ${head === undefined ? runLore.branch : base} stands on the server.`
+  const blocks = readyForBase(ledger, head)
+  if (blocks.length > 0) return [`The run cannot go into ${base} yet:`, ...blocks.map(one => `- ${one}`)].join('\n')
+  const other = (await flights($, ledger.run.id, await $.clock.now()))[0]
+  if (other !== undefined) return `Nothing was merged: Run ${other.run} is merging ${other.task} since ${other.startedAt}. One merge at a time, across runs too: approve again once it is settled.`
+  if (baseNow !== runLore.baseAt) {
+    return `Nothing was merged: ${base} moved since the run branch last took it in (it is at ${rev7(baseNow)}; the run branch took in ${runLore.baseAt === undefined ? 'no revision of it on record' : rev7(runLore.baseAt)}). Merging into it now would land a result nobody approved. Ask the orchestrator to bring it in with mcp__conductor__run_sync_base, then approve again.`
+  }
+  const at = iso(await $.clock.now())
+  const claimed = await mutate($, path, raw => {
+    approvedMain(raw, at, { revision: head, base: baseNow })
+    const outcome = startLoreMerge(raw, at, { task: ledger.run.id, revision: head, target: 'base' })
+
+    return { value: outcome, isChanged: true }
+  })
+  if (claimed.error !== undefined) return `Nothing was merged: ${claimed.error}`
+  if (claimed.value.isError) return `Nothing was merged: ${claimed.value.text}`
+  const giveUp = async (why: string): Promise<string> => (await settle($, path, raw => letGo(raw, why)))?.text ?? `Nothing was merged: ${why}.`
+  const synced = await lore($, ['branch', 'switch', runLore.branch, '--reset'], run, LONG_MS)
+  const status = statusOf((await lore($, ['status'], run)).out)
+  if (synced.exitCode !== 0 || status === undefined) return giveUp(`the run's workspace could not be brought to ${runLore.branch}`)
+  if (status.revision !== head) return giveUp(`${runLore.branch} moved after the approval (it is at ${rev7(status.revision)}, ${rev7(head)} was approved): approve again`)
+  let outcome: ReturnType<typeof mergeOf> = { kind: 'failed', reason: 'it did not run' }
+  let protectedAgain: Ran | undefined
+  try {
+    // Even an unprotect that failed may have gone through on the server before it timed out: the finally protects again.
+    const unprotected = await lore($, ['branch', 'unprotect', base], run)
+    if (unprotected.exitCode !== 0) outcome = { kind: 'failed', reason: `${base} could not be unprotected for the merge: ${lastLine(unprotected)}` }
+    else {
+      // The base is read once more right before the merge: another merge may have landed since the look above.
+      const baseAgain = branchInfoOf((await lore($, ['branch', 'info', base], run)).out)?.remoteLatest
+      if (baseAgain !== baseNow) outcome = { kind: 'failed', reason: `${base} moved during the approval (it is at ${baseAgain === undefined ? 'a revision lore did not say' : rev7(baseAgain)}): bring it in with run_sync_base and approve again` }
+      else {
+        const merged = await lore($, ['branch', 'merge', 'into', base, `Run ${ledger.run.id}: ${ledger.run.title}`], run, LONG_MS)
+        outcome = mergeOf(merged.exitCode, merged.out)
+      }
+    }
+  } finally {
+    // Whatever the merge did, the base branch is protected again.
+    protectedAgain = await lore($, ['branch', 'protect', base], run)
+  }
+  let protectLine = ''
+  if (protectedAgain.exitCode !== 0) {
+    protectLine = ` ${base} could not be protected again (${lastLine(protectedAgain)}): it is a blocker on the board. Protect it by hand with lore branch protect ${base}.`
+    const failedAt = iso(await $.clock.now())
+    await mutate($, path, raw => {
+      const outcome2 = reportProblem(raw, failedAt, { kind: 'orchestrator' }, { text: `${base} is not protected: lore branch protect ${base} failed after the run's merge (${lastLine(protectedAgain!)}). Protect it by hand.`, severity: 'blocker' })
+
+      return { value: outcome2, isChanged: outcome2.isChanged }
+    })
+  }
+  if (outcome.kind !== 'merged') return `${await giveUp(outcome.kind === 'conflict' ? `lore did not merge it into ${base}: conflicts in ${outcome.files.join(', ')}` : outcome.reason)}${protectLine}`
+  const landed = outcome.revision
+  const done = await settle($, path, raw => onBase(raw, at, landed, base))
+  const issue = ledger.run.issue ?? (LINEAR_KEY.test(ledger.run.source ?? '') ? ledger.run.source : undefined)
+  if (issue !== undefined) await moveIssue($, path, issue, 'completed')
+  const notArchived: string[] = []
+  for (const one of ledger.tasks) {
+    if (one.branch === undefined) continue
+    const archived = await lore($, ['branch', 'archive', taskBranchOf(runLore.branch, one.id)], run)
+    if (archived.exitCode !== 0) notArchived.push(one.id)
+  }
+  const kept: string[] = []
+  const hereBase = await backendOf($)
+  const ownBase = hereBase === null ? '' : workspacesOf(hereBase.root, projectOf(ledger)?.lore?.workspaces)
+  // The folders removed are the ones the mod derives for this run, never a path read off the ledger.
+  const derivedFolders = ownBase === '' ? [] : ledger.tasks.flatMap(one => (one.workspace === undefined ? [] : [workspaceOf(ownBase, ledger.run.id, one.id)]))
+  for (const folder of [...derivedFolders, ...(ownBase === '' ? [] : [runWorkspaceOf(ownBase, ledger.run.id)])]) {
+    const scanned = statusOf((await lore($, ['status', '--scan'], folder, LONG_MS)).out)
+    const here = await backendOf($)
+    if (scanned?.isClean === true && scanned.isInSync && here !== null && isRemovable(here.root, ledger, folder)) await runProgram($, ['rm', '-rf', '--', folder], LONG_MS)
+    else kept.push(folder)
+  }
+  const tail = [
+    notArchived.length === 0 ? "Its tasks' branches are archived." : `The branches of ${notArchived.join(', ')} could not be archived.`,
+    kept.length === 0 ? 'Its workspaces are removed.' : `Kept, with changes not pushed: ${kept.join(', ')}.`,
+  ].join(' ')
+
+  return `${done?.text ?? `Merged: run ${ledger.run.id} is on ${base} as ${rev7(landed)}.`} ${tail}${protectLine}`
+}
+
+/** `run_sync_base`: the orchestrator has the mod bring the base branch into the run branch, so the run can be approved again. */
+async function runSyncBase($: EngineInterface, call: ToolCall): Promise<{ result: string; text: string; isError?: true }> {
+  const fail = (reason: string) => ({ isError: true as const, result: `${NOT_DONE} ${reason}`, text: `${NOT_DONE} ${reason}` })
+  const say = (text: string) => ({ result: text, text })
+  if (callerOf(call.agentId).kind !== 'orchestrator') return fail('Only the orchestrator brings the base branch in.')
+  const found = await loreRunOf($)
+  if ('text' in found) return fail(found.text)
+  const { path, ledger, runLore, run } = found
+  const base = runLore.base
+  if (ledger.merge !== undefined) return fail(`${ledger.merge.task} is still merging: one merge at a time.`)
+  const baseNow = branchInfoOf((await lore($, ['branch', 'info', base], run)).out)?.remoteLatest
+  if (baseNow === undefined) return fail(`lore did not say where ${base} stands on the server.`)
+  const synced = await lore($, ['branch', 'switch', runLore.branch, '--reset'], run, LONG_MS)
+  if (synced.exitCode !== 0) return fail(`the run's workspace could not be brought to ${runLore.branch}: ${lastLine(synced)}.`)
+  const runHead = branchInfoOf((await lore($, ['branch', 'info', runLore.branch], run)).out)?.remoteLatest
+  if (runHead === undefined || (runLore.head !== undefined && runHead !== runLore.head)) {
+    return fail(`${runLore.branch} is at ${runHead === undefined ? 'a revision lore did not say' : rev7(runHead)}, but the board left it at ${runLore.head === undefined ? 'no revision it knows of' : rev7(runLore.head)}: something nobody judged is on it. Nothing was merged; look at lore history --branch ${runLore.branch}.`)
+  }
+  const merged = await lore($, ['branch', 'merge', base, `--message=Bring ${base} into ${runLore.branch}`], run, LONG_MS)
+  const outcome = mergeOf(merged.exitCode, merged.out)
+  const at = iso(await $.clock.now())
+  if (outcome.kind === 'conflict') {
+    await lore($, ['branch', 'merge', 'abort'], run, LONG_MS)
+    const files = outcome.files.join(', ') || 'files lore did not name'
+    await mutate($, path, raw => {
+      const reported = reportProblem(raw, at, { kind: 'orchestrator' }, { text: `Bringing ${base} into ${runLore.branch} conflicts in: ${files}. Give it a task that resolves it on the run branch, then call run_sync_base again.`, severity: 'blocker' })
+
+      return { value: reported, isChanged: reported.isChanged }
+    })
+
+    return fail(`${base} conflicts with ${runLore.branch} in: ${files}. Nothing was merged; it is a blocker on the board.`)
+  }
+  if (outcome.kind === 'failed') {
+    await lore($, ['branch', 'merge', 'abort'], run, LONG_MS)
+
+    return fail(`lore did not bring ${base} in: ${outcome.reason}.`)
+  }
+  if (outcome.source !== undefined && outcome.source !== baseNow) {
+    if (runHead !== undefined) await lore($, ['branch', 'reset', runHead, '--branch', runLore.branch], run)
+    await lore($, ['branch', 'switch', runLore.branch, '--reset'], run, LONG_MS)
+
+    return fail(`${base} moved while it was brought in. Nothing was pushed: call run_sync_base again.`)
+  }
+  const sent = await lore($, ['push'], run, LONG_MS)
+  const result = pushOf(sent.exitCode, sent.out)
+  if (result.kind === 'refused') return fail(`the run branch could not be pushed: ${result.text}.`)
+  const broughtHead = result.kind === 'pushed' ? result.revision : outcome.revision
+  const written = await settle($, path, raw => baseBroughtIn(raw, baseNow, broughtHead))
+  if (written === undefined) return fail('the board could not be written.')
+  const head2 = result.kind === 'pushed' ? result.revision : outcome.revision
+  const now2 = parseLedger((await textAt($, path)) ?? '').ledger
+  if (now2 !== undefined) await startCheck($, path, now2, { cwd: run, revision: head2 })
+  const landed = result.kind === 'pushed' ? rev7(result.revision) : rev7(outcome.revision)
+
+  return say(`Brought ${base} into ${runLore.branch} as ${landed}. A new approval is needed: tell the owner what changed and ask them to type /approve-main.`)
+}
+
+/**
+ * `merge` and `merge_check` in a Lore run: a judged task's branch into the
+ * run branch, pinned to the revision its worker handed back, one at a time,
+ * in the run's own workspace. `merge_check` stops before the claim and
+ * changes nothing.
+ */
+async function loreMergeTool($: EngineInterface, call: ToolCall, isCheckOnly: boolean): Promise<{ result: string; text: string; isError?: true }> {
+  const fail = (reason: string) => ({ isError: true as const, result: `${NOT_DONE} ${reason}`, text: `${NOT_DONE} ${reason}` })
+  const say = (text: string) => ({ result: text, text })
+  const path = await boundLedger($)
+  if (path === undefined) return fail(NOT_BOUND)
+  await remember($, path)
+  const ledger = parseLedger((await textAt($, path)) ?? '').ledger
+  if (ledger === undefined) return fail('The ledger does not read.')
+  const runLore = ledger.run.lore
+  if (runLore?.workspace === undefined) return fail('This run has no Lore workspace yet: it is made when the owner approves the plan with /approve.')
+  const run = runLore.workspace
+  const now = await $.clock.now()
+  const asked = loreReady(ledger, callerOf(call.agentId), call, await flights($, ledger.run.id, now))
+  if ('error' in asked) return fail(asked.error)
+  const { task, revision } = asked
+  const id = task.id
+  // The branch is the one the mod named: never a name written on the task, which reaches lore as an argument.
+  const branch = taskBranchOf(runLore.branch, id)
+  const blocks = [...asked.blocks]
+  const head = branchInfoOf((await lore($, ['branch', 'info', branch], run)).out)?.remoteLatest
+  if (head === undefined) blocks.push(`lore did not say where ${branch} stands on the server.`)
+  else if (head !== revision) blocks.push(`${branch} moved since it was judged: it is at ${rev7(head)}, and ${rev7(revision)} was judged. Judge it again.`)
+  if (blocks.length > 0) return isCheckOnly ? say([`${id} cannot merge yet:`, ...blocks.map(one => `- ${one}`)].join('\n')) : fail([`${id} cannot merge yet:`, ...blocks.map(one => `- ${one}`)].join('\n'))
+  if (isCheckOnly) return say(`${id} may merge now: its branch ${branch} is at ${rev7(revision)}, as it was judged. It merges into ${runLore.branch}.`)
+
+  const at = iso(now)
+  const claimed = await mutate($, path, raw => {
+    const outcome = startLoreMerge(raw, at, { task: id, revision, target: 'run' })
+
+    return { value: outcome, isChanged: outcome.isChanged }
+  })
+  if (claimed.error !== undefined) return fail(claimed.error)
+  if (claimed.value.isError) return fail(claimed.value.text)
+  const giveUp = async (why: string) => {
+    const outcome = await settle($, path, raw => letGo(raw, why))
+
+    return fail(outcome?.text ?? `${id} was not merged: ${why}.`)
+  }
+  const synced = await lore($, ['branch', 'switch', runLore.branch, '--reset'], run, LONG_MS)
+  if (synced.exitCode !== 0) return giveUp(`the run's workspace could not be brought to ${runLore.branch}: ${lastLine(synced)}`)
+  const runHead = branchInfoOf((await lore($, ['branch', 'info', runLore.branch], run)).out)?.remoteLatest
+  if (runHead === undefined) return giveUp(`lore did not say where ${runLore.branch} stands on the server`)
+  // A task is merged only onto what the board itself left on the run branch: anything else would be carried along unjudged.
+  if (runLore.head !== undefined && runHead !== runLore.head) return giveUp(`${runLore.branch} is at ${rev7(runHead)}, but the board left it at ${rev7(runLore.head)}: something nobody judged is on it. Nothing was merged; look at lore history --branch ${runLore.branch}`)
+  const merged = await lore($, ['branch', 'merge', branch, `--message=${id}: ${task.title}`], run, LONG_MS)
+  const outcome = mergeOf(merged.exitCode, merged.out)
+  // Lore merges a branch's latest: one pushed between the look above and the merge is not the judged revision.
+  if (outcome.kind === 'merged' && outcome.source !== revision) {
+    await lore($, ['branch', 'reset', runHead, '--branch', runLore.branch], run)
+    await lore($, ['branch', 'switch', runLore.branch, '--reset'], run, LONG_MS)
+    const took = outcome.source === undefined ? 'a revision lore did not name' : rev7(outcome.source)
+
+    return giveUp(`lore took in ${took}, not the judged ${rev7(revision)}: the branch moved meanwhile. Nothing was pushed; judge it again`)
+  }
+  if (outcome.kind === 'conflict') {
+    await lore($, ['branch', 'merge', 'abort'], run, LONG_MS)
+    const said = await settle($, path, raw => conflicted(raw, at, id, outcome.files))
+
+    return fail(said?.text ?? `${id} conflicts with the run branch; nothing was merged.`)
+  }
+  if (outcome.kind === 'failed') {
+    await lore($, ['branch', 'merge', 'abort'], run, LONG_MS)
+
+    return giveUp(`lore did not merge it: ${outcome.reason}`)
+  }
+  const pushed = await lore($, ['push'], run, LONG_MS)
+  const sent = pushOf(pushed.exitCode, pushed.out)
+  if (sent.kind !== 'pushed') return giveUp(`the merge could not be pushed: ${sent.kind === 'refused' ? sent.text : 'lore pushed nothing'}`)
+  // Its locks are let go, and its workspace removed when everything in it is in Lore.
+  await lore($, ['lock', 'release', '--branch', branch], run)
+  let workspaceLine = ''
+  if (task.workspace !== undefined) {
+    const scanned = await lore($, ['status', '--scan'], task.workspace, LONG_MS)
+    const status = statusOf(scanned.out)
+    const hereNow = await backendOf($)
+    const derived = hereNow === null || projectOf(ledger) === undefined ? undefined : workspaceOf(workspacesOf(hereNow.root, projectOf(ledger)?.lore?.workspaces), ledger.run.id, id)
+    if (status?.isClean === true && status.isInSync && hereNow !== null && derived === task.workspace && isRemovable(hereNow.root, ledger, derived)) {
+      await runProgram($, ['rm', '-rf', '--', task.workspace], LONG_MS)
+      workspaceLine = 'Its workspace is removed: everything in it is in Lore.'
+    } else {
+      workspaceLine = `Its workspace is kept at ${task.workspace}: ${status === undefined ? 'lore could not read it' : 'it holds changes that are not pushed'}. Look at it before you remove it.`
+    }
+  }
+  const removed = workspaceLine.startsWith('Its workspace is removed')
+  const done = await settle($, path, raw => {
+    const result = onRunBranch(raw, iso(now), id, sent.revision, runLore.branch, workspaceLine)
+    const kept = raw.tasks.find(one => one.id === id)
+    if (removed && kept !== undefined) delete kept.workspace
+
+    return result
+  })
+  isolated.delete(id)
+  workspaces.delete(id)
+  await issueDone($, path, id)
+  // The last task merged: the run branch's own head gets the project's check before it may go into the base.
+  const after = parseLedger((await textAt($, path)) ?? '').ledger
+  if (after !== undefined && after.tasks.every(one => one.status === 'done')) await startCheck($, path, after, { cwd: run, revision: sent.revision })
+
+  return say(done?.text ?? `Merged: ${id} is on ${runLore.branch} as ${rev7(sent.revision)}, but the board could not be written.`)
+}
+
 /**
  * `merge` and `merge_check`: the one way a pull request of a run reaches the
  * base branch. The board's own side first, then GitHub's facts read just now,
@@ -1012,6 +2041,7 @@ async function mergeTool(
   const path = await boundLedger($)
   if (path === undefined) return fail(NOT_BOUND)
   // Before anything is asked of GitHub: a pull request's number means something only in a repository on GitHub.
+  if ((await backendOf($))?.kind === 'lore') return underWay(() => loreMergeTool($, call, isCheckOnly))
   if (!(await isAtForge($))) return fail(elsewhere(origin))
   await remember($, path)
   let ledger: Ledger
@@ -1038,6 +2068,7 @@ async function mergeTool(
     const where = pull.commit === undefined ? '' : ` as ${short(pull.commit)}`
     if (isCheckOnly) return say(`PR ${asked.pr} is merged already${where}, outside the board. ${TOOL_MERGE} takes it over and marks ${id} done.`)
     const adopted = await settle($, path, raw => onMain(raw, iso(now), pull.commit ?? pull.head, config.base, { isAdopted: true, task: id, pr: asked.pr }))
+    if (adopted !== undefined) await issueDone($, path, id)
 
     return adopted === undefined ? fail(`${id} could not be taken over: the board could not be written.`) : say(adopted.text)
   }
@@ -1073,6 +2104,7 @@ async function mergeTool(
   if (settled?.isMerged === true) {
     const commit = settled.commit ?? pull.head
     const done = await settle($, path, raw => onMain(raw, now2, commit, config.base))
+    if (done !== undefined) await issueDone($, path, id)
 
     return say(done?.text ?? `Merged: PR ${asked.pr} (${id}) is on ${config.base} as ${short(commit)}, but the board could not be written. Set it right with ${TOOL_MERGE} for ${id} again: it is taken over.`)
   }
@@ -1096,14 +2128,61 @@ async function mergeTool(
  * between, or GitHub could not be asked afterwards): the pull request says.
  * Called from the timer; never throws.
  */
+/** A Lore merge is under way in this module: its own claim is never let go as stuck. */
+let loreMergesUnderWay = 0
+/** Runs one of the mod's own Lore merges, counted as under way while it runs. */
+async function underWay<T>(merging: () => Promise<T>): Promise<T> {
+  loreMergesUnderWay += 1
+  try {
+    return await merging()
+  } finally {
+    loreMergesUnderWay -= 1
+  }
+}
+
+/** A Lore claim older than this was not heard of again: longer than three of the engine's longest program runs. */
+const LORE_CLAIM_STALE_MIN = 35
+
+/**
+ * A Lore merge claim nobody heard back from (the session stopped mid-merge,
+ * or the mod was reloaded): after a while it is let go, a base merge's base
+ * protected again first, and a blocker says what to look at before anything
+ * else merges. Never throws.
+ */
+async function settleStuckLore($: EngineInterface, path: string, ledger: Ledger): Promise<void> {
+  const flight = ledger.merge
+  const runLore = ledger.run.lore
+  if (flight?.revision === undefined || runLore === undefined || loreMergesUnderWay > 0) return
+  const now = await $.clock.now()
+  if (now - Date.parse(flight.startedAt) < LORE_CLAIM_STALE_MIN * 60_000) return
+  const into = flight.target === 'base' ? runLore.base : runLore.branch
+  let protectLine = ''
+  if (flight.target === 'base' && runLore.workspace !== undefined) {
+    const again = await lore($, ['branch', 'protect', runLore.base], runLore.workspace)
+    protectLine = again.exitCode === 0 ? ` ${runLore.base} is protected again.` : ` ${runLore.base} could not be protected again (${lastLine(again)}): protect it by hand.`
+  }
+  const at = iso(now)
+  await settle($, path, raw => {
+    const out = letGo(raw, `nobody heard how it ended for ${LORE_CLAIM_STALE_MIN} minutes (the session may have stopped mid-merge)`)
+    reportProblem(raw, at, { kind: 'orchestrator' }, {
+      text: `The merge of ${flight.task} into ${into} was let go unheard after ${LORE_CLAIM_STALE_MIN} minutes.${protectLine} Check lore history --branch ${into} to see whether it landed before anything else merges.`,
+      severity: 'blocker',
+    })
+
+    return out
+  })
+}
+
 async function watchClaim($: EngineInterface): Promise<void> {
   if (isWatching) return
   isWatching = true
   try {
     const path = await boundLedger($)
     if (path === undefined) return
-    const flight = parseLedger(await $.fs.read(path)).ledger?.merge
-    if (flight === undefined) return
+    const watched = parseLedger(await $.fs.read(path)).ledger
+    const flight = watched?.merge
+    if (flight === undefined || watched === undefined) return
+    if (flight.revision !== undefined) return await settleStuckLore($, path, watched)
     // A claim in a repository whose origin is not on GitHub is none the board made: nothing of it is asked there.
     if (!(await isAtForge($))) return
     const now = await $.clock.now()
@@ -1119,6 +2198,7 @@ async function watchClaim($: EngineInterface): Promise<void> {
 
         return done.isError ? done : { ...done, wake: `Run board: PR ${flight.pr} (${flight.task}) is merged as ${short(pull.commit ?? flight.head)}, and the task is done.`, asks: `merge ${flight.task}` }
       })
+      await issueDone($, path, flight.task)
     } else await settle($, path, raw => abandoned(raw, 'the merge call did not go through'))
   } catch {
     // A look that failed is tried again on the next one.
@@ -1197,9 +2277,9 @@ async function show(
 /** Reads the ledger of the run on show when its file changed; never throws. */
 async function refresh($: EngineInterface, rescan: boolean): Promise<void> {
   try {
-    if (root === undefined || rescan) root = (await $.session.repo())?.root ?? null
+    if (root === undefined || rescan) root = await rootOf($, rescan)
     if (root === null) {
-      const error = 'This session is not inside a git repository, so there is no run folder to read.'
+      const error = 'This session is not inside a git repository or a Lore workspace, so there is no run folder to read.'
 
       return await show($, `no-repo`, () => ({ runId: null, ledger: null, error }))
     }
@@ -1288,7 +2368,7 @@ async function listTool($: EngineInterface, spec: Parameters<EngineInterface['to
  */
 async function isHome($: EngineInterface): Promise<boolean> {
   try {
-    if (root === undefined) root = (await $.session.repo())?.root ?? null
+    if (root === undefined) root = await rootOf($)
 
     return root !== null && (await $.fs.exists(`${root}/.claude/conductor`))
   } catch {
@@ -1298,6 +2378,9 @@ async function isHome($: EngineInterface): Promise<boolean> {
 
 export const register: Register = (on, options) => {
   config = configOf(options)
+  const given = (options as Record<string, unknown> | undefined)?.loreBin
+  loreOption = typeof given === 'string' && given.trim() !== '' ? given.trim() : undefined
+  linearOption = apiKeyOf(options)
   on('session.start', async ($, e, next) => {
     if (!(await isHome($))) return next(e)
     // The timers first: whatever a registration below runs into, the board stays live.
@@ -1308,6 +2391,7 @@ export const register: Register = (on, options) => {
       void flush($)
       void rotation($)
       if (flushTicks % WATCH_EVERY === 0) {
+        void watchChecks($)
         void watchClaim($)
         void watchMain($)
         void lookAgain($)
@@ -1332,9 +2416,10 @@ export const register: Register = (on, options) => {
           tier: { type: 'string', enum: [...TIERS], description: 'Only before the task starts, and only by the orchestrator.' },
           tierReason: { type: 'string', description: 'One line: why this tier. Required with tier.' },
           note: { type: 'string', description: 'One line: what it is doing now, or why it is blocked. An empty string clears it.' },
-          ticket: { type: 'integer', minimum: 1, description: 'The issue it belongs to; the orchestrator\'s to set.' },
+          ticket: { anyOf: [{ type: 'integer', minimum: 1 }, { type: 'string', pattern: TICKET_PATTERN }], description: 'The issue it belongs to, a GitHub number or a Linear key like ABC-12; the orchestrator\'s to set.' },
           pr: { type: 'integer', minimum: 1, description: 'The pull request\'s number.' },
           branch: { type: 'string' },
+          revision: { type: 'string', pattern: '^[0-9a-f]{64}$', description: 'In Lore: the revision its branch was pushed at, which the merge is pinned to.' },
         },
         required: ['task'],
         additionalProperties: false,
@@ -1352,7 +2437,7 @@ export const register: Register = (on, options) => {
           title: { type: 'string', description: 'What the task delivers, in a few words.' },
           tier: { type: 'string', enum: [...TIERS] },
           tierReason: { type: 'string', description: 'One line: why this tier.' },
-          ticket: { type: 'integer', minimum: 1, description: 'The issue it belongs to.' },
+          ticket: { anyOf: [{ type: 'integer', minimum: 1 }, { type: 'string', pattern: TICKET_PATTERN }], description: 'The issue it belongs to: a GitHub number or a Linear key like ABC-12.' },
           dependsOn: { type: 'array', items: { type: 'string' }, description: 'Ids of tasks that must be done first.' },
           files: { type: 'array', items: { type: 'string' }, description: 'The files or folders the task is expected to change, relative to the repository. Findings on them reach its worker, and a second task on the same file is flagged.' },
           addresses: { type: 'array', items: { type: 'string' }, description: 'The ids of open problems this task is to deal with, e.g. ["P3"]: each then has this task, and is resolved once it is done and the fix holds.' },
@@ -1517,13 +2602,61 @@ export const register: Register = (on, options) => {
         properties: {
           problem: { type: 'string', description: 'The problem\'s id, e.g. P3.' },
           task: { type: 'string', description: 'The id of a task of this run that is not done.' },
-          ticket: { type: 'integer', minimum: 1, description: 'The issue\'s number, when one task of this run still carries it.' },
+          ticket: { anyOf: [{ type: 'integer', minimum: 1 }, { type: 'string', pattern: TICKET_PATTERN }], description: 'The issue\'s number or Linear key, when one task of this run still carries it.' },
         },
         required: ['problem'],
         additionalProperties: false,
       },
       isDeferred: false,
     })
+    if ((await backendOf($))?.kind === 'lore') {
+      await listCommand($, {
+        name: 'approve-main',
+        description: 'Approve the run branch for the base branch: the mod merges exactly its revision now, and protects the base again',
+      })
+      await listTool($, {
+        name: 'run_check',
+        description: "Run board: the orchestrator runs the project's check again, on a green task (task) or on the run branch's head (no task), after a failure that was not the change's. One check runs at a time.",
+        inputSchema: { type: 'object', properties: { task: { type: 'string', description: 'The green task whose check runs again; leave it out for the run branch.' } }, additionalProperties: false },
+        isDeferred: false,
+      })
+      await listTool($, {
+        name: 'run_sync_base',
+        description:
+          "Run board: the orchestrator has the mod bring the base branch into the run branch, when it moved since the run branch last took it in. A conflict is a blocker on the board. Afterwards the owner approves again with /approve-main.",
+        inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+        isDeferred: false,
+      })
+    }
+    if (await wantsLinear($)) {
+      await listTool($, {
+        name: 'ticket_read',
+        description: 'Run board: read an issue in Linear by its key: its title, state, description, sub-issues and last comments.',
+        inputSchema: {
+          type: 'object',
+          properties: { key: { type: 'string', pattern: TICKET_PATTERN, description: 'The issue\'s key, e.g. ABC-12.' } },
+          required: ['key'],
+          additionalProperties: false,
+        },
+        isDeferred: false,
+      })
+      await listTool($, {
+        name: 'ticket_file',
+        description:
+          "Run board: the orchestrator files a drafted ticket in Linear as a sub-issue of the run's issue, once the owner approved the plan. With task, that task carries the new key.",
+        inputSchema: {
+          type: 'object',
+          properties: {
+            title: { type: 'string', description: 'The ticket\'s title.' },
+            description: { type: 'string', description: 'The ticket\'s description, in Markdown; link the spec it comes from.' },
+            task: { type: 'string', description: 'The id of the task the ticket is for.' },
+          },
+          required: ['title'],
+          additionalProperties: false,
+        },
+        isDeferred: false,
+      })
+    }
     if (unlisted.length > 0) {
       void Promise.resolve($.ui.toast(`Run board: the engine did not take ${unlisted.join('; ')}. Everything else of the mod works.`)).catch(() => undefined)
     }
@@ -1593,6 +2726,42 @@ export const register: Register = (on, options) => {
     const release = async (): Promise<void> => {
       if (reservation !== undefined) await mutate($, path, raw => ({ value: undefined, isChanged: released(raw, reservation) }))
     }
+    // In Lore a worker builds in a workspace of its own, made now, before the engine starts it.
+    let unlock: (() => void) | undefined
+    const here = await backendOf($)
+    const runLore = read.ledger.run.lore
+    if (decided.kind === 'worker' && here?.kind === 'lore' && runLore !== undefined) {
+      const project = read.ledger.run.config
+      const taskId = decided.taskId
+      const workspacesBase = workspacesOf(here.root, project?.lore?.workspaces)
+      const workspace = workspaceOf(workspacesBase, read.ledger.run.id, taskId)
+      const made = await workspaceFor($, {
+            root: here.root,
+            base: workspacesBase,
+            path: workspace,
+            branch: taskBranchOf(runLore.branch, taskId),
+            from: decided.base?.branch ?? runLore.branch,
+            carry: project?.lore?.carry ?? LORE_DEFAULTS.carry,
+            minFreeGB: project?.lore?.minFreeGB ?? LORE_DEFAULTS.minFreeGB,
+            runId: read.ledger.run.id,
+            taskId,
+          })
+      if (made.error !== undefined) {
+        await release()
+
+        return { deny: `conductor: ${taskId}'s Lore workspace could not be made, so no worker was started: ${made.error}.` }
+      }
+      // Each start makes its own workspace side by side with the others; only handing it to the engine is one at a time,
+      // since the engine names the workspace it asks for after the agent. A wait here counts against this hook's time.
+      unlock = await exclusive()
+      prepared.set(taskId, workspace)
+      awaitingWorktree.push({ taskId, path: workspace })
+    }
+    const finished = (): void => {
+      const waiting = awaitingWorktree.findIndex(one => decided.kind === 'worker' && one.taskId === decided.taskId)
+      if (waiting >= 0) awaitingWorktree.splice(waiting, 1)
+      unlock?.()
+    }
     try {
       // A worker also starts knowing how it reports and what the board already holds for it.
       const task = decided.kind === 'worker' ? read.ledger.tasks.find(one => one.id === decided.taskId) : undefined
@@ -1602,7 +2771,12 @@ export const register: Register = (on, options) => {
         task === undefined || decided.kind !== 'worker'
           ? e.prompt
           : `${e.prompt}\n${briefing(read.ledger, task, { brief, slot: decided.slot }, decided.base)}`
-      const started = await next({ ...e, model: decided.model, prompt })
+      let started: Awaited<ReturnType<typeof next>>
+      try {
+        started = await next({ ...e, model: decided.model, prompt })
+      } finally {
+        finished()
+      }
       // The engine started nothing after all: the task stands again as it stood.
       if ((started as { agentId?: string }).agentId === undefined) await release()
       else await heard($, path, e.name ?? decided.taskId, decided, started)
@@ -1613,6 +2787,53 @@ export const register: Register = (on, options) => {
       throw cause
     }
   }).catch(unrouted)
+
+  // Outside git, Claude Code asks for a worker's isolated copy here. In a Lore run the mod made it already;
+  // in git the event goes on to the person's own hooks and the engine, as it does without the mod (checked in the real
+  // engine on 2026-11-06: with no hook of the person's, the engine still makes its git worktree).
+  on('classic.WorktreeCreate', async ($, e, next) => {
+    try {
+      const here = await backendOf($)
+      // In git the mod has nothing to say: the person's own hook beneath, or the engine's own worktree, answers.
+      if (here?.kind !== 'lore') return next(e)
+      // The engine names the workspace after the agent: a worker it started already is found by its id, else it is the start in flight.
+      const agentId = /^agent-(.+)$/.exec(e.name)?.[1]
+      let taskId = agentId === undefined ? undefined : agents.get(agentId)
+      let workspace = taskId === undefined ? undefined : prepared.get(taskId)
+      if (workspace === undefined) {
+        const head = awaitingWorktree.shift()
+        taskId = head?.taskId
+        workspace = head?.path
+        if (agentId !== undefined && taskId !== undefined) agents.set(agentId, taskId)
+      } else {
+        const waiting = awaitingWorktree.findIndex(one => one.taskId === taskId)
+        if (waiting >= 0) awaitingWorktree.splice(waiting, 1)
+      }
+      // Nothing of this run's: the project's own WorktreeCreate hook says why the engine cannot make one here.
+      if (taskId === undefined || workspace === undefined) return next(e)
+      prepared.delete(taskId)
+      const path = await boundLedger($)
+      if (path !== undefined) {
+        const forTask = taskId
+        const handed = workspace
+        await mutate($, path, raw => {
+          const task = raw.tasks.find(one => one.id === forTask)
+          const runLore = (raw.run as { lore?: { branch?: unknown } }).lore
+          if (task === undefined) return { value: undefined, isChanged: false }
+          task.workspace = handed
+          if (typeof runLore?.branch === 'string') task.branch = taskBranchOf(runLore.branch, forTask)
+
+          return { value: undefined, isChanged: true }
+        })
+      }
+      isolated.add(taskId)
+      workspaces.set(taskId, workspace)
+
+      return { worktreePath: workspace }
+    } catch {
+      return {}
+    }
+  })
 
   // What a worker is doing, from its own tool calls: remembered here, written by the flush.
   // And the way board news reaches its reader: with the result of the reader's own call.
@@ -1634,12 +2855,49 @@ export const register: Register = (on, options) => {
       }
     }
     const taskId = call.agentId === undefined ? undefined : agents.get(call.agentId)
+    // In a bound Lore run the mod does the Lore writes: a worker moves only its own branch, the orchestrator only reads.
+    // Every command of a bound Lore run goes through the guard, which fails closed on what it cannot read.
+    if (call.tool === 'Bash' && typeof call.command === 'string' && (await backendOf($))?.kind === 'lore') {
+      const path = await boundLedger($).catch(() => undefined)
+      const boundRun = path === undefined ? undefined : parseLedger((await textAt($, path)) ?? '').ledger
+      const runLore = boundRun?.run.lore
+      if (runLore !== undefined) {
+        // A worker is an agent that holds a task with a workspace of its own; any other agent (a helper, a worker's own
+        // subagent the board does not know) gets the orchestrator's read-only rules.
+        const isWorker = call.agentId !== undefined && taskId !== undefined && (isolated.has(taskId) || boundRun?.tasks.find(one => one.id === taskId)?.workspace !== undefined)
+        const own = isWorker && taskId !== undefined ? taskBranchOf(runLore.branch, taskId) : undefined
+        const what = loreByHand(call.command, { base: runLore.base, runBranch: runLore.branch, ownBranch: own, caller: isWorker ? 'worker' : 'orchestrator' })
+        if (what !== undefined) {
+          return {
+            deny: isWorker
+              ? `conductor: this command ${what}. A worker builds only on its own branch ${own ?? '(none yet)'}: it never merges, switches or creates branches, and never pushes another branch. Commit and push your own branch, set your task to review with the revision you pushed, and hand back.`
+              : `conductor: this command ${what} by hand. In a bound Lore run the mod does the Lore writes and the owner's workspace is only read: a judged task merges with ${TOOL_MERGE}, the run branch reaches ${runLore.base} only by the owner's /approve-main, and ${runLore.base} is brought into the run branch with mcp__conductor__run_sync_base. /board none lets go of the run.`,
+          }
+        }
+      }
+    }
+    // A Lore worker that was not handed a workspace of its own would build in the owner's: it may not write at all.
+    if (taskId !== undefined && (WRITES.has(call.tool) || call.tool === 'Bash') && !isolated.has(taskId) && (await backendOf($))?.kind === 'lore') {
+      const path = await boundLedger($).catch(() => undefined)
+      const ledger = path === undefined ? undefined : parseLedger(await textAt($, path) ?? '').ledger
+      const task = ledger?.tasks.find(one => one.id === taskId)
+      if (ledger?.run.lore !== undefined && task !== undefined) {
+        if (task.workspace !== undefined) {
+          isolated.add(taskId)
+          workspaces.set(taskId, task.workspace)
+        } else {
+          return {
+            deny: `conductor: ${taskId}'s worker has no Lore workspace of its own, so it would change the owner's workspace. It was started without isolation: "worktree". Stop and hand back; the orchestrator starts it again with isolation: "worktree".`,
+          }
+        }
+      }
+    }
     if (taskId !== undefined && !call.tool.startsWith('mcp__conductor__')) {
       pending.set(taskId, activityText(call))
       const file = call.file_path ?? call.notebook_path
       if (WRITES.has(call.tool) && typeof file === 'string' && typeof root === 'string') {
         const set = changedFiles.get(taskId) ?? new Set<string>()
-        changedFiles.set(taskId, set.add(relative(file, root)))
+        changedFiles.set(taskId, set.add(relative(file, root, workspaces.get(taskId))))
       }
     }
     const ran = await next(e)
@@ -1706,8 +2964,8 @@ export const register: Register = (on, options) => {
       return { isChanged: false, isError: false, text }
     })
   }).catch(broke)
-  on('tool.call', { tool: /^mcp__conductor__task_update$/ }, ($, e) =>
-    answer($, e as unknown as ToolCall, (raw, at, caller, input) => {
+  on('tool.call', { tool: /^mcp__conductor__task_update$/ }, async ($, e) => {
+    const said = await answer($, e as unknown as ToolCall, (raw, at, caller, input) => {
       const outcome = updateTask(raw, at, caller, input)
       if (outcome.isError || input.status !== 'green' || typeof input.task !== 'string') return outcome
       // A green task is what the tasks behind it were waiting for: said here, where the orchestrator reads it.
@@ -1718,8 +2976,11 @@ export const register: Register = (on, options) => {
       if (ledger?.run.pausedAt !== undefined) return { ...outcome, text: `${outcome.text} The run is paused: once the owner types /unpause, these can start before this one is merged: ${names}.` }
 
       return { ...outcome, text: `${outcome.text} Can start now, before this one is merged: ${names}. Merge ${input.task} all the same as soon as nothing else is merging.` }
-    }),
-  ).catch(broke)
+    })
+    if (said.isError === undefined && (e as unknown as ToolCall).status === 'green') await checkOnGreen($, (e as unknown as ToolCall).task)
+
+    return said
+  }).catch(broke)
   on('tool.call', { tool: /^mcp__conductor__merge_check$/ }, ($, e) => mergeTool($, e as unknown as ToolCall, true)).catch(broke)
   on('tool.call', { tool: /^mcp__conductor__merge$/ }, ($, e) => mergeTool($, e as unknown as ToolCall, false)).catch(broke)
   on('tool.call', { tool: /^mcp__conductor__problem_report$/ }, ($, e) =>
@@ -1728,6 +2989,10 @@ export const register: Register = (on, options) => {
   on('tool.call', { tool: /^mcp__conductor__problem_resolve$/ }, ($, e) =>
     answer($, e as unknown as ToolCall, (raw, _at, caller, input) => resolveProblem(raw, caller, input)),
   ).catch(broke)
+  on('tool.call', { tool: /^mcp__conductor__run_sync_base$/ }, ($, e) => underWay(() => runSyncBase($, e as unknown as ToolCall))).catch(broke)
+  on('tool.call', { tool: /^mcp__conductor__run_check$/ }, ($, e) => runCheckTool($, e as unknown as ToolCall)).catch(broke)
+  on('tool.call', { tool: /^mcp__conductor__ticket_read$/ }, ($, e) => ticketRead($, e as unknown as ToolCall)).catch(broke)
+  on('tool.call', { tool: /^mcp__conductor__ticket_file$/ }, ($, e) => ticketFile($, e as unknown as ToolCall)).catch(broke)
   on('tool.call', { tool: /^mcp__conductor__problem_assign$/ }, ($, e) =>
     answer($, e as unknown as ToolCall, (raw, _at, caller, input) => assignProblem(raw, caller, input)),
   ).catch(broke)
@@ -1740,6 +3005,21 @@ export const register: Register = (on, options) => {
     if (run === null) return composed
     // GitHub's side of a run is told only where the repository is on GitHub; anywhere else, what stands in its place.
     const isHere = await isAtForge($)
+    // A Lore run: its branches, its workspaces and its merges stand where GitHub's pull requests would.
+    const boundPath = await boundLedger($).catch(() => undefined)
+    const bound = boundPath === undefined ? undefined : parseLedger((await textAt($, boundPath)) ?? '').ledger
+    const runLore = (await backendOf($))?.kind === 'lore' ? bound?.run.lore : undefined
+    const checkArgv = bound?.run.config?.check?.argv
+    const loreBullets =
+      runLore === undefined
+        ? []
+        : [
+            `- This is a Lore workspace. The run has its own branch, ${runLore.branch}, made from ${runLore.base} when the owner approved the plan. Start each task's worker always with isolation: "worktree": the mod then hands it a Lore workspace of its own, copied from the owner's workspace, on its own branch ${runLore.branch}/<task id>. A worker started without it is refused every write. Each worker commits and pushes its own branch itself; the mod only makes workspaces and merges. The owner's workspace is only read: never stage, commit, sync, switch or push there.`,
+            `- A worker hands back with the revision it pushed (task_update with revision). A task you judged green (its change reviewed${checkArgv === undefined ? '' : ', its check passed'}) is merged into ${runLore.branch} through ${TOOL_MERGE} alone, pinned to that revision, one at a time; ${TOOL_CHECK} says what stands in the way. A conflict comes back as a blocked task with the files named: have its worker bring the run branch in and resolve, never by picking one side of a binary file. A new revision on a green task sends it back to review.`,
+            ...(checkArgv === undefined ? [] : [`- The project's check (${checkArgv.join(' ')}) runs on each revision you judge green, and on the run branch's head once every task is merged. Its verdict reaches you as a board notice; a task is merged only once its check passed.`]),
+            `- When every task is merged into ${runLore.branch} and no blocker or warning is open, tell the owner in a line or two what changed and how to try it, and ask them to type /approve-main. Only the owner merges the run branch into ${runLore.base}: no tool of yours does. When ${runLore.base} moved since the run branch last took it in, /approve-main is refused: bring it in with mcp__conductor__run_sync_base, then ask the owner again.`,
+            '- Workers never merge. A lore write by hand (push, merge, switch, sync, protect) is refused in a bound session; read with lore status, lore history, lore diff and lore branch info.',
+          ]
     const text = [
       '# Run board (conductor)',
       '',
@@ -1753,9 +3033,15 @@ export const register: Register = (on, options) => {
       `- A task starts once everything it waits for is green (reviewed, its checks green) or done: it does not wait for the merge. Start it then; the mod tells its worker to build on the green task's branch, which works for one unmerged branch at a time. ${isHere ? `${TOOL_MERGE} takes a task only after everything it waits for is done, so merge in that order.` : 'A task is merged only after everything it waits for is done, so merge in that order.'}`,
       `- A start is refused for an agent that is no task's worker, for a task that is done, already building or waiting on tasks that are not green yet, and when the run's limit of workers building at once is reached. Read-only helpers of type ${HELPER_TYPES.join(', ')} start without a task. A worker's own subagents never run on a dearer tier than the worker.`,
       '- The owner holds a run with /pause and lets it go on with /unpause. While it is paused the mod starts no worker and merges nothing; workers that are building finish and hand back, you judge their hand-backs and answer their questions, and a merge in flight is still settled with GitHub. When nothing is building any more, tell the owner in a line or two where the run stands, and stop. When the pause ends, read the board and go on: judge what was handed back, start what can start, and merge what is green, in order.',
-      '- A task that is building while its worker is not running (the session was restarted meanwhile; ListAgents shows who runs) gets its worker started again with a message to the agent id the board lists: tell it first to run git status and git diff, and to commit and push what is its own.',
-      '- After a hand-back the orchestrator judges it and sets the task to review, green, blocked or failed, or to done when it has no pull request.',
-      ...(isHere
+      runLore === undefined
+        ? '- A task that is building while its worker is not running (the session was restarted meanwhile; ListAgents shows who runs) gets its worker started again with a message to the agent id the board lists: tell it first to run git status and git diff, and to commit and push what is its own.'
+        : '- A task that is building while its worker is not running (the session was restarted meanwhile; ListAgents shows who runs) gets its worker started again with a message to the agent id the board lists: tell it first to run lore status --scan and lore diff in its workspace, and to commit and push what is its own.',
+      runLore === undefined
+        ? '- After a hand-back the orchestrator judges it and sets the task to review, green, blocked or failed, or to done when it has no pull request.'
+        : '- After a hand-back the orchestrator judges it and sets the task to review, green, blocked or failed, or to done when it changed no code.',
+      ...(runLore !== undefined
+        ? loreBullets
+        : isHere
         ? [
             `- A task with a pull request becomes done through ${TOOL_MERGE} alone, for a task you judged green: its checks green on its head, its change reviewed. The mod reads GitHub, merges into ${config.base} pinned to that head with GitHub's ${config.method} method, never two at once (across runs too), marks the task done once GitHub has merged it and tells you. ${TOOL_CHECK} says what stands in the way and changes nothing. Before each merge tell the other sessions that may merge (ListAgents) and name them in told. Workers never merge, and a merge by hand (gh pr merge, GitHub's merge call, a push to ${config.base}) is refused in a bound session.`,
             `- When the board tells you a task is done, go on at once: start what can start and merge the next green task. After each merge the board watches the checks on ${config.base}: when they fail, find the merge that broke them and repair it before anything else merges; the repair's own merge takes onRedMain: true.`,
@@ -1768,8 +3054,10 @@ export const register: Register = (on, options) => {
       `- When your context is about ${ROTATE_AT}% full, the mod compacts this conversation between your turns and brings the run's state back from the ledger; handover.md beside the ledger holds the same state. So keep what matters on the board (a task's note, a ruling) and not only in the conversation. ${TOOL_READ} gives you the whole run at any time.`,
       `- Name the files a task is expected to change when you add it. The mod sees which files each worker changes and tells you when two open tasks change the same one.`,
     ].join('\n')
+    // What the shared lines say of GitHub reads as Lore's in a Lore run.
+    const said = runLore === undefined ? text : text.replace('hand back as one pull request', 'hand back as one branch').replace('a merge in flight is still settled with GitHub', 'a merge in flight is still settled')
 
-    return { sections: [...composed.sections, { id: 'conductor:run', text, scope: 'session' as const }] }
+    return { sections: [...composed.sections, { id: 'conductor:run', text: said, scope: 'session' as const }] }
   })
 
   on('command.run', { command: 'board' }, async ($, e) => {
@@ -1850,25 +3138,57 @@ export const register: Register = (on, options) => {
   })
 
   on('command.run', { command: 'conduct' }, async ($, e) => {
+    const here = await backendOf($)
+    if (here?.kind === 'lore' && here.problem !== undefined) return { text: `No run was started. ${here.problem}` }
     const asked = conducting(e.args)
     if ('error' in asked) return { text: asked.error }
     const { id, source, title } = asked
     if (id === UNBIND) return { text: `"${UNBIND}" is what /board takes to let go of a run, so no run can have that name: give another with id=<run id>.` }
-    if (root === undefined) root = (await $.session.repo())?.root ?? null
-    if (root === null) return { text: 'This session is not inside a git repository, so there is nowhere to keep a run.' }
+    if (root === undefined) root = await rootOf($)
+    if (root === null) return { text: 'This session is not inside a git repository or a Lore workspace, so there is nowhere to keep a run.' }
     // A spec that is not there is a mistyped path: said now, not after the orchestrator went looking for it.
     if (asked.kind === 'spec') {
       const isThere = (await $.fs.exists(source).catch(() => false)) || (!source.startsWith('/') && (await $.fs.exists(`${root}/${source}`).catch(() => false)))
       if (!isThere) return { text: `There is no file ${source} here, so there is nothing to start a run from. For an issue, give its number: /conduct #12.` }
     }
+    const configText = await textAt($, `${root}/${CONFIG_PATH}`)
+    const read = parseConfig(configText)
+    if ('error' in read) return { text: `No run was started: ${read.error}` }
+    const project = read.config
+    const tickets = asked.kind === 'linear' || (asked.kind === 'spec' && project.tickets === 'linear') ? ('linear' as const) : undefined
+    if (tickets === 'linear' && asked.kind === 'spec' && project.linear?.team === undefined) {
+      return {
+        text: 'No run was started. A run from a spec with its tickets in Linear files them in one team: set linear.team in .claude/conductor/config.json, for example {"linear": {"team": "ABC"}}.',
+      }
+    }
+    let loreRun: Ledger['run']['lore']
+    if (here?.kind === 'lore' && here.info !== undefined) {
+      if (!runsIgnored(await textAt($, `${root}/.loreignore`))) {
+        return {
+          text: 'No run was started. The run ledgers are rewritten every few seconds and stay out of Lore: add the line .claude/conductor/runs/ to the .loreignore at the root of this workspace.',
+        }
+      }
+      if (!hasPlaceholder([await textAt($, `${root}/.claude/settings.json`), await textAt($, `${root}/.claude/settings.local.json`)])) {
+        return {
+          text: `No run was started. Outside git, Claude Code lets the mod make each worker's Lore workspace only when the project declares a WorktreeCreate hook. Add this to .claude/settings.local.json (or .claude/settings.json), then give /conduct again; if a worker still cannot start, start a new session:\n\n${PLACEHOLDER_SNIPPET}`,
+        }
+      }
+      loreRun = {
+        remote: here.info.remote,
+        repository: here.info.name,
+        base: config.base,
+        branch: runBranchOf(project.lore?.branchPrefix ?? LORE_DEFAULTS.branchPrefix, source, id, title),
+      }
+    }
     const path = ledgerPath(root, id)
     if (await $.fs.exists(path)) {
       return {
-        text: `Run ${id} exists already: /board ${id} binds this session to it. For another run from the same ${asked.kind === 'issue' ? 'issue' : 'spec'}, give it a name of its own: /conduct ${source} id=<run id>.`,
+        text: `Run ${id} exists already: /board ${id} binds this session to it. For another run from the same ${asked.kind === 'spec' ? 'spec' : 'issue'}, give it a name of its own: /conduct ${source} id=<run id>.`,
       }
     }
     const now = await $.clock.now()
-    await $.fs.write(path, `${JSON.stringify(newRun(id, source, iso(now), title), null, 2)}\n`)
+    const more = { tickets, config: configText === undefined ? undefined : project, lore: loreRun }
+    await $.fs.write(path, `${JSON.stringify(newRun(id, source, iso(now), title, more), null, 2)}\n`)
     await flush($)
     await bind($, id)
     await update($, nowMs, () => now)
@@ -1877,31 +3197,52 @@ export const register: Register = (on, options) => {
     await $.ui.open({ id: PANE, title: TITLE })
     asks.push(planning(id, source, title))
 
+    // The mod runs the project's check itself, without Claude Code's permission prompt: the owner sees the program now.
+    const checkLine = project.check === undefined ? '' : ` Its check command, which the mod runs on each judged revision: ${project.check.argv.join(' ')}.`
+
     return {
-      text: `Run ${id} is started from ${source}${title === undefined ? '' : `, called "${title}"`}. The plan comes next; nothing starts before you /approve it.`,
+      text: `Run ${id} is started from ${source}${title === undefined ? '' : `, called "${title}"`}. The plan comes next; nothing starts before you /approve it.${checkLine}`,
     }
   })
 
   on('command.run', { command: 'approve' }, async $ => {
     const path = await boundLedger($)
     if (path === undefined) return { text: await unbound($) }
+    const notReady = await loreApprove($, path)
+    if (notReady !== undefined) return { text: `No plan was approved: ${notReady} Approve again once that is fixed.` }
     const written = await mutate($, path, raw => {
       const outcome = approvePlan(raw)
 
       return { value: outcome, isChanged: outcome.isChanged }
     })
     if (written.error !== undefined) return { text: written.error }
-    if (!written.value.isError) asks.push(APPROVED)
+    if (!written.value.isError) {
+      asks.push(APPROVED)
+      await linearApproved($, path)
+    }
     seen = undefined
     await refresh($, false)
 
     return { text: written.value.text }
   })
 
+  on('command.run', { command: 'approve-main' }, async ($, e) => {
+    const text = await underWay(() => approveMain($, e.origin.kind))
+    seen = undefined
+    await refresh($, false)
+
+    return { text }
+  })
+
   on('command.run', { command: 'pause' }, $ => hold($, true))
   on('command.run', { command: 'unpause' }, $ => hold($, false))
 
   on('command.run', { command: 'merged' }, async ($, e) => {
+    // In a Lore run nothing is merged by hand: a task reaches the run branch through the board's merge alone.
+    const mergedIn = await boundLedger($).catch(() => undefined)
+    if (mergedIn !== undefined && parseLedger((await textAt($, mergedIn)) ?? '').ledger?.run.lore !== undefined) {
+      return { text: 'Not done. In a Lore run the orchestrator merges a green task into the run branch with mcp__conductor__merge, pinned to its revision; /merged would mark it done with nothing merged. Ask the orchestrator to merge it.' }
+    }
     const taskId = e.args.trim()
     if (taskId === '' || /\s/.test(taskId)) {
       return { text: 'Say which task: /merged <task id>. It marks the task done by your word that its pull request is merged.' }

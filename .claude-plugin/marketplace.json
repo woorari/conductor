@@ -1,12 +1,14 @@
 {
   "name": "conductor",
-  "description": "The conductor mod for Claude Code: a run board, a model router, board messaging, context rotation and a GitHub merge loop.",
-  "owner": { "name": "René Rieck" },
+  "description": "The conductor mod for Claude Code: a run board, a model router, board messaging, context rotation and a merge loop for GitHub or Lore, with tickets from GitHub or Linear.",
+  "owner": {
+    "name": "René Rieck"
+  },
   "plugins": [
     {
       "name": "conductor",
       "source": "./",
-      "description": "Conducts a larger piece of work in Claude Code: a live run board, a model router for worker agents, board messaging, context rotation, and a GitHub merge loop pinned to the checked head."
+      "description": "Conducts a larger piece of work in Claude Code: a live run board, a model router for worker agents, board messaging, context rotation, and a merge loop: GitHub pull requests pinned to the checked head, or Lore branches merged into the base only on your approval. Tickets from GitHub or Linear."
     }
   ]
 }

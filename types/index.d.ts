@@ -18,6 +18,37 @@ export type ModelTier = 'opus' | 'sonnet' | 'haiku'
  */
 export type TaskStatus = 'queued' | 'building' | 'returned' | 'review' | 'green' | 'done' | 'blocked' | 'failed'
 
+/** What a task or a run belongs to: a GitHub issue's number, or a Linear issue's key (`ABC-12`). */
+export type Ticket = number | string
+
+/** A check command's run on one revision: started, passed or failed. */
+export type CheckRecord = {
+  /** The Lore revision it ran on. */
+  revision: string
+  verdict: 'running' | 'passed' | 'failed'
+  /** ISO 8601: when it started, or when it ended once it has. */
+  at: string
+  /** The last line it printed, for a failure. */
+  line?: string
+}
+
+/**
+ * A project's own settings, `.claude/conductor/config.json`: every field
+ * optional. A run keeps the copy it was started with.
+ */
+export type ProjectConfig = {
+  tickets?: 'github' | 'linear'
+  linear?: { team?: string }
+  lore?: {
+    branchPrefix?: string
+    workspaces?: string
+    carry?: string[]
+    minFreeGB?: number
+    lockPatterns?: string[]
+  }
+  check?: { argv: string[]; timeoutMin: number }
+}
+
 /** What a worker was last seen doing: written by the mod from the worker's own tool calls. */
 export type Activity = {
   /** ISO 8601. */
@@ -35,8 +66,8 @@ export type Task = {
   /** `owner` once the person set the tier: the orchestrator then leaves it alone. */
   tierBy?: 'owner'
   status: TaskStatus
-  /** The issue the task belongs to. */
-  ticket?: number
+  /** The issue the task belongs to: a GitHub issue's number or a Linear issue's key. */
+  ticket?: Ticket
   /** Ids of tasks that must be `done` before this one starts. */
   dependsOn?: string[]
   /** What the task is expected to change: files or folders, relative to the repository. */
@@ -63,6 +94,12 @@ export type Task = {
   branch?: string
   /** The pull request on GitHub. */
   pr?: number
+  /** In Lore: the revision of its branch the worker handed back, which a merge is pinned to (64 hex). */
+  revision?: string
+  /** In Lore: the worker's own workspace, made by the mod. */
+  workspace?: string
+  /** In Lore: the project's check on its revision. */
+  check?: CheckRecord
   /** When a worker started on it. ISO 8601. */
   startedAt?: string
   /** When the worker's turn last ended, or when the task was marked done; absent while a worker is on it. ISO 8601. */
@@ -80,9 +117,6 @@ export type Task = {
  */
 export type Merge = {
   task: string
-  pr: number
-  /** The pull request's head the checks were green on, which the merge was pinned to. */
-  head: string
   /** Claimed: the merge call is out, and its answer is not settled yet. */
   state: 'merging'
   /** ISO 8601. */
@@ -91,7 +125,23 @@ export type Merge = {
   told?: string[]
   /** The issues this merge was meant to close. */
   closes?: number[]
-}
+} & (
+  | {
+      pr: number
+      /** The pull request's head the checks were green on, which the merge was pinned to. */
+      head: string
+      revision?: undefined
+      target?: undefined
+    }
+  | {
+      pr?: undefined
+      head?: undefined
+      /** In Lore: the revision merged, pinned. */
+      revision: string
+      /** In Lore: a task into the run branch, or the run branch into the base branch. */
+      target: 'run' | 'base'
+    }
+)
 
 export type ProblemSeverity = 'blocker' | 'warning' | 'note'
 
@@ -189,6 +239,30 @@ export type Ledger = {
      * a worker model's window is, so the number is the run's to set.
      */
     workerHandbackTokens?: number
+    /** Where the run's tickets are: GitHub issues, or Linear. */
+    tickets?: 'github' | 'linear'
+    /** The run's own Linear issue: its source, or the parent issue filed for a run from a spec. */
+    issue?: string
+    /** The project's config as it was when the run started: what the run keeps to. */
+    config?: ProjectConfig
+    /** A Lore run: the repository, the base branch, the run's own branch and its workspace. */
+    lore?: {
+      remote: string
+      repository: string
+      base: string
+      branch: string
+      workspace?: string
+      /** The base branch's revision the run branch last took in: when it was made, or brought up to date. */
+      baseAt?: string
+      /** The run branch's revision as the mod last left it (made, a task merged in, the base brought in): nothing else may stand there. */
+      head?: string
+    }
+    /** The owner's approval of the run branch for the base branch: the revision it covers, and the base's revision then. */
+    approval?: { revision: string; base: string; at: string }
+    /** When the run branch was merged into the base branch, and the revision that made on it. */
+    merged?: { revision: string; at: string }
+    /** The project's check on the run branch's head. */
+    check?: CheckRecord
   }
   /** The orchestrator's own context, and how often it was compacted with a handover. */
   orchestrator?: Orchestrator

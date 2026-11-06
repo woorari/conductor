@@ -35,10 +35,12 @@ const list = (taskIds: readonly string[]): string => taskIds.join(', ')
 
 /**
  * A path as the board compares paths: relative to the repository, whichever
- * worktree of it the worker edits in.
+ * worktree of it the worker edits in. A Lore worker's own workspace is a copy
+ * of the repository's, so a path in it is relative to that workspace.
  */
-export function relative(path: string, root: string): string {
-  const inRepo = path.startsWith(`${root}/`) ? path.slice(root.length + 1) : path
+export function relative(path: string, root: string, workspace?: string): string {
+  const own = workspace !== undefined && path.startsWith(`${workspace}/`) ? path.slice(workspace.length + 1) : undefined
+  const inRepo = own ?? (path.startsWith(`${root}/`) ? path.slice(root.length + 1) : path)
 
   return normalise(inRepo.replace(/^(?:.*\/)?\.claude\/worktrees\/[^/]+\//, ''))
 }
@@ -289,16 +291,33 @@ export function briefing(ledger: Ledger, task: Task, project?: { brief: string; 
             .replaceAll('{run}', ledger.run.id),
         ]
 
+  // In a Lore run the worker builds in a workspace the mod made, on a branch the mod named, and hands back a revision.
+  const runLore = ledger.run.lore
+  const own = runLore === undefined ? undefined : `${runLore.branch}/${task.id}`
+  const locks = ledger.run.config?.lore?.lockPatterns ?? []
+  const loreLines =
+    own === undefined
+      ? undefined
+      : [
+          '- Say where you stand with mcp__conductor__task_update: a note of what you are doing; review with the revision you pushed (task_update with revision; lore branch info shows it as Remote Latest) once your change is pushed; blocked or failed when you cannot go on. You cannot mark your task done: the orchestrator judges your hand-back.',
+          `- You work in your own Lore workspace, your working directory, on your branch ${own}, which the mod made for you. Never change the owner's workspace or another worker's. Commit and push your branch at every green step, because only what is pushed survives: lore status --scan, lore stage --scan <paths>, lore commit "<message>", lore push. lore diff <file> shows a change. You never merge, switch or create branches, and never push another branch: merging is the orchestrator's, through the board.`,
+          ...(locks.length === 0
+            ? []
+            : [`- Binary files cannot be merged. Before you change a file matching ${locks.join(', ')}, take its lock with lore lock acquire <file>, and keep it: the mod lets it go once your task is merged.`]),
+        ]
+
   return [
     '',
     '---',
     `Run board (conductor). You are the worker for task \`${task.id}\` ("${task.title}") of run \`${ledger.run.id}\`, on the ${task.tier} tier.`,
-    '- Say where you stand with mcp__conductor__task_update: a note of what you are doing; review with pr and branch when your pull request is open; blocked or failed when you cannot go on. You cannot mark your task done: the orchestrator judges your hand-back.',
+    ...(loreLines === undefined ? ['- Say where you stand with mcp__conductor__task_update: a note of what you are doing; review with pr and branch when your pull request is open; blocked or failed when you cannot go on. You cannot mark your task done: the orchestrator judges your hand-back.'] : [loreLines[0]!]),
     '- A problem you find: mcp__conductor__problem_report. A fact another worker may need: mcp__conductor__board_post, kind finding, with the files it concerns. A decision you need: board_post, kind question; go on with what does not depend on the answer, or set your task blocked and stop. mcp__conductor__board_read shows what the board holds for you.',
-    '- You never merge and never push to the base branch. When your pull request is open, set your task to review and hand back: merging is the orchestrator\'s, through the board.',
+    ...(loreLines === undefined ? ['- You never merge and never push to the base branch. When your pull request is open, set your task to review and hand back: merging is the orchestrator\'s, through the board.'] : loreLines.slice(1)),
     ...(on === undefined
       ? []
-      : task.startedAt === undefined
+      : task.startedAt === undefined && own !== undefined
+        ? [`- Your branch was started from ${where} (${on.taskId}'s change, judged green but not merged yet), not from the run branch, because your task needs it. Keep it so.`]
+        : task.startedAt === undefined
         ? [
             `- Build on ${where}, not on main. It holds ${on.taskId}'s change, which is reviewed and has green checks but is not merged yet, and your task needs it. After a fetch, start your own branch from ${on.branch === undefined ? 'that branch' : `\`origin/${on.branch}\``}: this takes the place of any rule below that says to branch from main. Your pull request still targets main, and until ${on.taskId} is merged it shows that task's commits too. Do not rebase. Merge origin/main into your branch only if you need something from main that ${where} lacks, and say so in your task's note.`,
           ]

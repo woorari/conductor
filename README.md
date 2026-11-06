@@ -2,6 +2,8 @@
 
 A Claude Code mod for work that is too large for one session. One session becomes the **orchestrator**: it slices the work into tasks, and the mod starts one **worker** agent per task, each in its own git worktree, on a model you can see and change. A live **run board** shows where every task stands. Findings and questions travel between the workers through the board, and the orchestrator's context is compacted before it fills up. Each green pull request is merged on **GitHub**, pinned to the commit whose checks the mod just read, one at a time.
 
+It also works in a **Lore** workspace (Epic's version control system) and takes tickets from **Linear**. In Lore, each worker gets a copy-on-write workspace of its own on its own branch. The mod merges green task branches into the run's branch, and the run's branch goes into the protected base branch only when you approve that exact revision with `/approve-main`. See [Lore](#lore) and [Linear](#linear).
+
 It is built on Claude Code's mod API (function hooks), which is early access and changes between releases. This version was built and tested on Claude Code 2.1.317.
 
 ## Install
@@ -83,8 +85,9 @@ A run lives in `.claude/conductor/runs/<run id>/`: its `ledger.json`, and `hando
 | `/pause`, `/unpause` | Hold the run, and let it go on |
 | `/merged <task>` | Mark a task done by your word: its pull request is merged |
 | `/rotate` | Compact the orchestrator's session with a handover now |
+| `/approve-main` | In Lore: approve the run branch for the base branch; the mod merges exactly that revision now |
 
-The orchestrator and the workers change the board only through the mod's tools: `task_add`, `task_update`, `run_plan`, `board_post`, `board_rule`, `board_read`, `problem_report`, `problem_resolve`, `problem_assign`, `merge_check` and `merge`.
+The orchestrator and the workers change the board only through the mod's tools: `task_add`, `task_update`, `run_plan`, `board_post`, `board_rule`, `board_read`, `problem_report`, `problem_resolve`, `problem_assign`, `merge_check` and `merge`. A Lore workspace adds `run_sync_base`; a project with Linear tickets adds `ticket_read` and `ticket_file`.
 
 ## Features
 
@@ -178,12 +181,91 @@ The session's binding to its run is kept in the mod's own store under the sessio
 
 A run's ledger takes two settings of its own: `maxParallel`, the most workers building at once (3 when absent), and `workerHandbackTokens` (above).
 
+## Lore
+
+In a workspace of [Lore](https://github.com/EpicGames/lore) (0.12), conductor finds the workspace through its `.lore` folder. The board, the plan gate, the router, messaging, problems, pause and auto-compaction work as in git. What differs is where workers build and how work is merged.
+
+### Turn it on in a Lore workspace
+
+At the workspace's root:
+
+```bash
+mkdir -p .claude/conductor
+echo '.claude/conductor/runs/' >> .loreignore
+```
+
+Claude Code lets a mod make a worker's isolated copy outside git only when the project declares a `WorktreeCreate` hook. Add this to `.claude/settings.local.json` (or `.claude/settings.json`). conductor answers the hook itself; the command only runs when conductor is not loaded:
+
+```json
+{
+  "hooks": {
+    "WorktreeCreate": [
+      { "hooks": [{ "type": "command", "command": "echo 'Worker workspaces here are made by the conductor mod. Install or enable conductor.' >&2; exit 1" }] }
+    ]
+  }
+}
+```
+
+`/conduct` refuses, and says what to add, until both are there.
+
+If the app you run Claude Code in doesn't find `lore` (it looks on the PATH, then in `~/.local/bin`), set the mod's **Lore program** option to its full path, or export `LORE_BIN`. A project never names the program that runs.
+
+### Project settings
+
+`.claude/conductor/config.json` is optional, and can be kept in the repository. A run keeps the copy it was started with, so a branch cannot change its own rules:
+
+```json
+{
+  "tickets": "linear",
+  "linear": { "team": "ABC" },
+  "lore": {
+    "branchPrefix": "conductor/",
+    "workspaces": "/absolute/folder/for/workspaces",
+    "carry": ["Intermediate", "DerivedDataCache"],
+    "minFreeGB": 20,
+    "lockPatterns": ["*.uasset", "*.umap"]
+  },
+  "check": { "argv": ["./Script/check.sh"], "timeoutMin": 45 }
+}
+```
+
+- `branchPrefix`: the start of each run branch's name (default `conductor/`).
+- `workspaces`: where workers' workspaces go. By default it is a folder beside your workspace, `<workspace>.conductor`, never inside it.
+- `carry`: ignored folders a worker's copy takes along, such as build caches. Nothing else that is untracked or ignored goes in, so local secrets, saves and logs stay out.
+- `minFreeGB`: no new workspace is made with less free disk than this (default 20).
+- `lockPatterns`: files a worker locks with `lore lock acquire` before changing them, because binary files cannot be merged.
+- `check`: a program the mod runs on each revision you judge green, and on the run branch before `/approve-main`. It runs without Claude Code's permission prompt, so `/conduct` names it when the run starts.
+
+### Branches and workspaces
+
+- `/approve` makes the run's branch, `<prefix><ticket or run id>-<title>`, from the base branch and protects the base branch with `lore branch protect`.
+- Each worker builds in a workspace of its own, `<workspaces>/<run>/<task>`, on the branch `<run branch>/<task>`. It is a copy-on-write copy of your workspace: it costs almost no disk until files change. A worker started without `isolation: "worktree"` may not write at all.
+- Your own workspace is only read. Neither the mod nor its agents stage, commit, sync, switch or push there.
+
+### Merging in Lore
+
+- A worker commits and pushes its own branch and hands back with the revision it pushed (`task_update` with `revision`). A new revision on a green task sends it back to review.
+- `merge` merges a green task's branch into the run branch, pinned to that revision, one at a time, in the run's own workspace. A conflict is never resolved by the mod: the merge is aborted, and the task comes back blocked, with the files named. A clean, pushed worker workspace is removed afterwards.
+- When every task is merged and no blocker or warning is open, you type `/approve-main`. It records your approval of the run branch's revision, unprotects the base branch, merges the run branch into it on the server (`lore branch merge into`), and protects it again, whatever happened.
+- If the base branch moved since the run branch last took it in, `/approve-main` refuses: the orchestrator brings it in with `run_sync_base`, and you approve again.
+- `/approve-main` is taken only from you: the terminal, the desktop app or Remote Control, never another session or a scheduled run.
+- In a bound session, a `lore` write by hand is refused: a worker may only build on its own branch, and everyone else may only read.
+
+## Linear
+
+- `/conduct ABC-12` (or a `linear.app` link to the issue) starts a run from a Linear issue.
+- A task's ticket is a GitHub issue's number or a Linear key.
+- The orchestrator reads an issue with `ticket_read`. After you approve the plan, it files drafted tickets as sub-issues of the run's issue with `ticket_file`. A run from a spec, with `"tickets": "linear"` and a `linear.team`, gets an issue of its own when you approve it.
+- The mod moves issues itself, by state type: the run's issue and each task's issue to started when work starts, a task's to completed when it is merged, and the run's when the run is merged (in git: when every task is done). A failed Linear call never stops the run. It is a warning on the board, said once.
+- The key comes from the mod's **Linear API key** option (kept in the system's secure storage), then from `LINEAR_API_KEY`. It goes into the request's header and nowhere else.
+
 ## What it never does
 
 - It starts no agent and sends no message by itself.
 - It merges only when the orchestrator calls `merge`. Its timer only reads.
 - It stores no command text or message, only which tool ran, a file name, or a command's description.
 - It writes the GitHub token nowhere.
+- It writes the Linear key nowhere, and never writes into your own Lore workspace.
 
 ## Limits
 
@@ -191,9 +273,12 @@ A run's ledger takes two settings of its own: `maxParallel`, the most workers bu
 - **No deploy watch.** Nothing is deployed or watched beyond the checks on the base branch: "done" means merged.
 - **Partial checks.** A commit with more than 100 check runs (one page) is never called green.
 - **One gap remains.** Between the mod's look and its merge, a push by someone outside the mod can still land. The pinned `sha` refuses a moved head, but not a moved base.
-- **Worktrees aren't checked.** The mod tells the orchestrator to start each worker in its own worktree, but does not check that it did.
+- **Worktrees aren't checked.** The mod tells the orchestrator to start each worker in its own worktree, but does not check that it did. In Lore the mod makes each worker's workspace itself, and a worker without one may not write.
+- **Lore protection guards against accidents.** On a Lore server without sign-in anyone can unprotect a branch. The mod protects the base branch again after every merge, and refuses `lore branch unprotect` by hand in a bound session, but it cannot stop someone outside it.
+- **Copies share an instance id.** A worker's copy keeps the instance id of the workspace it was copied from (Lore 0.12); nothing was seen to depend on it.
+- **One Lore worker starts at a time.** Making a workspace takes about a minute for a large workspace, and Claude Code names the workspace it asks for after the agent, not the task.
 - **Hand-back limit.** A worker is asked to hand back early only once its context passes the run's `workerHandbackTokens`. The mod cannot see how large a worker model's window is.
-- **Guards read text.** The by-hand guards read a command's text: a merge hidden inside a script is not seen.
+- **Guards read text.** The by-hand guards read a command's text: a merge hidden inside a script is not seen. In Lore the guard also refuses what it cannot read simply (a substitution, an interpreter, a variable as the program), but text is all it reads: the place that really enforces who may change the base branch is the Lore server, with sign-in and branch permissions.
 
 What has been seen for real: the board, the plan gate, the router, messaging, pause and auto-compaction, in real runs on a Forgejo-based ancestor of this mod. What has not: the GitHub merge loop against GitHub itself. Its request and response shapes are checked against GitHub's documented API in the tests (a pretend GitHub), and its readers against real answers of GitHub's API, but no merge has been made through it yet.
 
