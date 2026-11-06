@@ -1,0 +1,120 @@
+import type { Ledger } from '../types'
+
+/** The moment the fixture is looked at: 10:30 UTC on the day its tasks started. */
+export const NOW = Date.parse('2026-10-09T10:30:00Z')
+
+/** A run in the middle: one of every status, a dependency chain, three problems. */
+export const LEDGER: Ledger = {
+  version: 1,
+  run: { id: 'demo', title: 'Nightly import speed', source: '#334', startedAt: '2026-10-09T08:00:00Z' },
+  tasks: [
+    {
+      id: 't390-1',
+      title: 'Settings module',
+      tier: 'haiku',
+      status: 'done',
+      ticket: 390,
+      pr: 541,
+      worker: 'w390',
+      startedAt: '2026-10-09T08:10:00Z',
+      finishedAt: '2026-10-09T09:00:00Z',
+    },
+    {
+      id: 't390-2',
+      title: 'Deploy gate for settings',
+      tier: 'haiku',
+      status: 'done',
+      ticket: 390,
+      pr: 543,
+      worker: 'w390',
+      startedAt: '2026-10-09T09:05:00Z',
+      finishedAt: '2026-10-09T09:40:00Z',
+    },
+    {
+      id: 't391-1',
+      title: 'Pool exhaustion answers 503',
+      tier: 'sonnet',
+      status: 'building',
+      ticket: 391,
+      dependsOn: ['t390-1'],
+      worker: 'w391',
+      startedAt: '2026-10-09T10:18:00Z',
+      note: 'writing the middleware test',
+    },
+    {
+      id: 't394-1',
+      title: 'Per-user AI budget design',
+      tier: 'opus',
+      status: 'building',
+      ticket: 394,
+      worker: 'w394',
+      startedAt: '2026-10-09T09:25:00Z',
+    },
+    { id: 't392-1', title: 'Busy line copy deck', tier: 'haiku', status: 'queued', ticket: 392 },
+    {
+      id: 't392-2',
+      title: 'Clients retry a busy read',
+      tier: 'sonnet',
+      status: 'queued',
+      ticket: 392,
+      dependsOn: ['t391-1', 't392-1'],
+    },
+    {
+      id: 't393-1',
+      title: 'Queries off the event loop',
+      tier: 'sonnet',
+      status: 'review',
+      ticket: 393,
+      pr: 547,
+      worker: 'w393',
+      startedAt: '2026-10-09T09:10:00Z',
+      finishedAt: '2026-10-09T10:10:00Z',
+    },
+    {
+      id: 't395-1',
+      title: 'Daily cap thresholds',
+      tier: 'sonnet',
+      status: 'green',
+      ticket: 395,
+      pr: 548,
+      worker: 'w395',
+      startedAt: '2026-10-09T09:00:00Z',
+      finishedAt: '2026-10-09T09:57:00Z',
+    },
+    {
+      id: 't396-1',
+      title: 'Load test kit',
+      tier: 'opus',
+      status: 'blocked',
+      ticket: 396,
+      worker: 'w396',
+      startedAt: '2026-10-09T08:30:00Z',
+      finishedAt: '2026-10-09T09:15:00Z',
+      note: 'needs the second box',
+    },
+  ],
+  problems: [
+    { id: 'P1', text: 'The shared api image lacks h2', severity: 'warning', status: 'open' },
+    {
+      id: 'P2',
+      text: 'Pool timeout test fails on the CI runner',
+      severity: 'blocker',
+      status: 'open',
+      taskId: 't391-1',
+    },
+    {
+      id: 'P3',
+      text: 'openapi.json conflicted with main',
+      severity: 'note',
+      status: 'resolved',
+      resolution: 'regenerated',
+    },
+  ],
+  posts: [],
+  rulings: [],
+}
+
+export const withTask = (id: string, change: Partial<Ledger['tasks'][number]>): Ledger => ({
+  ...LEDGER,
+  tasks: LEDGER.tasks.map(one => (one.id === id ? { ...one, ...change } : one)),
+})

@@ -1,0 +1,33 @@
+{
+  "name": "conductor",
+  "version": "0.1.0",
+  "description": "Conducts a larger piece of work in Claude Code: a live run board, a model router for worker agents, board messaging, context rotation, and a GitHub merge loop pinned to the checked head.",
+  "author": { "name": "René Rieck" },
+  "homepage": "https://github.com/woorari/conductor",
+  "repository": "https://github.com/woorari/conductor",
+  "license": "MIT",
+  "keywords": ["orchestration", "agents", "github", "pull-requests", "board"],
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "githubToken": {
+      "type": "string",
+      "title": "GitHub token",
+      "description": "A token that can read checks and merge pull requests in your repositories. Leave it empty to use GH_TOKEN, GITHUB_TOKEN or the token of gh auth login.",
+      "sensitive": true,
+      "required": false
+    },
+    "baseBranch": {
+      "type": "string",
+      "title": "Base branch",
+      "description": "The branch a run's pull requests merge into.",
+      "default": "main"
+    },
+    "mergeMethod": {
+      "type": "string",
+      "title": "Merge method",
+      "description": "How GitHub merges a run's pull requests.",
+      "options": ["merge", "squash", "rebase"],
+      "default": "merge"
+    }
+  }
+}

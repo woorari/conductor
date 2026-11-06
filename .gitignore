@@ -1,0 +1,4 @@
+# Laid by Claude Code each time it loads the mod: the declarations of the build that loaded it.
+.claude-plugin/types/
+node_modules/
+.DS_Store

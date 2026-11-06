@@ -1,0 +1,2107 @@
+import { atom, read, update } from 'claude-code'
+import type { CatchHandler, Elements, EngineInterface, Hook, Register } from 'claude-code'
+
+import type { BoardState, Ledger, ModelTier } from '../types'
+import {
+  API,
+  CLAIM_GRACE_MIN,
+  DEFAULTS,
+  abandoned,
+  byHand,
+  checksOf,
+  closes,
+  closingLine,
+  configOf,
+  elsewhere,
+  flightsOf,
+  githubRepo,
+  headOf,
+  isForges,
+  judge,
+  messageOf,
+  obstacles,
+  onMain,
+  ownerSaysMerged,
+  precheck,
+  pullOf,
+  short,
+  startMerge,
+} from './merge'
+import type { Config, Facts, Flight, Look, Verdict } from './merge'
+import { DONE_SHOWN, boardView, clock, detail, orchestratorLine, problemDetail, runMinutes, summary, timeline } from './board'
+import type { TaskRow } from './board'
+import { dashboardSvg } from './dashboard'
+import { KEEP, ROTATE_AT, carried, handover } from './handover'
+import { RUN_ID, STATUSES, TIERS, parseLedger } from './ledger'
+import { pauseRun, unpauseRun } from './pause'
+import { LOOK_AGAIN_MIN, dueForLook, isUnderway, unsettled } from './problems'
+import { APPROVED, PLANNING, conducting, newRun, planning } from './plan'
+import { ORCHESTRATOR, briefing, digest, post, relative, rule, touch, waiting } from './posts'
+import { HELPER_TYPES, familyOf, route, unlocked } from './router'
+import type { Route, Spawn } from './router'
+import {
+  acted,
+  activityText,
+  addTask,
+  approvePlan,
+  askAgain,
+  assignProblem,
+  ownerSetsTier,
+  gauge,
+  heldUp,
+  markRead,
+  overweight,
+  proposePlan,
+  released,
+  reportProblem,
+  reserved,
+  resolveProblem,
+  rotated,
+  spawned,
+  turnEnded,
+  updateTask,
+  weigh,
+} from './signals'
+import type { Caller, Delivery, Outcome, Raw, RawTask, Source } from './signals'
+import { RUNS_DIR, boundKey, isStale, kept, ledgerPath, prepare } from './store'
+
+const PANE = 'conductor-board'
+const TITLE = 'Run board'
+/** How often what the workers were seen doing is written to the ledger. */
+const FLUSH_MS = 5000
+/** `/board none` lets go of the run the session is bound to. */
+const UNBIND = 'none'
+const TOOL_ADD = 'mcp__conductor__task_add'
+const TOOL_PLAN = 'mcp__conductor__run_plan'
+const TOOL_POST = 'mcp__conductor__board_post'
+const TOOL_RULE = 'mcp__conductor__board_rule'
+const TOOL_READ = 'mcp__conductor__board_read'
+const TOOL_MERGE = 'mcp__conductor__merge'
+const TOOL_CHECK = 'mcp__conductor__merge_check'
+/** How long GitHub may take over one request before it counts as not answering. */
+const ASK_TIMEOUT_MS = 20_000
+/** Every this many timer ticks a merge claim and the base branch's checks are looked at: about every half minute. */
+const WATCH_EVERY = 6
+/** Every this many timer ticks a working orchestrator's context is looked at: about every half minute. */
+const GAUGE_EVERY = 6
+/** After a compaction the engine skipped, how long before the mod asks again. */
+const ROTATE_AGAIN_MS = 10 * 60_000
+/** After a compaction that could not start (a turn was running after all), how long before the next try. */
+const ROTATE_SOON_MS = 30_000
+/** The tools whose `file_path` is a file the worker is changing. */
+const WRITES: ReadonlySet<string> = new Set(['Edit', 'Write', 'NotebookEdit'])
+const TOOL_UPDATE = 'mcp__conductor__task_update'
+/** How many queued tasks get a tier picker under the board; the rest are set with /tier. */
+const PICKERS_SHOWN = 8
+const TIER_OPTIONS = TIERS.map(value => ({ value }))
+const ROUTER_BROKE = 'conductor: the router failed, so no agent was started. /board none lets go of the run if this keeps happening.'
+const TOOL_REPORT = 'mcp__conductor__problem_report'
+const TOOL_RESOLVE = 'mcp__conductor__problem_resolve'
+const TOOL_ASSIGN = 'mcp__conductor__problem_assign'
+const NOT_DONE = 'Not done.'
+/** After a merge the base branch's checks are watched this long at most, in minutes (proposed): a branch nothing checks has nothing to wait for. */
+const MAIN_WATCH_MIN = 60
+/**
+ * How the orchestrator writes to the owner: they want to be informed, not
+ * walked through the work. The board holds the detail.
+ */
+const REPORTING =
+  '- What you write to the owner is an executive summary. The board shows where every task stands, so do not repeat it: say what changed since you last wrote and what happens next, in a few lines at most, with no list of tasks, checks, files or commands. Go into detail only where the owner has something to decide: then say what is to decide, the options, and which one you recommend and why, as fully as the decision needs. The notices the board sends you show in the conversation too: never quote or restate one, and when one changes nothing for the owner, answer it in one line.'
+const BROKE = `${NOT_DONE} The board could not be written; nothing changed. Say so in your report.`
+const NOT_BOUND = 'This session is bound to no run, so there is no board to write. The person binds it with /board <run id>.'
+/** How often the open pane looks at the ledger file. */
+const POLL_MS = 2000
+/** Every this many polls: look for a newer run, and resolve the repository again. */
+const RESCAN_EVERY = 10
+/** Every this many polls: move the clock the elapsed times are drawn from. */
+const CLOCK_EVERY = 15
+/**
+ * CSS pixels the picture is drawn at per cell of the pane's body: a cell is one
+ * character of a 14px monospace face. Measured once (2026-10-09, Claude Code
+ * 2.1.293, desktop): at 38 cells a 319px picture filled the body edge to edge.
+ */
+const PX_PER_COLUMN = 8.4
+
+const EMPTY: BoardState = { runId: null, ledger: null, error: null }
+
+const board = atom({ plugin: 'conductor', key: 'board' } as const, EMPTY)
+const nowMs = atom({ plugin: 'conductor', key: 'nowMs' } as const, 0)
+const pinnedRun = atom({ plugin: 'conductor', key: 'pinnedRun' } as const, null)
+
+// What the poll remembers between ticks. A reload starts these over, and the
+// first tick after it reads the ledger again: nothing drawn depends on them.
+let root: string | null | undefined
+/** The repository's `origin`, once it had one to read: what says whether the repository is on GitHub. */
+let origin: string | null | undefined
+/** What the person set when they installed the mod, read each time `register` runs. */
+let config: Config = DEFAULTS
+/** The token `gh auth token` gave, kept in this module's memory only: a reload, or a token GitHub refuses, asks for it again. */
+let ghToken: string | undefined
+/** The question to gh under way, which requests made at the same moment wait for together. */
+let ghAsked: Promise<string | undefined> | undefined
+let followed: string | null = null
+let seen: { path: string; mtimeMs: number } | undefined
+let shown = ''
+let ticks = 0
+let isTicking = false
+
+// What the signals remember. A reload starts these over; `learn` fills the
+// first two again from the ledger, and what was pending is at most a few
+// seconds of "last seen doing".
+/** Which task each known agent works for: a task's worker, and the subagents that worker started. */
+const agents = new Map<string, string>()
+/** The workers themselves: the agents whose turn ending hands a task back. */
+const workers = new Set<string>()
+/** What each task's worker was last seen doing, not yet written. */
+const pending = new Map<string, string>()
+/** The files each task's worker changed since the last write, relative to the repository. */
+const changedFiles = new Map<string, Set<string>>()
+/**
+ * What waits for each reader: a task's worker by task id, the orchestrator
+ * under its own name. The mod sends no messages (in a session whose
+ * permissions are decided by a classifier, a message a plugin sends gets no
+ * verdict and is refused, measured 2026-10-09). A reader is handed its inbox
+ * with the result of its own next tool call, which needs no one's leave.
+ */
+const inbox = new Map<string, Delivery[]>()
+/** Posts and rulings handed over since the last write. */
+const handed: { source: Source; taskId: string }[] = []
+
+/**
+ * The questions the orchestrator has not been told of yet, by question id.
+ * While its own turn runs it reads them with its next tool result, like any
+ * board news. Only when it is idle is it woken with a prompt, and only for
+ * what is still unanswered then: a prompt submitted during a turn is held by
+ * the engine until the turn ends, by which time the question may be settled
+ * (measured 2026-10-09: a wake-up arrived for a question already ruled on).
+ * The engine also refuses a prompt submitted from inside a tool call, so the
+ * wake-up comes from the timer.
+ */
+const wakes = new Map<string, string>()
+/** Prompts the person's own commands (/conduct, /approve) left for the orchestrator: submitted by the timer like a wake-up. */
+const asks: string[] = []
+/** Whether the orchestrator's own turn is running; unknown after a reload, and then taken as idle. */
+let isOrchestrating: boolean | undefined
+let learnedFrom: string | undefined
+
+// The orchestrator's own context. None of this is the run's: it is this session's, and a reload
+// of the mod only forgets the last reading until the next one.
+/** How full the orchestrator's context was at the last look, in percent. */
+let lastPercent: number | undefined
+let isRotating = false
+/** The person asked for a rotation with /rotate, whatever the reading. */
+let isRotateAsked = false
+/** No compaction is tried before this moment. */
+let rotateNotBefore = 0
+/** The orchestrator was told, during a long turn, that its context is full enough to end the turn. */
+let isNudged = false
+/** The mod's own compaction hook added the run's state to the compacted conversation. */
+let isCarried = false
+let flushTicks = 0
+/** How many tokens each task's worker held at its last model request, not yet written. */
+const weights = new Map<string, number>()
+/** The tasks whose worker was asked to hand back because its context passed the run's limit. */
+const askedBack = new Set<string>()
+/** Spawns the router has taken on and not yet decided: if its hook fails now, they are refused. */
+const routing = new Set<string>()
+/** The reason the engine last gave for refusing a compaction, said once: it is told again only when it changes. */
+let heldFor: string | undefined
+/** A look at a merge claim whose call never settled is under way: the next one waits for it. */
+let isWatching = false
+/** A look at the base branch's checks after a merge is under way. */
+let isWatchingMain = false
+/** A look at the problems nobody deals with is under way. */
+let isLooking = false
+/** The commands and tools the engine would not take when the mod started, each with the engine's reason. */
+const unlisted: string[] = []
+
+const iso = (ms: number): string => new Date(ms).toISOString()
+
+type Written<T> = { value: T; error?: undefined } | { value?: undefined; error: string }
+
+/** How often a read that caught the ledger half written is tried again, and how long it waits. */
+const ATTEMPTS = 3
+const RETRY_MS = 150
+
+// One write at a time: every change reads the file as it is now, edits it and
+// writes it back before the next one starts, so two signals never lose each other.
+let queue: Promise<unknown> = Promise.resolve()
+
+async function attempt<T>(
+  $: EngineInterface,
+  path: string,
+  change: (raw: Raw) => { value: T; isChanged: boolean },
+): Promise<Written<T>> {
+  let refusal = ''
+  for (let tries = 0; tries < ATTEMPTS; tries += 1) {
+    if (tries > 0) await $.clock.sleep(RETRY_MS)
+    let source: string
+    try {
+      source = await $.fs.read(path)
+    } catch {
+      return { error: `There is no ledger at ${path}.` }
+    }
+    const prepared = prepare(source, change)
+    if (prepared.error === undefined) {
+      if (prepared.write !== undefined) await $.fs.write(path, prepared.write)
+
+      return { value: prepared.value }
+    }
+    if (!prepared.isTorn) return { error: prepared.error }
+    refusal = prepared.error
+  }
+
+  return { error: `The ledger at ${path} does not read: ${refusal}.` }
+}
+
+/**
+ * Reads the ledger, lets `change` edit its JSON and writes it back, after
+ * every change asked for before this one. Never rejects.
+ */
+function mutate<T>(
+  $: EngineInterface,
+  path: string,
+  change: (raw: Raw) => { value: T; isChanged: boolean },
+): Promise<Written<T>> {
+  const run = queue
+    .then(() => attempt($, path, change))
+    .catch((cause: unknown): Written<T> => ({
+      error: `The ledger could not be written: ${cause instanceof Error ? cause.message : String(cause)}`,
+    }))
+  queue = run
+
+  return run
+}
+
+function learn(ledger: Ledger, path: string): void {
+  if (learnedFrom !== path) {
+    agents.clear()
+    workers.clear()
+    pending.clear()
+    changedFiles.clear()
+    inbox.clear()
+    handed.length = 0
+    wakes.clear()
+    learnedFrom = path
+    // What the ledger says still waits for a reader waits again after a reload.
+    for (const delivery of waiting(ledger)) inbox.set(delivery.taskId, [...(inbox.get(delivery.taskId) ?? []), delivery])
+  }
+  for (const task of ledger.tasks) {
+    if (task.agentId === undefined) continue
+    agents.set(task.agentId, task.id)
+    workers.add(task.agentId)
+  }
+}
+
+/**
+ * Whether this repository is on GitHub: its `origin` names a repository on
+ * github.com. Asked before anything asks GitHub, since a pull request's number
+ * means something only there. A repository that could not be read is not
+ * known to be on GitHub, and is read again.
+ */
+async function isAtForge($: EngineInterface): Promise<boolean> {
+  try {
+    if (typeof origin !== 'string') origin = (await $.session.repo())?.remote ?? null
+  } catch {
+    return false
+  }
+
+  return isForges(origin)
+}
+
+/** This repository's `owner/name` on GitHub, once `isAtForge` has read its origin. */
+const repoHere = (): string | undefined => githubRepo(origin)
+
+/** The ledger this session's signals and tools write: the bound run's, or undefined. */
+async function boundLedger($: EngineInterface): Promise<string | undefined> {
+  const run = await read($, pinnedRun)
+  if (run === null) return undefined
+  if (root === undefined) root = (await $.session.repo())?.root ?? null
+
+  return root === null ? undefined : ledgerPath(root, run)
+}
+
+/**
+ * Binds this session to a run, or lets go of it with null. The binding is
+ * also written to the mod's own store under the session's id, because the
+ * host forgets a session's state when its process ends (measured 2026-10-09:
+ * after a restart of the app a session whose plan waited for approval was
+ * bound to no run, and /approve refused).
+ */
+async function bind($: EngineInterface, run: string | null): Promise<void> {
+  await update($, pinnedRun, () => run)
+  try {
+    const own = boundKey(await $.session.id())
+    if (run === null) {
+      await $.store.delete(own)
+
+      return
+    }
+    const now = await $.clock.now()
+    await $.store.set(own, { run, at: iso(now) })
+    // The store is one file for every session there ever was: what is old is dropped here.
+    for (const key of await $.store.keys()) {
+      if (key.startsWith(boundKey('')) && isStale(await $.store.get(key), now)) await $.store.delete(key)
+    }
+  } catch {
+    // Not kept: the session stays bound for as long as its process lives.
+  }
+}
+
+/**
+ * A session that starts again takes up the run it was bound to. One that is
+ * bound and not written down yet (bound before the mod kept bindings) is
+ * written down. Never throws.
+ */
+async function rebind($: EngineInterface): Promise<void> {
+  try {
+    const own = boundKey(await $.session.id())
+    const now = await read($, pinnedRun)
+    const was = kept(await $.store.get(own))?.run
+    if (now !== null) {
+      if (was !== now) await $.store.set(own, { run: now, at: iso(await $.clock.now()) })
+
+      return
+    }
+    if (was === undefined) return
+    if (root === undefined) root = (await $.session.repo())?.root ?? null
+    // A run that is gone is not one to be bound to.
+    if (root === null || !(await $.fs.exists(ledgerPath(root, was)))) {
+      await $.store.delete(own)
+
+      return
+    }
+    await update($, pinnedRun, () => was)
+  } catch {
+    // What was kept could not be read: the session is bound to no run, and says how to bind it.
+  }
+}
+
+/** What a command answers in a session bound to no run: which run to bind, when the repository has one. Never throws. */
+async function unbound($: EngineInterface): Promise<string> {
+  let viewed: string | null = null
+  try {
+    await refresh($, true)
+    viewed = (await read($, board)).runId
+  } catch {
+    viewed = null
+  }
+
+  return viewed === null
+    ? 'This session is bound to no run: /board <run id> binds it.'
+    : `This session is bound to no run; it only views ${viewed}. /board ${viewed} binds it: then give this command again.`
+}
+
+/** Knows the bound run's workers again after a reload: one read, the first time it is asked. */
+async function remember($: EngineInterface, path: string): Promise<void> {
+  if (learnedFrom === path) return
+  try {
+    const parsed = parseLedger(await $.fs.read(path))
+    if (parsed.ledger !== undefined) learn(parsed.ledger, path)
+  } catch {
+    // No ledger yet: there is nobody to remember.
+  }
+}
+
+const callerOf = (agentId: string | undefined): Caller => {
+  if (agentId === undefined) return { kind: 'orchestrator' }
+  const taskId = agents.get(agentId)
+
+  return taskId === undefined ? { kind: 'stranger' } : { kind: 'worker', taskId }
+}
+
+/** A tool call as the signals read it: the tool, the loop it ran in, and its own arguments. */
+type ToolCall = { tool: string; agentId?: string } & Record<string, unknown>
+
+/** Serves one of the mod's own tools: one validated, serialised change to the bound run's ledger. */
+async function answer(
+  $: EngineInterface,
+  call: ToolCall,
+  change: (raw: Raw, at: string, caller: Caller, input: Record<string, unknown>) => Outcome,
+): Promise<{ result: string; text: string; isError?: undefined } | { isError: true; result: string; text: string }> {
+  // Measured with a real worker (2026-10-09): the error flag of a mod's own tool does not reach the
+  // model, which reads the text alone. So a refusal says in its first words that nothing was done.
+  const fail = (reason: string) => {
+    const text = `${NOT_DONE} ${reason}`
+
+    return { isError: true as const, result: text, text }
+  }
+  const path = await boundLedger($)
+  if (path === undefined) return fail(NOT_BOUND)
+  await remember($, path)
+  const at = iso(await $.clock.now())
+  const caller = callerOf(call.agentId)
+  const written = await mutate($, path, raw => {
+    const outcome = change(raw, at, caller, call)
+
+    return { value: outcome, isChanged: outcome.isChanged }
+  })
+  if (written.error !== undefined) return fail(written.error)
+  if (written.value.isError) return fail(written.value.text)
+  carry(written.value)
+
+  return { result: written.value.text, text: written.value.text }
+}
+
+/**
+ * The router's hook failed. A spawn it had taken on is refused, since a
+ * worker must never start on a model nobody chose; any other goes ahead.
+ */
+const unrouted: CatchHandler<Hook<'agent.spawn'>> = ($, e, next) => {
+  if (next.called) return next(e)
+
+  return routing.delete(e.tool_use_id) ? { deny: ROUTER_BROKE } : next(e)
+}
+
+/**
+ * Decides a worker's start once more and claims it, in one step of the write
+ * queue. The first decision was made on a ledger read a moment ago; of
+ * several workers started in one message each one read it before any was
+ * written down (measured 2026-10-09: four started together were all given
+ * number 1, and one more ran than the run allowed). Here each is judged
+ * against a board that already counts the ones before it.
+ */
+async function claim(
+  $: EngineInterface,
+  path: string,
+  spawn: Spawn,
+  name: string,
+  first: Ledger,
+): Promise<{ decided: Route; before?: RawTask; error?: undefined } | { error: string }> {
+  const at = iso(await $.clock.now())
+  const written = await mutate<{ decided: Route; before?: RawTask }>($, path, raw => {
+    const decided = route(parseLedger(JSON.stringify(raw)).ledger ?? first, spawn)
+    if (decided.kind !== 'worker') return { value: { decided }, isChanged: false }
+    const before = reserved(raw, at, { taskId: decided.taskId, name, slot: decided.slot, builtOn: decided.base?.taskId })
+
+    return { value: { decided, before }, isChanged: before !== undefined }
+  })
+
+  return written.error !== undefined ? { error: written.error } : written.value
+}
+
+/** Tells the board a routed agent started. Never throws: the agent runs whether or not the board heard. */
+async function heard(
+  $: EngineInterface,
+  path: string,
+  name: string,
+  decided: Extract<Route, { kind: 'worker' | 'child' }>,
+  started: { agentId?: string; model?: string },
+): Promise<void> {
+  const slot = decided.kind === 'worker' ? decided.slot : undefined
+  try {
+    const { agentId, model } = started
+    if (agentId === undefined || model === undefined) return
+    agents.set(agentId, decided.taskId)
+    if (decided.kind === 'child') return
+    workers.add(agentId)
+    const at = iso(await $.clock.now())
+    await mutate($, path, raw => {
+      const taskId = spawned(raw, at, { name, agentId, model, slot })
+      // The engine has the last word on the model. When it is not the tier's, the board says so.
+      if (taskId !== undefined && familyOf(model) !== decided.model) {
+        reportProblem(raw, at, { kind: 'orchestrator' }, {
+          text: `${taskId} is tagged ${decided.model} but its worker runs on ${model}.`,
+          severity: 'warning',
+          task: taskId,
+        })
+      }
+
+      return { value: taskId, isChanged: taskId !== undefined }
+    })
+  } catch {
+    // The worker runs whether or not the board heard of it.
+  }
+}
+
+/** The owner picked a tier, in the pane or with /tier. Answers the line to show them. */
+async function pick($: EngineInterface, taskId: string, tier: string): Promise<string> {
+  const chosen = TIERS.find(one => one === tier)
+  if (chosen === undefined) return `${tier} is no tier: ${TIERS.join(', ')}.`
+  const path = await boundLedger($)
+  if (path === undefined) return unbound($)
+  const written = await mutate($, path, raw => {
+    const outcome = ownerSetsTier(raw, taskId, chosen satisfies ModelTier)
+
+    return { value: outcome, isChanged: outcome.isChanged }
+  })
+  seen = undefined
+  await refresh($, false)
+
+  return written.error ?? written.value.text
+}
+
+/** What one of the mod's tools answers when its own hook failed: an error the caller can read, never silence. */
+function broke(): { isError: true; result: string; text: string } {
+  return { isError: true, result: BROKE, text: BROKE }
+}
+
+/** Puts what a written change has for its readers into their inboxes, and notes what the orchestrator is to be told. */
+function carry(outcome: Outcome): void {
+  for (const delivery of outcome.deliveries ?? []) {
+    inbox.set(delivery.taskId, [...(inbox.get(delivery.taskId) ?? []), delivery])
+  }
+  const told = [outcome.tell, outcome.wake].filter(one => one !== undefined)
+  if (told.length > 0) {
+    inbox.set(ORCHESTRATOR, [...(inbox.get(ORCHESTRATOR) ?? []), ...told.map(text => ({ taskId: ORCHESTRATOR, text }))])
+  }
+  if (outcome.wake !== undefined && outcome.asks !== undefined) wakes.set(outcome.asks, outcome.wake)
+  if (outcome.answered !== undefined) forget(wakes.get(outcome.answered))
+}
+
+/** A question is settled or has been read: nobody is told of it again. */
+function forget(text: string | undefined): void {
+  if (text === undefined) return
+  for (const [id, wake] of wakes) if (wake === text) wakes.delete(id)
+  const rest = (inbox.get(ORCHESTRATOR) ?? []).filter(one => one.text !== text)
+  if (rest.length > 0) inbox.set(ORCHESTRATOR, rest)
+  else inbox.delete(ORCHESTRATOR)
+}
+
+/**
+ * Hands a reader its inbox with the result of the tool call it just made:
+ * what the model reads after the result. A refused call carries nothing, so
+ * the inbox waits for the next one.
+ */
+function hand<R extends { deny?: string; context?: readonly string[] }>(reader: string, ran: R): R {
+  const waits = inbox.get(reader)
+  if (waits === undefined || waits.length === 0 || ran.deny !== undefined) return ran
+  inbox.delete(reader)
+  for (const one of waits) {
+    if (one.source !== undefined) handed.push({ source: one.source, taskId: reader })
+    if (reader === ORCHESTRATOR) forget(one.text)
+  }
+
+  return { ...ran, context: [...(ran.context ?? []), ...waits.map(one => one.text)] }
+}
+
+/** Wakes an idle orchestrator with the questions it has not read, as one prompt. Called from the timer, never from a tool call. */
+function wake($: EngineInterface): void {
+  if (isOrchestrating === true || wakes.size + asks.length === 0) return
+  const questions = [...wakes.values()]
+  for (const text of questions) forget(text)
+  const texts = [...asks.splice(0), ...questions]
+  void $.prompt.submit({ text: texts.join('\n\n') }).catch(() => undefined)
+}
+
+/** Looks at how full the orchestrator's context is, and writes it to a bound run's ledger. Never throws. */
+async function gaugeNow($: EngineInterface): Promise<number | undefined> {
+  try {
+    const path = await boundLedger($)
+    if (path === undefined) return undefined
+    const { context } = await $.session.usage()
+    lastPercent = context.percent
+    const percent = context.percent
+    if (percent === undefined) return undefined
+    const at = iso(await $.clock.now())
+    await mutate($, path, raw => ({ value: undefined, isChanged: gauge(raw, at, percent) }))
+
+    return percent
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * The orchestrator's fresh start: when its context is full enough and no turn
+ * of its own is running, the run's state is written to disk as the handover
+ * and the session is compacted. The state comes back from the ledger, not
+ * from the summary. Called from the timer; never throws.
+ */
+async function rotation($: EngineInterface): Promise<void> {
+  if (isRotating || isOrchestrating === true) return
+  if (!isRotateAsked && (lastPercent === undefined || lastPercent < ROTATE_AT)) return
+  isRotating = true
+  let now = 0
+  // The try went on to the /compact command: a failure from there is not tried again half a minute later.
+  let isByCommand = false
+  try {
+    const path = await boundLedger($)
+    if (path === undefined) {
+      isRotateAsked = false
+
+      return
+    }
+    now = await $.clock.now()
+    if (!isRotateAsked && now < rotateNotBefore) return
+    const read = parseLedger(await $.fs.read(path))
+    if (read.ledger === undefined) return
+    // A run with nothing left to do has no orchestration to protect: its session is left as it is,
+    // unless the person asks with /rotate.
+    if (!isRotateAsked && read.ledger.tasks.every(task => task.status === 'done')) return
+    const percent = lastPercent === undefined ? undefined : Math.round(lastPercent)
+    const text = handover(read.ledger, { at: iso(now), percent, isElsewhere: !(await isAtForge($)) })
+    await $.fs.write(path.replace(/ledger\.json$/, 'handover.md'), `${text}\n`)
+    isCarried = false
+    const before = lastPercent ?? (await gaugeNow($))
+    let skip: string | undefined
+    try {
+      skip = (await $.session.compact({ instructions: KEEP })).skip
+    } catch (refusal) {
+      // The engine has no such call in a session the desktop app or an SDK host runs (its words,
+      // measured 2026-10-09: "compaction here runs inside a turn (a /compact prompt)"), and refuses it
+      // while a turn runs. The command is the same compaction as a turn of its own, run once the
+      // session is idle. A command is not run every half minute: what fails from here waits ten.
+      isByCommand = true
+      try {
+        await $.command.run({ command: 'compact', args: KEEP })
+      } catch (cause) {
+        throw new Error(`/compact could not be run for you (${because(cause)}); the engine's own call: ${because(refusal)}`)
+      }
+      const after = await gaugeNow($)
+      if (before !== undefined && after !== undefined && after >= before) {
+        throw new Error(`/compact ran and the context is no smaller (${Math.round(after)}%); the engine's own call: ${because(refusal)}`)
+      }
+    }
+    isRotateAsked = false
+    if (skip !== undefined) {
+      rotateNotBefore = now + ROTATE_AGAIN_MS
+      $.ui.toast(`Run board: not compacted (${skip}); the mod asks again in ten minutes.`)
+
+      return
+    }
+    isNudged = false
+    heldFor = undefined
+    await mutate($, path, raw => {
+      rotated(raw, iso(now))
+
+      return { value: undefined, isChanged: true }
+    })
+    // The engine does not run a mod's own hook on a compaction that mod asked for, so the state did
+    // not travel with the summary. It is added to the conversation as a note right behind it; where
+    // the session refuses that, the orchestrator reads it first thing, with its next tool result.
+    if (!isCarried) {
+      const noted = await $.session
+        .append({ message: { type: 'user', content: [{ type: 'text', text: carried(text) }] } })
+        .then(row => row.deny === undefined)
+        .catch(() => false)
+      if (!noted) inbox.set(ORCHESTRATOR, [{ taskId: ORCHESTRATOR, text: carried(text) }, ...(inbox.get(ORCHESTRATOR) ?? [])])
+    }
+    const after = await gaugeNow($)
+    $.ui.toast(
+      `Run board: this session was compacted (${percent ?? '?'}% full${after === undefined ? '' : `, now ${Math.round(after)}%`}).`,
+    )
+  } catch (cause) {
+    // Tried again later, and why it did not go through is kept on the board and said once, not thrown
+    // away. The person's own /rotate was tried and answered: it is not repeated on every tick.
+    rotateNotBefore = now + (isByCommand ? ROTATE_AGAIN_MS : ROTATE_SOON_MS)
+    if (isByCommand) isRotateAsked = false
+    await notCompacted($, because(cause), now)
+  } finally {
+    isRotating = false
+  }
+}
+
+/**
+ * Asks the orchestrator, once for the lot, to look again at the blockers and
+ * warnings that nobody deals with and that have stood for `LOOK_AGAIN_MIN`
+ * minutes or more since they were found or last asked about. The mod cannot
+ * tell whether such a problem still holds; the orchestrator can, and what it
+ * finds is either a task for it or its resolution. Called from the timer;
+ * never throws, and a read that failed is tried again at the next look.
+ */
+async function lookAgain($: EngineInterface): Promise<void> {
+  if (isLooking) return
+  isLooking = true
+  try {
+    const path = await boundLedger($)
+    if (path === undefined) return
+    const ledger = parseLedger(await $.fs.read(path)).ledger
+    if (ledger === undefined || !isUnderway(ledger.run, ledger.tasks)) return
+    const at = iso(await $.clock.now())
+    // Asked of the file again inside the write queue (`askAgain`), so a problem taken up meanwhile is left alone.
+    if (dueForLook(ledger, Date.parse(at)).length === 0) return
+    await settle($, path, raw => askAgain(raw, at))
+  } catch {
+    // Tried again at the next look.
+  } finally {
+    isLooking = false
+  }
+}
+
+/**
+ * After a merge: looks at the checks on the base branch for the run's sake. A
+ * failure is said once, as a blocker, and holds every merge but its repair's;
+ * a green head ends the watch, and so does a branch nothing checks, after a
+ * while. Called from the timer; never throws, and a request that fails is no
+ * verdict.
+ */
+async function watchMain($: EngineInterface): Promise<void> {
+  if (isWatchingMain) return
+  isWatchingMain = true
+  try {
+    const path = await boundLedger($)
+    if (path === undefined) return
+    const ledger = parseLedger(await $.fs.read(path)).ledger
+    if (ledger?.main === undefined) return
+    // The base branch is GitHub's: in a repository whose origin is elsewhere there are no checks to look at.
+    if (!(await isAtForge($))) return
+    const now = await $.clock.now()
+    const at = iso(now)
+    const look = await lookAtBase($)
+    if ('error' in look) return
+    if (look.verdict.verdict === 'running') {
+      if (now - Date.parse(ledger.main.since) > MAIN_WATCH_MIN * 60_000) await mutate($, path, raw => ({ value: delete raw.main, isChanged: true }))
+
+      return
+    }
+    if (look.verdict.verdict === 'failed') {
+      // A newer push may have cancelled the checks of the commit before it: only a head that stood still counts.
+      const again = await lookAtBase($)
+      const line = `${short(look.head)}: ${look.verdict.failed.join(', ')}`
+      if ('error' in again || again.head !== look.head || ledger.main.failed === line) return
+      await settle($, path, raw => {
+        const main = raw.main as Record<string, unknown> | undefined
+        if (main === undefined) return { isChanged: false, isError: true, text: '' }
+        main.failed = line
+        const recorded = reportProblem(raw, at, { kind: 'orchestrator' }, {
+          text: `The checks on ${config.base} failed for ${line}. Nothing merges onto a red ${config.base} but its repair.`,
+          severity: 'blocker',
+        })
+        const text = `Run board: the checks on ${config.base} failed for ${line}. ${recorded.isError ? '' : recorded.text}`.trimEnd()
+
+        return { isChanged: true, isError: false, text, wake: text, asks: `main ${line}` }
+      })
+
+      return
+    }
+    // Green: the watch is over.
+    await mutate($, path, raw => ({ value: delete raw.main, isChanged: true }))
+  } catch {
+    // A look that failed is tried again on the next one.
+  } finally {
+    isWatchingMain = false
+  }
+}
+
+/** `/pause` and `/unpause`: the owner's hold on the bound run, written to its ledger, and the orchestrator told. */
+async function hold($: EngineInterface, isPausing: boolean): Promise<{ text: string }> {
+  const path = await boundLedger($)
+  if (path === undefined) return { text: await unbound($) }
+  const at = iso(await $.clock.now())
+  const written = await mutate($, path, raw => {
+    const outcome = isPausing ? pauseRun(raw, at) : unpauseRun(raw)
+
+    return { value: outcome, isChanged: outcome.isChanged }
+  })
+  if (written.error !== undefined) return { text: written.error }
+  // A working orchestrator reads it with its next tool result; an idle one is woken with it.
+  if (!written.value.isError) carry(written.value)
+  seen = undefined
+  await refresh($, false)
+
+  return { text: written.value.text }
+}
+
+/** Keeps the engine's reason for refusing a compaction, and says it once. Never throws. */
+async function notCompacted($: EngineInterface, reason: string, now: number): Promise<void> {
+  try {
+    const path = await boundLedger($)
+    if (path === undefined || now === 0) return
+    await mutate($, path, raw => ({ value: undefined, isChanged: heldUp(raw, iso(now), reason) }))
+    if (heldFor === reason) return
+    heldFor = reason
+    seen = undefined
+    $.ui.toast(`Run board: a compaction is due and did not go through (${reason}). The mod tries again; /compact works too.`)
+  } catch {
+    // Not kept this time: the next try keeps it.
+  }
+}
+
+/** During a long turn of the orchestrator: once its context is full enough, it is told to end the turn. Never throws. */
+async function nudge($: EngineInterface): Promise<void> {
+  const percent = await gaugeNow($)
+  if (percent === undefined || percent < ROTATE_AT || isNudged) return
+  // A finished run's session is not compacted, so its orchestrator is not told that it will be.
+  try {
+    const path = await boundLedger($)
+    const ledger = path === undefined ? undefined : parseLedger(await $.fs.read(path)).ledger
+    if (ledger === undefined || ledger.tasks.every(task => task.status === 'done')) return
+  } catch {
+    return
+  }
+  isNudged = true
+  const text = `Run board: your context is ${Math.round(percent)}% full. Finish the step you are on and end your turn: the mod then compacts this conversation and brings the run's state back from the ledger. First put what the board does not hold yet (a decision, where a task stands) into a task note or a ruling.`
+  inbox.set(ORCHESTRATOR, [...(inbox.get(ORCHESTRATOR) ?? []), { taskId: ORCHESTRATOR, text }])
+}
+
+type Answered = { status: number; text: string; error?: undefined } | { error: string }
+
+/** One request through the host. Never throws: an address that cannot be asked answers `error`, which is no verdict. */
+async function ask(
+  $: EngineInterface,
+  url: string,
+  init?: { method?: string; headers?: Record<string, string>; body?: string },
+): Promise<Answered> {
+  try {
+    // A clock that cannot wait only means there is no limit: it never counts as the address not answering.
+    const limit = $.clock.sleep(ASK_TIMEOUT_MS).then(
+      () => undefined,
+      () => new Promise<undefined>(() => undefined),
+    )
+    const answered = await Promise.race([$.http.fetch(url, init), limit])
+
+    return answered === undefined ? { error: `no answer within ${ASK_TIMEOUT_MS / 1000} s` } : { status: answered.status, text: answered.text }
+  } catch (cause) {
+    return { error: cause instanceof Error ? cause.message : String(cause) }
+  }
+}
+
+const NO_TOKEN = "there is no GitHub token: set the mod's GitHub token option, export GH_TOKEN or GITHUB_TOKEN, or sign in with gh auth login"
+
+/**
+ * The token a request to GitHub carries, from the first place that has one:
+ * the mod's own option (kept in the system's secure storage), GH_TOKEN,
+ * GITHUB_TOKEN, then `gh auth token`. It goes into a request's header and
+ * nowhere else: not the ledger, not a message.
+ */
+async function githubToken($: EngineInterface): Promise<string | undefined> {
+  if (config.token !== '') return config.token
+  try {
+    const fromEnv = (await $.env.get('GH_TOKEN')) ?? (await $.env.get('GITHUB_TOKEN'))
+    if (fromEnv !== undefined && fromEnv.trim() !== '') return fromEnv.trim()
+  } catch {
+    // No environment to read: gh may still have a token.
+  }
+  if (ghToken !== undefined) return ghToken
+  // Requests made at once share one question to gh, so it runs once and not once for each of them.
+  ghAsked ??= (async () => {
+    try {
+      const ran = await $.process.run(['gh', 'auth', 'token'], { timeoutMs: 10_000 })
+      const token = ran.exitCode === 0 ? ran.stdout.trim() : ''
+      if (token !== '') ghToken = token
+    } catch {
+      // No gh on this machine, or it could not run.
+    }
+
+    return ghToken
+  })().finally(() => {
+    ghAsked = undefined
+  })
+
+  return ghAsked
+}
+
+/** The headers of a request to GitHub; undefined when there is no token. */
+async function githubHeaders($: EngineInterface): Promise<Record<string, string> | undefined> {
+  const token = await githubToken($)
+
+  return token === undefined
+    ? undefined
+    : {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+        'User-Agent': 'conductor-claude-code-mod',
+        'Content-Type': 'application/json',
+      }
+}
+
+type Json = { status: number; json: unknown; text: string; error?: undefined } | { error: string }
+
+/** A request about this repository to GitHub, its answer read as JSON. Never throws. */
+async function github($: EngineInterface, path: string, init?: { method?: string; body?: string }): Promise<Json> {
+  const repo = repoHere()
+  if (repo === undefined) return { error: 'this repository is not on GitHub' }
+  const headers = await githubHeaders($)
+  if (headers === undefined) return { error: NO_TOKEN }
+  const answered = await ask($, `${API}/repos/${repo}${path}`, { ...init, headers })
+  if (answered.error !== undefined) return { error: answered.error }
+  // A token GitHub refuses is asked for again next time, in case gh has a newer one.
+  if (answered.status === 401) ghToken = undefined
+  try {
+    return { status: answered.status, json: JSON.parse(answered.text) as unknown, text: answered.text }
+  } catch {
+    return answered.status >= 400 ? { status: answered.status, json: null, text: answered.text } : { error: `an answer that is not JSON (HTTP ${answered.status})` }
+  }
+}
+
+/** A commit's checks, check runs and commit statuses both, and their verdict. */
+async function checksAt($: EngineInterface, sha: string): Promise<Verdict | { error: string }> {
+  const [runs, status] = await Promise.all([github($, `/commits/${sha}/check-runs?per_page=100`), github($, `/commits/${sha}/status?per_page=100`)])
+  if (runs.error !== undefined) return { error: runs.error }
+  if (status.error !== undefined) return { error: status.error }
+  const read = runs.status === 200 && status.status === 200 ? checksOf(runs.json, status.json) : undefined
+  if (read === undefined) return { error: `the checks of ${short(sha)} could not be read (HTTP ${runs.status} and ${status.status})` }
+
+  return judge(read)
+}
+
+/** The base branch's head and the verdict of its checks. */
+async function lookAtBase($: EngineInterface): Promise<Look> {
+  const branch = await github($, `/branches/${encodeURIComponent(config.base)}`)
+  if (branch.error !== undefined) return { error: branch.error }
+  const head = branch.status === 200 ? headOf(branch.json) : undefined
+  if (head === undefined) return { error: `the head of ${config.base} could not be read (HTTP ${branch.status})` }
+  const verdict = await checksAt($, head)
+  if ('error' in verdict) return { error: verdict.error }
+
+  return { head, verdict }
+}
+
+/** What GitHub says about a pull request and about the base branch, right now. */
+async function survey($: EngineInterface, pr: number): Promise<{ facts: Facts; error?: undefined } | { error: string }> {
+  const [pulled, base] = await Promise.all([github($, `/pulls/${pr}`), lookAtBase($)])
+  if (pulled.error !== undefined) return { error: pulled.error }
+  if (pulled.status === 404) return { error: `it knows no pull request ${pr} in ${repoHere() ?? 'this repository'}` }
+  const pull = pulled.status === 200 ? pullOf(pulled.json) : undefined
+  if (pull === undefined) return { error: `pull request ${pr} could not be read (HTTP ${pulled.status})` }
+  if ('error' in base) return { error: base.error }
+  // A merged pull request's own checks decide nothing any more.
+  const checks: Verdict | { error: string } = pull.isMerged ? { verdict: 'green', line: 'merged', failed: [] } : await checksAt($, pull.head)
+  if ('error' in checks) return { error: checks.error }
+
+  return { facts: { pull, checks, base: config.base, baseHead: base.head, main: base.verdict } }
+}
+
+/** The merges other runs of this repository have in flight. Never throws: a run that does not read is no reason to refuse. */
+async function flights($: EngineInterface, own: string, now: number): Promise<Flight[]> {
+  if (typeof root !== 'string') return []
+  const runs = `${root}/${RUNS_DIR}`
+  const ledgers: Ledger[] = []
+  try {
+    for (const entry of await $.fs.list(runs)) {
+      if (entry.kind !== 'dir' || !RUN_ID.test(entry.name)) continue
+      try {
+        const parsed = parseLedger(await $.fs.read(`${runs}/${entry.name}/ledger.json`))
+        if (parsed.ledger !== undefined) ledgers.push(parsed.ledger)
+      } catch {
+        // A run folder without a ledger has no merge.
+      }
+    }
+  } catch {
+    return []
+  }
+
+  return flightsOf(ledgers, own, now)
+}
+
+/** Writes how a merge in flight went on or ended, and has the orchestrator told. Never throws. */
+async function settle($: EngineInterface, path: string, change: (raw: Raw) => Outcome): Promise<Outcome | undefined> {
+  const written = await mutate($, path, raw => {
+    const outcome = change(raw)
+
+    return { value: outcome, isChanged: outcome.isChanged }
+  })
+  // The pane shows it at once, not at its next poll.
+  seen = undefined
+  await refresh($, false)
+  if (written.error !== undefined || written.value.isError) return undefined
+  carry(written.value)
+
+  return written.value
+}
+
+/**
+ * `merge` and `merge_check`: the one way a pull request of a run reaches the
+ * base branch. The board's own side first, then GitHub's facts read just now,
+ * then the claim, then the merge pinned to the head those facts graded.
+ * `merge_check` stops before the claim and changes nothing.
+ */
+async function mergeTool(
+  $: EngineInterface,
+  call: ToolCall,
+  isCheckOnly: boolean,
+): Promise<{ result: string; text: string; isError?: undefined } | { isError: true; result: string; text: string }> {
+  const say = (text: string) => ({ result: text, text })
+  const fail = (reason: string) => {
+    const text = `${NOT_DONE} ${reason}`
+
+    return { isError: true as const, result: text, text }
+  }
+  const path = await boundLedger($)
+  if (path === undefined) return fail(NOT_BOUND)
+  // Before anything is asked of GitHub: a pull request's number means something only in a repository on GitHub.
+  if (!(await isAtForge($))) return fail(elsewhere(origin))
+  await remember($, path)
+  let ledger: Ledger
+  try {
+    const parsed = parseLedger(await $.fs.read(path))
+    if (parsed.ledger === undefined) return fail(`The ledger does not read: ${parsed.error}.`)
+    ledger = parsed.ledger
+  } catch {
+    return fail(`There is no ledger at ${path}.`)
+  }
+  const now = await $.clock.now()
+  const asked = precheck(ledger, callerOf(call.agentId), call, await flights($, ledger.run.id, now), isCheckOnly)
+  if ('error' in asked) return fail(asked.error)
+  const surveyed = await survey($, asked.pr)
+  if (surveyed.error !== undefined) {
+    return fail(`GitHub did not say what a merge needs to know (${surveyed.error}). Nothing was merged. A request that failed is no verdict: try again.`)
+  }
+  const { facts } = surveyed
+  const { pull } = facts
+  const id = asked.task.id
+
+  // Merged outside the board: nothing to merge, and the task is done.
+  if (pull.isMerged) {
+    const where = pull.commit === undefined ? '' : ` as ${short(pull.commit)}`
+    if (isCheckOnly) return say(`PR ${asked.pr} is merged already${where}, outside the board. ${TOOL_MERGE} takes it over and marks ${id} done.`)
+    const adopted = await settle($, path, raw => onMain(raw, iso(now), pull.commit ?? pull.head, config.base, { isAdopted: true, task: id, pr: asked.pr }))
+
+    return adopted === undefined ? fail(`${id} could not be taken over: the board could not be written.`) : say(adopted.text)
+  }
+
+  const blocks = obstacles(facts, asked)
+  if (isCheckOnly) {
+    if (blocks.length > 0) return say(`${id} cannot merge yet:\n${blocks.map(one => `- ${one}`).join('\n')}`)
+
+    return say(
+      `${id} may merge now. PR ${asked.pr} is open and mergeable into ${config.base}, its checks are green on ${short(pull.head)} (${facts.checks.line}), the checks on ${config.base} are ${facts.main.verdict} for ${short(facts.baseHead)}, and ${closingLine(closes(`${pull.title}\n${pull.body}`))}. GitHub would merge it with its ${config.method} method. Before you call ${TOOL_MERGE}: tell the other sessions that may merge (ListAgents shows them) and name them in told.`,
+    )
+  }
+  if (blocks.length > 0) return fail(`Nothing was merged. ${id} cannot merge now:\n${blocks.map(one => `- ${one}`).join('\n')}`)
+
+  const claimed = await mutate($, path, raw => {
+    const outcome = startMerge(raw, iso(now), { task: id, pr: asked.pr, head: pull.head, told: asked.told, closes: asked.closes })
+
+    return { value: outcome, isChanged: outcome.isChanged }
+  })
+  seen = undefined
+  await refresh($, false)
+  if (claimed.error !== undefined) return fail(`Nothing was merged. ${claimed.error}`)
+  if (claimed.value.isError) return fail(`Nothing was merged. ${claimed.value.text}`)
+
+  // The merge itself: pinned, so GitHub refuses it if the head moved since it was graded.
+  const sent = await github($, `/pulls/${asked.pr}/merge`, { method: 'PUT', body: JSON.stringify({ sha: pull.head, merge_method: config.method }) })
+  const said = sent.error === undefined ? messageOf(sent.text) : ''
+  const answer = sent.error !== undefined ? sent.error : `HTTP ${sent.status}${said === '' ? '' : `: ${said}`}`
+  // Whatever the call answered, the pull request itself says whether it is merged.
+  const after = await github($, `/pulls/${asked.pr}`)
+  const now2 = iso(await $.clock.now())
+  const settled = after.error !== undefined || after.status !== 200 ? undefined : pullOf(after.json)
+  if (settled?.isMerged === true) {
+    const commit = settled.commit ?? pull.head
+    const done = await settle($, path, raw => onMain(raw, now2, commit, config.base))
+
+    return say(done?.text ?? `Merged: PR ${asked.pr} (${id}) is on ${config.base} as ${short(commit)}, but the board could not be written. Set it right with ${TOOL_MERGE} for ${id} again: it is taken over.`)
+  }
+  if (settled !== undefined) {
+    await mutate($, path, raw => {
+      const outcome = abandoned(raw, `GitHub answered ${answer}`)
+
+      return { value: outcome, isChanged: outcome.isChanged }
+    })
+    seen = undefined
+    await refresh($, false)
+
+    return fail(`Nothing was merged: GitHub did not merge PR ${asked.pr} (${answer}). The claim is let go and ${id} stands where it stood. If its head moved, have it graded again.`)
+  }
+
+  return say(`Not known yet. The merge call for PR ${asked.pr} went out (${answer}), but GitHub could not be asked afterwards whether it merged. The board keeps ${id} as merging, looks again within a few minutes and settles it either way. Merge nothing meanwhile.`)
+}
+
+/**
+ * A merge claim whose call never said how it ended (the session stopped in
+ * between, or GitHub could not be asked afterwards): the pull request says.
+ * Called from the timer; never throws.
+ */
+async function watchClaim($: EngineInterface): Promise<void> {
+  if (isWatching) return
+  isWatching = true
+  try {
+    const path = await boundLedger($)
+    if (path === undefined) return
+    const flight = parseLedger(await $.fs.read(path)).ledger?.merge
+    if (flight === undefined) return
+    // A claim in a repository whose origin is not on GitHub is none the board made: nothing of it is asked there.
+    if (!(await isAtForge($))) return
+    const now = await $.clock.now()
+    if (now - Date.parse(flight.startedAt) < CLAIM_GRACE_MIN * 60_000) return
+    const pulled = await github($, `/pulls/${flight.pr}`)
+    const pull = pulled.error !== undefined || pulled.status !== 200 ? undefined : pullOf(pulled.json)
+    if (pull === undefined) return
+    const at = iso(now)
+    if (pull.isMerged) {
+      // Nobody heard the merge tool's answer: the orchestrator is told now, and woken if it is idle.
+      await settle($, path, raw => {
+        const done = onMain(raw, at, pull.commit ?? flight.head, config.base)
+
+        return done.isError ? done : { ...done, wake: `Run board: PR ${flight.pr} (${flight.task}) is merged as ${short(pull.commit ?? flight.head)}, and the task is done.`, asks: `merge ${flight.task}` }
+      })
+    } else await settle($, path, raw => abandoned(raw, 'the merge call did not go through'))
+  } catch {
+    // A look that failed is tried again on the next one.
+  } finally {
+    isWatching = false
+  }
+}
+
+/** Writes what the workers were last seen doing and which files they changed; never throws. */
+async function flush($: EngineInterface): Promise<void> {
+  if (pending.size === 0 && changedFiles.size === 0 && handed.length === 0 && weights.size === 0) return
+  const batch = [...pending]
+  const files = [...changedFiles].map(([taskId, set]) => [taskId, [...set]] as const)
+  const read = handed.splice(0)
+  const heavy = [...weights]
+  pending.clear()
+  changedFiles.clear()
+  weights.clear()
+  try {
+    const path = await boundLedger($)
+    if (path === undefined) return
+    const at = iso(await $.clock.now())
+    const written = await mutate($, path, raw => {
+      const isActed = batch.map(([taskId, text]) => acted(raw, taskId, { at, text })).some(Boolean)
+      const touched = files.map(([taskId, list]) => touch(raw, at, taskId, list))
+      const isRead = markRead(raw, read)
+      const isWeighed = heavy.map(([taskId, tokens]) => weigh(raw, taskId, tokens)).some(Boolean)
+      // A worker past the run's limit is asked, once, to hand back at its next green step.
+      const asks = heavy
+        .filter(([taskId]) => !askedBack.has(taskId))
+        .map(([taskId, tokens]) => overweight(raw, taskId, tokens))
+        .filter(one => one !== undefined)
+
+      return { value: { touched, asks }, isChanged: isActed || isRead || isWeighed || touched.some(one => one.isChanged) }
+    })
+    for (const outcome of written.value?.touched ?? []) carry(outcome)
+    for (const ask of written.value?.asks ?? []) {
+      askedBack.add(ask.taskId)
+      carry({ isChanged: false, isError: false, text: '', deliveries: [ask] })
+    }
+  } catch {
+    // A sign of life that could not be written is replaced by the next one.
+  }
+}
+
+async function newestRun($: EngineInterface, runs: string): Promise<string | null> {
+  let newest: { id: string; mtimeMs: number } | undefined
+  try {
+    for (const entry of await $.fs.list(runs)) {
+      if (entry.kind !== 'dir' || !RUN_ID.test(entry.name)) continue
+      try {
+        const { mtimeMs } = await $.fs.stat(`${runs}/${entry.name}/ledger.json`)
+        if (newest === undefined || mtimeMs > newest.mtimeMs) newest = { id: entry.name, mtimeMs }
+      } catch {
+        // A run folder without a ledger yet is not a run to show.
+      }
+    }
+  } catch {
+    return null
+  }
+
+  return newest?.id ?? null
+}
+
+/** Writes what the pane shows, and only when it differs from what it shows now. */
+async function show(
+  $: EngineInterface,
+  stamp: string,
+  next: (previous: BoardState) => BoardState,
+): Promise<void> {
+  if (stamp === shown) return
+  await update($, board, next)
+  shown = stamp
+}
+
+/** Reads the ledger of the run on show when its file changed; never throws. */
+async function refresh($: EngineInterface, rescan: boolean): Promise<void> {
+  try {
+    if (root === undefined || rescan) root = (await $.session.repo())?.root ?? null
+    if (root === null) {
+      const error = 'This session is not inside a git repository, so there is no run folder to read.'
+
+      return await show($, `no-repo`, () => ({ runId: null, ledger: null, error }))
+    }
+    const runs = `${root}/${RUNS_DIR}`
+    const pinned = await read($, pinnedRun)
+    if (pinned === null && (followed === null || rescan)) followed = await newestRun($, runs)
+    const runId = pinned ?? followed
+    if (runId === null) return await show($, 'no-run', () => EMPTY)
+
+    const path = `${runs}/${runId}/ledger.json`
+    const keep = (error: string) => (previous: BoardState) =>
+      previous.runId === runId ? { ...previous, error } : { runId, ledger: null, error }
+    let mtimeMs: number
+    try {
+      mtimeMs = (await $.fs.stat(path)).mtimeMs
+    } catch {
+      seen = undefined
+
+      return await show($, `missing ${path}`, keep(`There is no ledger at ${path}.`))
+    }
+    if (seen?.path === path && seen.mtimeMs === mtimeMs) return
+
+    const parsed = parseLedger(await $.fs.read(path))
+    if (parsed.error !== undefined) {
+      // Not remembered: a file caught half written is read again on the next tick.
+      seen = undefined
+
+      return await show($, `refused ${path} ${parsed.error}`, keep(parsed.error))
+    }
+    seen = { path, mtimeMs }
+    const { ledger } = parsed
+    if (pinned !== null) learn(ledger, path)
+    await show($, `read ${path} ${mtimeMs}`, () => ({ runId, ledger, error: null, updatedMs: mtimeMs }))
+  } catch (cause) {
+    const error = `The ledger could not be read: ${cause instanceof Error ? cause.message : String(cause)}`
+    await show($, error, previous => ({ ...previous, error })).catch(() => undefined)
+  }
+}
+
+async function tick($: EngineInterface): Promise<void> {
+  if (isTicking) return
+  isTicking = true
+  try {
+    const isUp = (await $.ui.panes()).some(pane => pane.id === PANE)
+    if (!isUp) return
+    ticks += 1
+    await refresh($, ticks % RESCAN_EVERY === 0)
+    if (ticks % CLOCK_EVERY === 0) {
+      const now = await $.clock.now()
+      await update($, nowMs, () => now)
+    }
+  } catch {
+    // A tick that failed is tried again on the next one.
+  } finally {
+    isTicking = false
+  }
+}
+
+const because = (cause: unknown): string => (cause instanceof Error ? cause.message : String(cause))
+
+/**
+ * Registers a command. A name the engine will not take (it keeps some for
+ * itself, `/run` among them, measured 2026-10-09) is noted and said once, and
+ * holds up nothing else: before this, one refused name ended the mod's start
+ * and with it every later command, tool and both timers.
+ */
+async function listCommand($: EngineInterface, spec: Parameters<EngineInterface['command']['register']>[0]): Promise<void> {
+  try {
+    await $.command.register(spec)
+  } catch (cause) {
+    unlisted.push(`/${spec.name} (${because(cause)})`)
+  }
+}
+
+async function listTool($: EngineInterface, spec: Parameters<EngineInterface['tool']['register']>[0]): Promise<void> {
+  try {
+    await $.tool.register(spec)
+  } catch (cause) {
+    unlisted.push(`${spec.name} (${because(cause)})`)
+  }
+}
+
+/**
+ * The mod works only in a repository that opted in with a `.claude/conductor`
+ * folder. Anywhere else it registers nothing and its hooks pass everything on.
+ */
+async function isHome($: EngineInterface): Promise<boolean> {
+  try {
+    if (root === undefined) root = (await $.session.repo())?.root ?? null
+
+    return root !== null && (await $.fs.exists(`${root}/.claude/conductor`))
+  } catch {
+    return false
+  }
+}
+
+export const register: Register = (on, options) => {
+  config = configOf(options)
+  on('session.start', async ($, e, next) => {
+    if (!(await isHome($))) return next(e)
+    // The timers first: whatever a registration below runs into, the board stays live.
+    $.clock.every(POLL_MS, () => void tick($))
+    $.clock.every(FLUSH_MS, () => {
+      flushTicks += 1
+      wake($)
+      void flush($)
+      void rotation($)
+      if (flushTicks % WATCH_EVERY === 0) {
+        void watchClaim($)
+        void watchMain($)
+        void lookAgain($)
+      }
+      if (isOrchestrating === true && flushTicks % GAUGE_EVERY === 0) void nudge($)
+    })
+    unlisted.length = 0
+    await listCommand($, {
+      name: 'board',
+      description: 'Show the run board: what is building, next, done, and the problems found',
+      argumentHint: '[run id]',
+    })
+    await listTool($, {
+      name: 'task_update',
+      description:
+        'Run board: say where a task of the run this session is bound to stands. The orchestrator may set any status, and may change the tier of a task that has not started (with tierReason). A task\'s own worker may set review (its pull request is open), blocked (it waits on a ruling) or failed, and may set note, pr and branch. The board is written only through these tools: never edit ledger.json.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          task: { type: 'string', description: 'The task\'s id, e.g. t391-1.' },
+          status: { type: 'string', enum: [...STATUSES] },
+          tier: { type: 'string', enum: [...TIERS], description: 'Only before the task starts, and only by the orchestrator.' },
+          tierReason: { type: 'string', description: 'One line: why this tier. Required with tier.' },
+          note: { type: 'string', description: 'One line: what it is doing now, or why it is blocked. An empty string clears it.' },
+          ticket: { type: 'integer', minimum: 1, description: 'The issue it belongs to; the orchestrator\'s to set.' },
+          pr: { type: 'integer', minimum: 1, description: 'The pull request\'s number.' },
+          branch: { type: 'string' },
+        },
+        required: ['task'],
+        additionalProperties: false,
+      },
+      isDeferred: false,
+    })
+    await listTool($, {
+      name: 'task_add',
+      description:
+        'Run board: the orchestrator adds a task to the run, tagged with the model tier its worker runs on: opus for architecture and design, sonnet for challenging development, haiku for easy jobs. Its worker is then started with the task\'s id as the agent\'s name, and the mod sets the model from the tier. A task added to deal with open problems names them in addresses, so they have a task.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: 'A short name unique in the run, e.g. t391-2: letters, digits, _ and -.' },
+          title: { type: 'string', description: 'What the task delivers, in a few words.' },
+          tier: { type: 'string', enum: [...TIERS] },
+          tierReason: { type: 'string', description: 'One line: why this tier.' },
+          ticket: { type: 'integer', minimum: 1, description: 'The issue it belongs to.' },
+          dependsOn: { type: 'array', items: { type: 'string' }, description: 'Ids of tasks that must be done first.' },
+          files: { type: 'array', items: { type: 'string' }, description: 'The files or folders the task is expected to change, relative to the repository. Findings on them reach its worker, and a second task on the same file is flagged.' },
+          addresses: { type: 'array', items: { type: 'string' }, description: 'The ids of open problems this task is to deal with, e.g. ["P3"]: each then has this task, and is resolved once it is done and the fix holds.' },
+        },
+        required: ['id', 'title', 'tier', 'tierReason'],
+        additionalProperties: false,
+      },
+      isDeferred: false,
+    })
+    await listTool($, {
+      name: 'board_post',
+      description:
+        'Run board: tell the run something. kind finding is a fact other workers may need; name the files or folders it concerns and the workers on those files read it at their next step, and nobody else does. kind question is a worker\'s question to the orchestrator, who is woken to answer it.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          kind: { type: 'string', enum: ['finding', 'question'] },
+          text: { type: 'string', description: 'One to three sentences.' },
+          files: { type: 'array', items: { type: 'string' }, description: 'Files or folders it concerns, relative to the repository.' },
+        },
+        required: ['kind', 'text'],
+        additionalProperties: false,
+      },
+      isDeferred: false,
+    })
+    await listTool($, {
+      name: 'board_rule',
+      description:
+        'Run board: the orchestrator records a numbered ruling for the workers it binds. answers names the question it settles; tasks names the tasks it binds; a ruling that names nobody is for the workers building now. A running worker reads it at its next step. A stopped worker reads it when it runs again: the mod starts nobody, so send that worker a message yourself to start it.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          text: { type: 'string', description: 'What is decided, in one to three sentences.' },
+          answers: { type: 'string', description: 'The question it answers, e.g. Q2.' },
+          tasks: { type: 'array', items: { type: 'string' }, description: 'The ids of the tasks it binds.' },
+        },
+        required: ['text'],
+        additionalProperties: false,
+      },
+      isDeferred: false,
+    })
+    await listTool($, {
+      name: 'board_read',
+      description:
+        'Run board: what the board holds for you. A worker gets the rulings that bind it and the findings on its files. The orchestrator gets the whole run as a handover has it: every task with its worker, the open problems and questions, the rulings.',
+      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+      isDeferred: false,
+    })
+    await listCommand($, {
+      name: 'conduct',
+      description: 'Start a run from an issue or a spec: its board, its ledger, and a plan the orchestrator drafts for your approval',
+      argumentHint: '<#issue or spec path> [title]',
+    })
+    await listCommand($, { name: 'approve', description: 'Approve the plan of the bound run, so its workers may start' })
+    await listTool($, {
+      name: 'run_plan',
+      description:
+        'Run board: the orchestrator says the plan of the run is ready for the owner, and names the run. After it, tell the owner the plan in a few lines and stop: they approve with /approve, and no worker starts before that.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          title: { type: 'string', description: 'What the run delivers, in a few words.' },
+        },
+        additionalProperties: false,
+      },
+      isDeferred: false,
+    })
+    await listTool($, {
+      name: 'merge_check',
+      description:
+        'Run board: what stands in the way of merging a task\'s pull request right now, read from GitHub: its state and mergeability, its checks on its head, the checks on the base branch, and what its description would close. Changes nothing and merges nothing.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          task: { type: 'string', description: 'The task\'s id.' },
+          closes: { type: 'array', items: { type: 'integer', minimum: 1 }, description: 'The issues this merge is meant to close; leave out for none.' },
+          onRedMain: { type: 'boolean', description: 'Only for the pull request that repairs failed checks on the base branch.' },
+        },
+        required: ['task'],
+        additionalProperties: false,
+      },
+      isDeferred: false,
+    })
+    await listTool($, {
+      name: 'merge',
+      description:
+        'Run board: the orchestrator merges a green task\'s pull request into the base branch on GitHub. The mod checks everything merge_check checks and merges pinned to the head whose checks it read, never two at once; the task is done once GitHub has merged it, and the board then watches the checks on the base branch. A pull request already merged by hand is taken over. Tell the other sessions that may merge first, and name them in told.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          task: { type: 'string', description: 'The task\'s id.' },
+          told: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'The sessions you told just now that you are about to merge (ListAgents shows who may merge); an empty list says there is nobody else.',
+          },
+          closes: { type: 'array', items: { type: 'integer', minimum: 1 }, description: 'The issues this merge is meant to close; leave out for none.' },
+          onRedMain: { type: 'boolean', description: 'Only for the pull request that repairs failed checks on the base branch.' },
+        },
+        required: ['task', 'told'],
+        additionalProperties: false,
+      },
+      isDeferred: false,
+    })
+    await listCommand($, { name: 'pause', description: 'Hold the bound run: no worker starts and nothing is merged until /unpause; what is under way finishes' })
+    await listCommand($, { name: 'unpause', description: 'End the pause of the bound run: workers may start and pull requests may merge again' })
+    await listCommand($, {
+      name: 'merged',
+      description: 'Mark a task of the bound run done by your word: its pull request is merged',
+      argumentHint: '<task id>',
+    })
+    await listCommand($, {
+      name: 'rotate',
+      description: 'Write the bound run\'s handover and compact this session now, whatever its context reading',
+    })
+    await listCommand($, {
+      name: 'tier',
+      description: 'Set the model tier of a task of the bound run that has not started',
+      argumentHint: '<task id> <opus|sonnet|haiku>',
+    })
+    await listTool($, {
+      name: 'problem_report',
+      description:
+        'Run board: record a problem found during the run, so the person watching the board sees it. severity is blocker (it stops a task), warning (it may bite later) or note (for the record). A worker\'s report is filed under its own task, and the orchestrator is told of a blocker or a warning: it gives the problem a task and sees it through.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          text: { type: 'string', description: 'What is wrong, in one or two sentences.' },
+          severity: { type: 'string', enum: ['blocker', 'warning', 'note'] },
+          task: { type: 'string', description: 'The task it concerns, when it concerns one.' },
+        },
+        required: ['text', 'severity'],
+        additionalProperties: false,
+      },
+      isDeferred: false,
+    })
+    await listTool($, {
+      name: 'problem_resolve',
+      description:
+        'Run board: the orchestrator marks a recorded problem resolved and says how it was settled. A problem whose task is still going is refused: it is resolved once that task is done and you have checked that the fix holds.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          problem: { type: 'string', description: 'The problem\'s id, e.g. P3.' },
+          resolution: { type: 'string', description: 'How it was settled, in one line.' },
+          dismiss: {
+            type: 'boolean',
+            description: 'Only for a problem that turned out to be none while the task that was to deal with it is still going.',
+          },
+        },
+        required: ['problem', 'resolution'],
+        additionalProperties: false,
+      },
+      isDeferred: false,
+    })
+    await listTool($, {
+      name: 'problem_assign',
+      description:
+        'Run board: the orchestrator ties an open problem to the task of this run that deals with it, by the task\'s id or by the ticket it carries. Only a task that still goes on counts, and a ticket only while a task of this run carries it: a problem is not left with something nobody here conducts. For a problem that needs work of its own, add a task with task_add and addresses instead.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          problem: { type: 'string', description: 'The problem\'s id, e.g. P3.' },
+          task: { type: 'string', description: 'The id of a task of this run that is not done.' },
+          ticket: { type: 'integer', minimum: 1, description: 'The issue\'s number, when one task of this run still carries it.' },
+        },
+        required: ['problem'],
+        additionalProperties: false,
+      },
+      isDeferred: false,
+    })
+    if (unlisted.length > 0) {
+      void Promise.resolve($.ui.toast(`Run board: the engine did not take ${unlisted.join('; ')}. Everything else of the mod works.`)).catch(() => undefined)
+    }
+    await rebind($)
+    const path = await boundLedger($).catch(() => undefined)
+    if (path !== undefined) await remember($, path)
+    // A reload forgets the last reading of the context: taken again here, so a compaction that was due stays due.
+    if (path !== undefined) void gaugeNow($)
+
+    return next(e)
+  })
+
+  // The router. In a bound session a new agent is a task's worker (started on the
+  // task's tier, whatever the call asked for), a worker's own subagent (never on a
+  // dearer tier than the worker) or a read-only helper; anything else is refused.
+  // A session bound to no run, a fork, a teammate and a workflow's agent are left alone.
+  on('agent.spawn', async ($, e, next) => {
+    if (e.fork || e.isTeammate === true || e.workflow !== undefined) return next(e)
+    let path: string | undefined
+    try {
+      path = await boundLedger($)
+    } catch {
+      path = undefined
+    }
+    if (path === undefined) return next(e)
+
+    routing.add(e.tool_use_id)
+    await remember($, path)
+    const parentTaskId = e.parentAgentId === undefined ? undefined : agents.get(e.parentAgentId)
+    if (e.parentAgentId !== undefined && parentTaskId === undefined) {
+      // Started by a helper or an agent the board does not know: not the router's.
+      routing.delete(e.tool_use_id)
+
+      return next(e)
+    }
+    let source: string
+    try {
+      source = await $.fs.read(path)
+    } catch {
+      routing.delete(e.tool_use_id)
+
+      return { deny: `conductor: the run this session is bound to has no ledger at ${path}, so no agent was started. /board none lets go of the run.` }
+    }
+    const read = parseLedger(source)
+    if (read.ledger === undefined) {
+      routing.delete(e.tool_use_id)
+
+      return { deny: `conductor: the bound run's ledger does not read (${read.error}), so no agent was started.` }
+    }
+    const spawn: Spawn = { name: e.name, model: e.model, subagentType: e.subagentType, parentTaskId }
+    let decided = route(read.ledger, spawn)
+    let before: RawTask | undefined
+    if (decided.kind === 'worker') {
+      const claimed = await claim($, path, spawn, e.name ?? decided.taskId, read.ledger)
+      if (claimed.error !== undefined) {
+        routing.delete(e.tool_use_id)
+
+        return { deny: `conductor: the board could not be written (${claimed.error}), so no agent was started.` }
+      }
+      decided = claimed.decided
+      before = claimed.before
+    }
+    routing.delete(e.tool_use_id)
+    if (decided.kind === 'deny') return { deny: decided.text }
+    if (decided.kind === 'pass') return next(e)
+    const reservation = before
+    const release = async (): Promise<void> => {
+      if (reservation !== undefined) await mutate($, path, raw => ({ value: undefined, isChanged: released(raw, reservation) }))
+    }
+    try {
+      // A worker also starts knowing how it reports and what the board already holds for it.
+      const task = decided.kind === 'worker' ? read.ledger.tasks.find(one => one.id === decided.taskId) : undefined
+      // The project's own rules for a worker, when it keeps any: .claude/conductor/brief.md of the repository.
+      const brief = task === undefined ? '' : await $.fs.read(path.replace(/runs\/[^/]+\/ledger\.json$/, 'brief.md')).catch(() => '')
+      const prompt =
+        task === undefined || decided.kind !== 'worker'
+          ? e.prompt
+          : `${e.prompt}\n${briefing(read.ledger, task, { brief, slot: decided.slot }, decided.base)}`
+      const started = await next({ ...e, model: decided.model, prompt })
+      // The engine started nothing after all: the task stands again as it stood.
+      if ((started as { agentId?: string }).agentId === undefined) await release()
+      else await heard($, path, e.name ?? decided.taskId, decided, started)
+
+      return started
+    } catch (cause) {
+      await release()
+      throw cause
+    }
+  }).catch(unrouted)
+
+  // What a worker is doing, from its own tool calls: remembered here, written by the flush.
+  // And the way board news reaches its reader: with the result of the reader's own call.
+  on('tool.call', async ($, e, next) => {
+    const call = e as unknown as ToolCall
+    // In a run nothing reaches the base branch by hand: not a worker's command, and not the orchestrator's either.
+    if (call.tool === 'Bash' && typeof call.command === 'string') {
+      const what = byHand(call.command, config.base)
+      const isBound = what !== undefined && (await boundLedger($).catch(() => undefined)) !== undefined
+      // A worker never merges, anywhere. The orchestrator's own merge is refused where the board merges: in a
+      // repository that is not on GitHub it merges nothing, so there this is the repository's path, not a way round.
+      if (what !== undefined && isBound && (call.agentId !== undefined || (await isAtForge($)))) {
+        return {
+          deny:
+            call.agentId === undefined
+              ? `conductor: this command ${what} by hand. In a run a pull request reaches ${config.base} through ${TOOL_MERGE}, which merges pinned to the graded head, one at a time. ${TOOL_CHECK} says what stands in the way. /board none lets go of the run.`
+              : `conductor: this command ${what}. A worker never merges and never pushes to ${config.base}: set your task to review with its pull request and hand back. Merging is the orchestrator's.`,
+        }
+      }
+    }
+    const taskId = call.agentId === undefined ? undefined : agents.get(call.agentId)
+    if (taskId !== undefined && !call.tool.startsWith('mcp__conductor__')) {
+      pending.set(taskId, activityText(call))
+      const file = call.file_path ?? call.notebook_path
+      if (WRITES.has(call.tool) && typeof file === 'string' && typeof root === 'string') {
+        const set = changedFiles.get(taskId) ?? new Set<string>()
+        changedFiles.set(taskId, set.add(relative(file, root)))
+      }
+    }
+    const ran = await next(e)
+    if (inbox.size === 0) return ran
+    // A worker's subagent is not its reader: the news is for the loop that holds the task.
+    const reader = call.agentId === undefined ? ORCHESTRATOR : workers.has(call.agentId) ? agents.get(call.agentId) : undefined
+
+    return reader === undefined ? ran : hand(reader, ran)
+  })
+
+  // Whether the orchestrator is working: a question reaches a working orchestrator with its next
+  // tool result, and wakes an idle one.
+  on('turn.start', ($, e, next) => {
+    if ((e as { agentId?: string }).agentId === undefined) isOrchestrating = true
+
+    return next(e)
+  })
+
+  on('turn.complete', async ($, e, next) => {
+    const agentId = e.agentId
+    if (agentId === undefined) {
+      isOrchestrating = false
+      // The orchestrator's turn is over: this is when its context is read, and the timer acts on the reading.
+      await gaugeNow($)
+    }
+    if (agentId !== undefined && workers.has(agentId)) {
+      try {
+        await flush($)
+        const path = await boundLedger($)
+        if (path !== undefined) {
+          const at = iso(await $.clock.now())
+          await mutate($, path, raw => ({ value: undefined, isChanged: turnEnded(raw, at, agentId, e.reason) !== undefined }))
+        }
+      } catch {
+        // The turn ends whether or not the board heard of it.
+      }
+    }
+
+    return next(e)
+  })
+
+  // The mod's own tools: the one way the orchestrator and the workers change the board.
+  // Matched by pattern: a tool's own name is no known tool to the types until the mod that registers it has loaded.
+  on('tool.call', { tool: /^mcp__conductor__run_plan$/ }, ($, e) =>
+    answer($, e as unknown as ToolCall, (raw, _at, caller, input) => proposePlan(raw, caller, input)),
+  ).catch(broke)
+  on('tool.call', { tool: /^mcp__conductor__task_add$/ }, ($, e) =>
+    answer($, e as unknown as ToolCall, (raw, _at, caller, input) => addTask(raw, caller, input)),
+  ).catch(broke)
+  on('tool.call', { tool: /^mcp__conductor__board_post$/ }, ($, e) => answer($, e as unknown as ToolCall, post)).catch(broke)
+  on('tool.call', { tool: /^mcp__conductor__board_rule$/ }, ($, e) => answer($, e as unknown as ToolCall, rule)).catch(broke)
+  on('tool.call', { tool: /^mcp__conductor__board_read$/ }, async ($, e) => {
+    const isElsewhere = !(await isAtForge($))
+
+    return answer($, e as unknown as ToolCall, (raw, at, caller) => {
+      const read = parseLedger(JSON.stringify(raw))
+      if (read.ledger === undefined) return { isChanged: false, isError: true, text: 'The ledger does not read.' }
+      // The orchestrator reads the whole run, as a handover has it; a worker its own part of the board.
+      const text =
+        caller.kind === 'orchestrator'
+          ? handover(read.ledger, { at, percent: lastPercent === undefined ? undefined : Math.round(lastPercent), isElsewhere })
+          : digest(read.ledger, caller)
+
+      return { isChanged: false, isError: false, text }
+    })
+  }).catch(broke)
+  on('tool.call', { tool: /^mcp__conductor__task_update$/ }, ($, e) =>
+    answer($, e as unknown as ToolCall, (raw, at, caller, input) => {
+      const outcome = updateTask(raw, at, caller, input)
+      if (outcome.isError || input.status !== 'green' || typeof input.task !== 'string') return outcome
+      // A green task is what the tasks behind it were waiting for: said here, where the orchestrator reads it.
+      const ledger = parseLedger(JSON.stringify(raw)).ledger
+      const next = ledger === undefined ? [] : unlocked(ledger, input.task)
+      if (next.length === 0) return outcome
+      const names = next.map(one => (one.base === undefined ? one.id : `${one.id} (built on ${one.base.taskId}'s branch)`)).join(', ')
+      if (ledger?.run.pausedAt !== undefined) return { ...outcome, text: `${outcome.text} The run is paused: once the owner types /unpause, these can start before this one is merged: ${names}.` }
+
+      return { ...outcome, text: `${outcome.text} Can start now, before this one is merged: ${names}. Merge ${input.task} all the same as soon as nothing else is merging.` }
+    }),
+  ).catch(broke)
+  on('tool.call', { tool: /^mcp__conductor__merge_check$/ }, ($, e) => mergeTool($, e as unknown as ToolCall, true)).catch(broke)
+  on('tool.call', { tool: /^mcp__conductor__merge$/ }, ($, e) => mergeTool($, e as unknown as ToolCall, false)).catch(broke)
+  on('tool.call', { tool: /^mcp__conductor__problem_report$/ }, ($, e) =>
+    answer($, e as unknown as ToolCall, reportProblem),
+  ).catch(broke)
+  on('tool.call', { tool: /^mcp__conductor__problem_resolve$/ }, ($, e) =>
+    answer($, e as unknown as ToolCall, (raw, _at, caller, input) => resolveProblem(raw, caller, input)),
+  ).catch(broke)
+  on('tool.call', { tool: /^mcp__conductor__problem_assign$/ }, ($, e) =>
+    answer($, e as unknown as ToolCall, (raw, _at, caller, input) => assignProblem(raw, caller, input)),
+  ).catch(broke)
+
+  // What the orchestrator has to know about a bound run. The text is the same
+  // on every turn of a bound session, so it costs the prompt cache nothing.
+  on('prompt.compose', async ($, e, next) => {
+    const composed = await next(e)
+    const run = await read($, pinnedRun)
+    if (run === null) return composed
+    // GitHub's side of a run is told only where the repository is on GitHub; anywhere else, what stands in its place.
+    const isHere = await isAtForge($)
+    const text = [
+      '# Run board (conductor)',
+      '',
+      `This session is bound to run \`${run}\`. Its board is the pane "Run board"; its ledger is ${RUNS_DIR}/${run}/ledger.json.`,
+      '',
+      REPORTING,
+      `- The mod writes the ledger. Never edit ledger.json: change it with ${TOOL_ADD}, ${TOOL_UPDATE}, ${TOOL_REPORT} and ${TOOL_RESOLVE}.`,
+      `- A run starts with a plan. Until you have proposed it with ${TOOL_PLAN} and the owner has approved it with /approve, no worker starts. Once they have, start the tasks that can start. ${PLANNING}`,
+      `- Every worker is a task. Add it with ${TOOL_ADD}, tagged with a tier and why: opus for architecture and design, sonnet for challenging development, haiku for easy jobs. The owner may change a tier before the task starts; their choice stands.`,
+      "- A task's worker is a background agent in a worktree of its own (isolation: \"worktree\"), started with the task's id as its `name` (or the name the task lists as its worker). The mod starts it on the task's tier whatever model the call names, marks the task building, records what the worker is doing from its tool calls, and marks it handed back when its turn ends.",
+      `- A task starts once everything it waits for is green (reviewed, its checks green) or done: it does not wait for the merge. Start it then; the mod tells its worker to build on the green task's branch, which works for one unmerged branch at a time. ${isHere ? `${TOOL_MERGE} takes a task only after everything it waits for is done, so merge in that order.` : 'A task is merged only after everything it waits for is done, so merge in that order.'}`,
+      `- A start is refused for an agent that is no task's worker, for a task that is done, already building or waiting on tasks that are not green yet, and when the run's limit of workers building at once is reached. Read-only helpers of type ${HELPER_TYPES.join(', ')} start without a task. A worker's own subagents never run on a dearer tier than the worker.`,
+      '- The owner holds a run with /pause and lets it go on with /unpause. While it is paused the mod starts no worker and merges nothing; workers that are building finish and hand back, you judge their hand-backs and answer their questions, and a merge in flight is still settled with GitHub. When nothing is building any more, tell the owner in a line or two where the run stands, and stop. When the pause ends, read the board and go on: judge what was handed back, start what can start, and merge what is green, in order.',
+      '- A task that is building while its worker is not running (the session was restarted meanwhile; ListAgents shows who runs) gets its worker started again with a message to the agent id the board lists: tell it first to run git status and git diff, and to commit and push what is its own.',
+      '- After a hand-back the orchestrator judges it and sets the task to review, green, blocked or failed, or to done when it has no pull request.',
+      ...(isHere
+        ? [
+            `- A task with a pull request becomes done through ${TOOL_MERGE} alone, for a task you judged green: its checks green on its head, its change reviewed. The mod reads GitHub, merges into ${config.base} pinned to that head with GitHub's ${config.method} method, never two at once (across runs too), marks the task done once GitHub has merged it and tells you. ${TOOL_CHECK} says what stands in the way and changes nothing. Before each merge tell the other sessions that may merge (ListAgents) and name them in told. Workers never merge, and a merge by hand (gh pr merge, GitHub's merge call, a push to ${config.base}) is refused in a bound session.`,
+            `- When the board tells you a task is done, go on at once: start what can start and merge the next green task. After each merge the board watches the checks on ${config.base}: when they fail, find the merge that broke them and repair it before anything else merges; the repair's own merge takes onRedMain: true.`,
+          ]
+        : [
+            `- This repository's origin is not on GitHub, so the mod reads no pull request and merges nothing here, and ${TOOL_MERGE} and ${TOOL_CHECK} refuse. The pull request of a task you judged green (its checks green on its head, its change reviewed) is merged by this repository's own path and rules, one at a time. A task with a pull request then becomes done on the owner's word alone: once it is merged and what this repository checks after a merge is good, tell the owner in one line to type /merged <task>. Workers never merge.`,
+          ]),
+      `- A problem anyone finds is recorded with ${TOOL_REPORT}, so it shows on the board. A blocker or a warning is yours until a task of this run has dealt with it. Look first whether it still holds (a precaution may not have come true, a fact may be none any more): if it does not, resolve it; if it does, give it a task of its own (${TOOL_ADD}, with addresses), or tie it to a task the run still conducts (${TOOL_ASSIGN}, by the task or by its ticket; a ticket counts only while a task of this run carries it, so a problem is never left with a ticket nobody here conducts). When its task is done, check that the fix holds and call ${TOOL_RESOLVE}; if it does not, give it a new task. A task that was given up leaves its problems without one. A note is for the record: resolve it when it no longer matters. Looking again is not left to you alone: the board asks you again every ${LOOK_AGAIN_MIN} minutes about one that nobody deals with, and a task is not merged while a problem found under it waits for that decision. A run with a blocker or a warning open is not delivered: say so in your summary to the owner instead of calling it finished.`,
+      `- Workers do not report to you message by message. A fact another worker needs is a finding on the board (${TOOL_POST}) and is read only by the workers on the files it names. A worker's question wakes you: answer it with ${TOOL_RULE}, naming the question in answers. A running worker reads a ruling at its next step; a stopped one reads it when it runs again, and starting it is yours to do, with a message to that worker. ${TOOL_READ} shows the open questions and the latest findings and rulings. Board news for you arrives with the result of your own next tool call.`,
+      `- When your context is about ${ROTATE_AT}% full, the mod compacts this conversation between your turns and brings the run's state back from the ledger; handover.md beside the ledger holds the same state. So keep what matters on the board (a task's note, a ruling) and not only in the conversation. ${TOOL_READ} gives you the whole run at any time.`,
+      `- Name the files a task is expected to change when you add it. The mod sees which files each worker changes and tells you when two open tasks change the same one.`,
+    ].join('\n')
+
+    return { sections: [...composed.sections, { id: 'conductor:run', text, scope: 'session' as const }] }
+  })
+
+  on('command.run', { command: 'board' }, async ($, e) => {
+    // A run started from an issue is named by its number, so `/board #12` means run 12.
+    const asked = e.args.trim().replace(/^#(?=\d+$)/, '')
+    if (asked !== '' && !RUN_ID.test(asked)) {
+      return { text: `"${asked}" is not a run id: letters, digits, _ and -, at most 64.` }
+    }
+    // A bare /board only shows the board; a run id binds the session to that run, `none` lets go of it.
+    if (asked !== '') {
+      await flush($)
+      await bind($, asked === UNBIND ? null : asked)
+    }
+    const bound = await read($, pinnedRun)
+    const now = await $.clock.now()
+    await update($, nowMs, () => now)
+    seen = undefined
+    await refresh($, true)
+    await $.ui.open({ id: PANE, title: TITLE })
+
+    const state = await read($, board)
+    if (state.ledger === null) {
+      return { text: state.error ?? `No run yet: nothing under ${RUNS_DIR}.` }
+    }
+    const binding =
+      bound === null
+        ? `Viewing only: /board ${state.ledger.run.id} binds this session to the run, so its workers are recorded.`
+        : `This session is bound to run ${bound}.`
+    const line = `${state.ledger.run.title}: ${summary(boardView(state.ledger, now))}. ${binding}`
+
+    return { text: state.error === null ? line : `${line} The newest read failed: ${state.error}` }
+  })
+
+  // A compaction of the main conversation in a bound session, whoever asked for it (the mod, the person
+  // with /compact, the engine on its own): the summarizer is told to leave the run's state out, and the
+  // state is added from the ledger. A worker's own compaction keeps its task and what the board holds for it.
+  on('session.compact', async ($, e, next) => {
+    if (e.trigger === 'precompute') return next(e)
+    let ledger: Ledger | undefined
+    try {
+      const path = await boundLedger($)
+      ledger = path === undefined ? undefined : parseLedger(await $.fs.read(path)).ledger
+    } catch {
+      ledger = undefined
+    }
+    // A run with nothing left to do is left as it is: the summary is the session's own business again.
+    if (ledger === undefined || ledger.tasks.every(task => task.status === 'done')) return next(e)
+
+    if (e.agentId !== undefined) {
+      const taskId = workers.has(e.agentId) ? agents.get(e.agentId) : undefined
+      const task = ledger.tasks.find(one => one.id === taskId)
+      const done = await next(e)
+      if (task === undefined || done.skip !== undefined) return done
+
+      return { ...done, messages: [...done.messages, { role: 'user' as const, text: briefing(ledger, task).trim(), toolUses: [] }] }
+    }
+
+    const at = iso(await $.clock.now())
+    const text = handover(ledger, { at, percent: lastPercent === undefined ? undefined : Math.round(lastPercent), isElsewhere: !(await isAtForge($)) })
+    const asked = e.instructions ?? ''
+    const done = await next({ ...e, instructions: asked.includes(KEEP) ? asked : [asked, KEEP].filter(one => one !== '').join('\n\n') })
+    if (done.skip !== undefined) return done
+    isCarried = true
+
+    return { ...done, messages: [...done.messages, { role: 'user' as const, text: carried(text), toolUses: [] }] }
+  })
+
+  // How many tokens a worker's context holds, from each of its model requests.
+  on('turn.step', async function* ($, e, next) {
+    const result = yield* next(e)
+    const taskId = e.agentId !== undefined && workers.has(e.agentId) ? agents.get(e.agentId) : undefined
+    const usage = result?.usage
+    if (taskId !== undefined && usage !== undefined && usage !== null) {
+      weights.set(taskId, usage.input_tokens + usage.cache_read_input_tokens + usage.cache_creation_input_tokens)
+    }
+
+    return result
+  })
+
+  on('command.run', { command: 'conduct' }, async ($, e) => {
+    const asked = conducting(e.args)
+    if ('error' in asked) return { text: asked.error }
+    const { id, source, title } = asked
+    if (id === UNBIND) return { text: `"${UNBIND}" is what /board takes to let go of a run, so no run can have that name: give another with id=<run id>.` }
+    if (root === undefined) root = (await $.session.repo())?.root ?? null
+    if (root === null) return { text: 'This session is not inside a git repository, so there is nowhere to keep a run.' }
+    // A spec that is not there is a mistyped path: said now, not after the orchestrator went looking for it.
+    if (asked.kind === 'spec') {
+      const isThere = (await $.fs.exists(source).catch(() => false)) || (!source.startsWith('/') && (await $.fs.exists(`${root}/${source}`).catch(() => false)))
+      if (!isThere) return { text: `There is no file ${source} here, so there is nothing to start a run from. For an issue, give its number: /conduct #12.` }
+    }
+    const path = ledgerPath(root, id)
+    if (await $.fs.exists(path)) {
+      return {
+        text: `Run ${id} exists already: /board ${id} binds this session to it. For another run from the same ${asked.kind === 'issue' ? 'issue' : 'spec'}, give it a name of its own: /conduct ${source} id=<run id>.`,
+      }
+    }
+    const now = await $.clock.now()
+    await $.fs.write(path, `${JSON.stringify(newRun(id, source, iso(now), title), null, 2)}\n`)
+    await flush($)
+    await bind($, id)
+    await update($, nowMs, () => now)
+    seen = undefined
+    await refresh($, true)
+    await $.ui.open({ id: PANE, title: TITLE })
+    asks.push(planning(id, source, title))
+
+    return {
+      text: `Run ${id} is started from ${source}${title === undefined ? '' : `, called "${title}"`}. The plan comes next; nothing starts before you /approve it.`,
+    }
+  })
+
+  on('command.run', { command: 'approve' }, async $ => {
+    const path = await boundLedger($)
+    if (path === undefined) return { text: await unbound($) }
+    const written = await mutate($, path, raw => {
+      const outcome = approvePlan(raw)
+
+      return { value: outcome, isChanged: outcome.isChanged }
+    })
+    if (written.error !== undefined) return { text: written.error }
+    if (!written.value.isError) asks.push(APPROVED)
+    seen = undefined
+    await refresh($, false)
+
+    return { text: written.value.text }
+  })
+
+  on('command.run', { command: 'pause' }, $ => hold($, true))
+  on('command.run', { command: 'unpause' }, $ => hold($, false))
+
+  on('command.run', { command: 'merged' }, async ($, e) => {
+    const taskId = e.args.trim()
+    if (taskId === '' || /\s/.test(taskId)) {
+      return { text: 'Say which task: /merged <task id>. It marks the task done by your word that its pull request is merged.' }
+    }
+    const path = await boundLedger($)
+    if (path === undefined) return { text: await unbound($) }
+    const at = iso(await $.clock.now())
+    const written = await mutate($, path, raw => {
+      const outcome = ownerSaysMerged(raw, at, taskId)
+
+      return { value: outcome, isChanged: outcome.isChanged }
+    })
+    seen = undefined
+    await refresh($, false)
+    // What hangs on the task the owner just closed reaches the orchestrator with its next tool result.
+    if (written.error === undefined && !written.value.isError) carry(written.value)
+
+    return { text: written.error ?? written.value.text }
+  })
+
+  on('command.run', { command: 'rotate' }, async $ => {
+    if ((await boundLedger($)) === undefined) return { text: 'This session is bound to no run, so there is no handover to write: /board <run id> binds it.' }
+    isRotateAsked = true
+
+    return { text: 'Compaction asked for: it runs once no turn is running.' }
+  })
+
+  on('command.run', { command: 'tier' }, async ($, e) => {
+    const [taskId, tier, ...rest] = e.args.trim().split(/\s+/)
+    if (taskId === undefined || taskId === '' || tier === undefined || rest.length > 0) {
+      return { text: `Say which task and which tier: /tier <task id> <${TIERS.join('|')}>.` }
+    }
+
+    return { text: await pick($, taskId, tier) }
+  })
+
+  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+    const { Box, Text } = $.ui.resolve(e)
+    const state = await read($, board)
+    const now = await read($, nowMs)
+    const isViewOnly = (await read($, pinnedRun)) === null
+
+    const heading = (label: string, count: number) => (
+      <Text bold>
+        {label} <Text dimColor>{String(count)}</Text>
+      </Text>
+    )
+    const task = (row: TaskRow, color?: 'success' | 'error' | 'warning') => (
+      <Box flexDirection="column">
+        <Text wrap="truncate-end" color={color} dimColor={row.status === 'done'}>
+          <Text bold>{row.id}</Text> {row.title}
+        </Text>
+        <Text wrap="truncate-end" dimColor>
+          {'  '}
+          {detail(row)}
+        </Text>
+      </Box>
+    )
+    const section = (
+      label: string,
+      rows: readonly TaskRow[],
+      color?: 'success' | 'error' | 'warning',
+      count = rows.length,
+    ) =>
+      rows.length > 0 && (
+        <Box flexDirection="column" marginTop={1}>
+          {heading(label, count)}
+          {rows.map(row => task(row, color ?? (row.status === 'green' ? 'success' : undefined)))}
+        </Box>
+      )
+
+    if (state.ledger === null) {
+      return (
+        <Box flexDirection="column">
+          <Text bold>No run to show</Text>
+          <Text dimColor wrap="wrap">
+            {state.error ?? `A run's ledger is read from ${RUNS_DIR}/<run id>/ledger.json.`}
+          </Text>
+        </Box>
+      )
+    }
+
+    const view = boardView(state.ledger, now)
+    const failure = state.error !== null && (
+      <Box flexDirection="column" marginBottom={1}>
+        <Text color="error" wrap="wrap">
+          Ledger not readable: {state.error}
+        </Text>
+        <Text dimColor>Showing the last good read.</Text>
+      </Box>
+    )
+
+    const tzOffsetMin = -new Date().getTimezoneOffset()
+    const updated = state.updatedMs === undefined ? undefined : clock(state.updatedMs, tzOffsetMin)
+
+    // The owner's say on tiers, before dispatch: one picker per queued task of a bound run.
+    const queued = isViewOnly ? [] : [...view.next, ...view.waiting]
+    const pickers = (Select: Elements['desktop']['Select']) =>
+      queued.length > 0 && (
+        <Box flexDirection="column" marginTop={1}>
+          <Text dimColor>Tier before a task starts</Text>
+          {queued.slice(0, PICKERS_SHOWN).map(row => (
+            <Select
+              key={`tier-${row.id}`}
+              label={`${row.id} `}
+              value={row.tier}
+              options={TIER_OPTIONS}
+              onSelect={value => void pick($, row.id, value).then(text => $.ui.toast(text))}
+            />
+          ))}
+          {queued.length > PICKERS_SHOWN && (
+            <Text dimColor>{`and ${queued.length - PICKERS_SHOWN} more: /tier <task id> <tier>`}</Text>
+          )}
+        </Box>
+      )
+
+    if (e.surface !== 'terminal') {
+      const { Svg } = $.ui.resolve(e)
+      const Select = e.surface === 'mobile' ? undefined : $.ui.resolve(e).Select
+      const picture = dashboardSvg(view, {
+        width: Math.min(720, Math.max(260, e.props.bodyColumns * PX_PER_COLUMN)),
+        timeline: timeline(state.ledger, now, tzOffsetMin),
+        runMinutes: runMinutes(state.ledger, now),
+        source: state.ledger.run.source,
+        updated,
+        isViewOnly,
+      })
+
+      return (
+        <Box flexDirection="column">
+          {failure}
+          <Svg source={picture.source} alt={picture.alt} />
+          {Select !== undefined && pickers(Select)}
+        </Box>
+      )
+    }
+
+    const earlier = view.done.length - DONE_SHOWN
+
+    return (
+      <Box flexDirection="column">
+        <Text bold wrap="truncate-end">
+          {view.title}
+        </Text>
+        <Text dimColor wrap="wrap">
+          {summary(view)}
+        </Text>
+        {state.error !== null && <Box marginTop={1} />}
+        {failure}
+        {view.problems.length > 0 && (
+          <Box flexDirection="column" marginTop={1}>
+            {heading('PROBLEMS', view.problems.length)}
+            {view.problems.map(one => (
+              <Box flexDirection="column">
+                <Text wrap="wrap" color={one.severity === 'blocker' ? 'error' : one.severity === 'warning' ? 'warning' : undefined}>
+                  <Text bold>{one.id}</Text> {one.text}
+                </Text>
+                <Text dimColor wrap="truncate-end">
+                  {'  '}
+                  {problemDetail(one)}
+                </Text>
+              </Box>
+            ))}
+          </Box>
+        )}
+        {section('NEEDS A DECISION', view.attention, 'warning')}
+        {view.questions.length > 0 && (
+          <Box flexDirection="column" marginTop={1}>
+            {heading('QUESTIONS', view.questions.length)}
+            {view.questions.map(one => (
+              <Text wrap="wrap">
+                <Text bold>{one.id}</Text> {one.text} <Text dimColor>{`(${one.from})`}</Text>
+              </Text>
+            ))}
+          </Box>
+        )}
+        {section('BUILDING', view.building)}
+        {section('HANDED BACK', view.returned)}
+        {section('REVIEW', view.review)}
+        {section('NEXT', view.next)}
+        {section('WAITING', view.waiting)}
+        {section('DONE', view.done.slice(0, DONE_SHOWN), undefined, view.done.length)}
+        {earlier > 0 && <Text dimColor>{`  and ${earlier} earlier`}</Text>}
+        {view.resolved > 0 && (
+          <Box marginTop={1}>
+            <Text dimColor>{`${view.resolved} ${view.resolved === 1 ? 'problem' : 'problems'} resolved`}</Text>
+          </Box>
+        )}
+        {pickers($.ui.resolve(e).Select)}
+        {orchestratorLine(view.orchestrator) !== undefined && (
+          <Box marginTop={1}>
+            <Text dimColor>{orchestratorLine(view.orchestrator)}</Text>
+          </Box>
+        )}
+        {updated !== undefined && (
+          <Box marginTop={1}>
+            <Text dimColor>{`Updated ${updated}${isViewOnly ? ' · view only' : ''}`}</Text>
+          </Box>
+        )}
+      </Box>
+    )
+  })
+}
