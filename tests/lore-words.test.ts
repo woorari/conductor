@@ -79,7 +79,7 @@ describe('the guard fails closed where it cannot read a command', () => {
   })
 
   test('lore in any case is lore (APFS is case-insensitive), and a program the shell works out is refused', () => {
-    for (const command of ['LORE push x', 'Lore branch merge y', '/Users/me/.local/bin/LoRe push x', '"$HOME/bin/build.sh" --fast', '/usr/*/bin/lore push x', '~/.local/bin/lo?e push x', '/bin/{lore,true} push x']) {
+    for (const command of ['LORE push x', 'Lore branch merge y', '/Users/me/.local/bin/LoRe push x', '"$HOME/bin/build.sh" --fast', '/usr/*/bin/lore push x', '~/.local/bin/lo?e push x', '/bin/{lore,true} push x', '/bin/lor{e..e} push x']) {
       expect(loreByHand(command, WORKER), command).toBeDefined()
     }
   })

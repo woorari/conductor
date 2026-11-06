@@ -371,7 +371,7 @@ export function loreByHand(command: string, ctx: { base: string; runBranch?: str
   // A program named only by variables (`$L$R`) could be lore whatever the line says: refused in a bound Lore run.
   for (const segment of plain.split(/&&|\|\||\|&|;|\||&|\n/)) {
     const first = tokens(segment.trim()).map(one => one.replace(/^[({]+/, '')).find(one => one !== '' && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(one)) ?? ''
-    if (/[$*?[]|\{[^}]*,[^}]*\}/.test(first)) return 'runs a program whose name the shell works out (a variable, a pattern or braces), which the board cannot read'
+    if (/[$*?[{]/.test(first)) return 'runs a program whose name the shell works out (a variable, a pattern or braces), which the board cannot read'
   }
   if (!/(^|[^A-Za-z0-9_])lore($|[^A-Za-z0-9_])/i.test(plain)) return undefined
   if (/\$\(|`|<\(|>\(/.test(command) || /(^|[\s;&|(])eval\s/.test(plain)) {
