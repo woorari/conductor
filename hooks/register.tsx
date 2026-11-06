@@ -1502,8 +1502,10 @@ async function loreMergeTool($: EngineInterface, call: ToolCall, isCheckOnly: bo
   const now = await $.clock.now()
   const asked = loreReady(ledger, callerOf(call.agentId), call, await flights($, ledger.run.id, now))
   if ('error' in asked) return fail(asked.error)
-  const { task, branch, revision } = asked
+  const { task, revision } = asked
   const id = task.id
+  // The branch is the one the mod named: never a name written on the task, which reaches lore as an argument.
+  const branch = taskBranchOf(runLore.branch, id)
   const blocks = [...asked.blocks]
   const head = branchInfoOf((await lore($, ['branch', 'info', branch], run)).out)?.remoteLatest
   if (head === undefined) blocks.push(`lore did not say where ${branch} stands on the server.`)
@@ -1526,8 +1528,18 @@ async function loreMergeTool($: EngineInterface, call: ToolCall, isCheckOnly: bo
   }
   const synced = await lore($, ['branch', 'switch', runLore.branch, '--reset'], run, LONG_MS)
   if (synced.exitCode !== 0) return giveUp(`the run's workspace could not be brought to ${runLore.branch}: ${lastLine(synced)}`)
-  const merged = await lore($, ['branch', 'merge', branch, '--message', `${id}: ${task.title}`], run, LONG_MS)
+  const runHead = branchInfoOf((await lore($, ['branch', 'info', runLore.branch], run)).out)?.remoteLatest
+  if (runHead === undefined) return giveUp(`lore did not say where ${runLore.branch} stands on the server`)
+  const merged = await lore($, ['branch', 'merge', branch, `--message=${id}: ${task.title}`], run, LONG_MS)
   const outcome = mergeOf(merged.exitCode, merged.out)
+  // Lore merges a branch's latest: one pushed between the look above and the merge is not the judged revision.
+  if (outcome.kind === 'merged' && outcome.source !== revision) {
+    await lore($, ['branch', 'reset', runHead, '--branch', runLore.branch], run)
+    await lore($, ['branch', 'switch', runLore.branch, '--reset'], run, LONG_MS)
+    const took = outcome.source === undefined ? 'a revision lore did not name' : rev7(outcome.source)
+
+    return giveUp(`lore took in ${took}, not the judged ${rev7(revision)}: the branch moved meanwhile. Nothing was pushed; judge it again`)
+  }
   if (outcome.kind === 'conflict') {
     await lore($, ['branch', 'merge', 'abort'], run, LONG_MS)
     const said = await settle($, path, raw => conflicted(raw, at, id, outcome.files))

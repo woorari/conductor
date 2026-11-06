@@ -39,6 +39,7 @@ describe('a project config', () => {
     expect(error('{"lore": {"minFreeGB": -1}}')).toBe('config.json: lore.minFreeGB is a whole number of gigabytes from 0.')
     expect(error('{"linear": {"team": "abc"}}')).toBe('config.json: linear.team is a Linear team key, like ABC.')
     expect(error('{oops')).toBe('config.json is not valid JSON.')
+    expect(error('{"lore": {"branchPrefix": "-f"}}')).toBe('config.json: lore.branchPrefix is letters, digits and . _ / -, starting with a letter or digit.')
   })
 })
 

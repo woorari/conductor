@@ -40,7 +40,11 @@ export type LoreStatus = {
   isClean: boolean
 }
 
-export type MergeOutcome = { kind: 'merged'; revision: string } | { kind: 'conflict'; files: string[] } | { kind: 'failed'; reason: string }
+export type MergeOutcome =
+  /** `source`: the revision of the branch it took in, as lore names it (a `branch merge` does; a `merge into` does not). */
+  | { kind: 'merged'; revision: string; source?: string }
+  | { kind: 'conflict'; files: string[] }
+  | { kind: 'failed'; reason: string }
 
 export type PushOutcome =
   | { kind: 'pushed'; revision: string }
@@ -174,7 +178,10 @@ export function mergeOf(exitCode: number, out: string): MergeOutcome {
   const committed = /Committed merged repository state \d+ -> ([0-9a-f]{64})/.exec(out)?.[1]
   const signed = /^Signature\s*:\s*([0-9a-f]{64})/m.exec(out)?.[1]
   const merged = committed ?? signed
-  return merged === undefined ? { kind: 'failed', reason: `lore did not say what it merged: ${failure(exitCode, out)}` } : { kind: 'merged', revision: merged }
+  const source = /^Starting merge of branch \S+ revision ([0-9a-f]{64})/m.exec(out)?.[1]
+  if (merged === undefined) return { kind: 'failed', reason: `lore did not say what it merged: ${failure(exitCode, out)}` }
+
+  return { kind: 'merged', revision: merged, ...(source === undefined ? {} : { source }) }
 }
 
 export function pushOf(exitCode: number, out: string): PushOutcome {

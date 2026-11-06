@@ -26,6 +26,7 @@ async function green($: Engine, on: Parameters<typeof lored>[1], ledger: Ledger 
   const { files, engine } = await lored($, on, ledger)
   engine.lore.unshift(
     answers(['branch', 'info', T1_BRANCH], ok(BRANCH_INFO_PUSHED)),
+    answers(['branch', 'info', RUN_BRANCH], ok(`Branch ${RUN_BRANCH}\n  ID: 01a1b056f6bb701783e7a1beb2aa49a0\n  Latest: ${REV_MAIN}\n  Remote Latest: ${REV_MAIN}\n`)),
     answers(['branch', 'merge', 'abort'], ok(MERGE_ABORT)),
     answers(['branch', 'merge'], ok(MERGE_CLEAN)),
     answers(['push'], ok(PUSH_RUN), RUN_WS),
@@ -49,7 +50,7 @@ test('a green task is merged into the run branch, pinned to its judged revision'
   expect(said.text).toBe(`Merged: t1 is on ${RUN_BRANCH} as ${REV_RUN.slice(0, 7)}, and the task is done. Its workspace is removed: everything in it is in Lore. Go on at once: start what can start and merge the next green task.`)
   const ran = ranIn(engine, RUN_WS)
   expect(ran).toContain(`branch switch ${RUN_BRANCH} --reset`)
-  expect(ran).toContain(`branch merge ${T1_BRANCH} --message t1: Task t1`)
+  expect(ran).toContain(`branch merge ${T1_BRANCH} --message=t1: Task t1`)
   expect(ran).toContain('push')
   expect(ran).toContain(`lock release --branch ${T1_BRANCH}`)
   const t1 = stored(files).tasks[0]
@@ -147,4 +148,26 @@ test('a Lore task is handed back with its revision; with one it is done only by 
   expect((await call($, 'task_update', { task: 't1', status: 'review', revision: REV_T1 }, 'a1')).text).toContain('t1: status review, revision')
   expect((await call($, 'task_update', { task: 't1', status: 'done' })).text).toContain('call mcp__conductor__merge')
   expect((await call($, 'task_update', { task: 't2', status: 'done' })).text, 'a task with no code is done on the orchestrator\'s word').toContain('t2: status done')
+})
+
+test('a merge that took in another revision than the judged one is not pushed', async ($, on) => {
+  const { files, engine } = await green($, on)
+  engine.lore.unshift(answers(['branch', 'merge', T1_BRANCH], ok(MERGE_CLEAN.replace(REV_T1, REV_MAIN))), answers(['branch', 'reset'], ok()))
+
+  const said = await call($, 'merge', MERGE)
+  expect(said.text).toContain('not the judged')
+  const ran = ranIn(engine, RUN_WS)
+  expect(ran).not.toContain('push')
+  expect(ran).toContain(`branch reset ${REV_MAIN} --branch ${RUN_BRANCH}`)
+  expect(stored(files).tasks[0]?.status).toBe('green')
+  expect(stored(files).merge).toBeUndefined()
+})
+
+test('the branch merged is the one the mod names, never one written on the task', async ($, on) => {
+  const { engine } = await green($, on, { ...GREEN, tasks: [{ ...GREEN.tasks[0]!, branch: '--force' }, GREEN.tasks[1]!] })
+
+  await call($, 'merge', MERGE)
+  const merges = ranIn(engine, RUN_WS).filter(one => one.startsWith('branch merge '))
+  expect(merges[0]).toBe(`branch merge ${T1_BRANCH} --message=t1: Task t1`)
+  expect(ranIn(engine, RUN_WS).some(one => one.includes('--force'))).toBe(false)
 })

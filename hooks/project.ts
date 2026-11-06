@@ -62,6 +62,10 @@ export function parseConfig(text: string | undefined): { config: ProjectConfig }
         if (lore[key] !== undefined && typeof lore[key] !== 'string') throw new Wrong(`config.json: lore.${key} is a string.`)
       }
       if (typeof lore.workspaces === 'string' && !lore.workspaces.startsWith('/')) throw new Wrong('config.json: lore.workspaces is an absolute path.')
+      // A branch name reaches lore as an argument: one that starts with a dash would be read as an option.
+      if (typeof lore.branchPrefix === 'string' && !/^(?:[A-Za-z0-9][A-Za-z0-9._/-]*)?$/.test(lore.branchPrefix)) {
+        throw new Wrong('config.json: lore.branchPrefix is letters, digits and . _ / -, starting with a letter or digit.')
+      }
       for (const key of ['carry', 'lockPatterns'] as const) {
         if (lore[key] !== undefined && !strings(lore[key])) throw new Wrong(`config.json: lore.${key} is a list of paths or patterns.`)
       }

@@ -430,6 +430,8 @@ export function updateTask(raw: Raw, at: string, caller: Caller, input: Record<s
     return refused(`You are ${describe(caller)} and may only update that task, not ${id}.`)
   }
   const said: string[] = []
+  // A green task whose revision moved: its judgement no longer covers it.
+  let movedFromGreen = false
   // What the status change does to the problems that hang on this task: said once the change is made.
   let isNowDone = false
   let isNowFailed = false
@@ -488,6 +490,10 @@ export function updateTask(raw: Raw, at: string, caller: Caller, input: Record<s
     task.pr = input.pr
     said.push(`PR ${input.pr}`)
   }
+  const inLore = typeof (raw.run as Record<string, unknown> | undefined)?.lore === 'object'
+  if (input.branch !== undefined && inLore && caller.kind === 'worker') {
+    return refused(`The mod names a task's branch in a Lore run: ${id}'s is ${String(task.branch ?? 'made when its worker starts')}. Hand back with the revision you pushed.`)
+  }
   if (input.branch !== undefined) {
     if (typeof input.branch !== 'string' || tidy(input.branch) === '') return refused('branch is the branch’s name.')
     task.branch = tidy(input.branch)
@@ -495,10 +501,17 @@ export function updateTask(raw: Raw, at: string, caller: Caller, input: Record<s
   }
   if (input.revision !== undefined) {
     if (typeof input.revision !== 'string' || !REVISION.test(input.revision)) return refused('revision is the Lore revision its branch was pushed at: 64 hex characters.')
-    // A new revision is a new change: a check run on another one says nothing of it.
-    if (task.revision !== input.revision) delete task.check
+    // A new revision is a new change: a check run on another one says nothing of it, and a judgement of another
+    // one does not cover it. A green task whose revision moves is back in review until it is judged again.
+    const isNew = task.revision !== input.revision
+    if (isNew) delete task.check
     task.revision = input.revision
     said.push(`revision ${input.revision.slice(0, 7)}`)
+    if (isNew && task.status === 'green' && input.status === undefined) {
+      task.status = 'review'
+      said.push('back in review')
+      movedFromGreen = true
+    }
   }
   if (said.length === 0) return refused('Nothing to change: give status, tier, note, ticket, pr, branch or revision.')
 
@@ -506,7 +519,12 @@ export function updateTask(raw: Raw, at: string, caller: Caller, input: Record<s
   const lost = isNowFailed ? lostWith(raw, id) : []
   const lostText = lost.length === 0 ? '' : `${named(lost)} ${lost.length === 1 ? 'has' : 'have'} no task now.`
   // A worker that gives its task up is told no more than it did; the orchestrator hears what that leaves loose.
-  if (caller.kind === 'worker') return { ...changed(base), ...(lostText === '' ? {} : { tell: `Run board: ${id} failed. ${lostText}` }) }
+  const movedText = movedFromGreen ? `Run board: ${id}'s branch moved to a revision nobody judged: it is back in review, so judge it again before it is merged.` : ''
+  if (caller.kind === 'worker') {
+    const tell = [lostText === '' ? '' : `Run board: ${id} failed. ${lostText}`, movedText].filter(one => one !== '').join(' ')
+
+    return { ...changed(base), ...(tell === '' ? {} : { tell }) }
+  }
 
   return changed([base, isNowDone ? afterDone(raw, id) : '', lostText].filter(one => one !== '').join(' '))
 }

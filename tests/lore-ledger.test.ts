@@ -106,3 +106,21 @@ describe('tickets that are Linear keys', () => {
     expect(ticketOf('problem_assign')).toMatchObject(either)
   })
 })
+
+describe('a judged revision stays the judged one', () => {
+  const lore = { remote: 'lores://lore.example.test:41337', repository: 'game', base: 'main', branch: 'conductor/ABC-12' }
+  const loreRaw = (): Raw => ({ ...raw(), run: { ...LEDGER.run, lore }, tasks: [{ id: 't1', title: 'One', tier: 'sonnet', status: 'green', branch: 'conductor/ABC-12/t1', revision: REV_T1, agentId: 'a1' }] }) as Raw
+  const worker: Caller = { kind: 'worker', taskId: 't1' }
+
+  test('a new revision from a worker sends a green task back to review', () => {
+    const ledger = loreRaw()
+    const said = updateTask(ledger, AT, worker, { task: 't1', revision: REV_RUN })
+    expect(said.isError).toBe(false)
+    expect(ledger.tasks[0]).toMatchObject({ status: 'review', revision: REV_RUN })
+    expect(said.tell).toContain('judge it again')
+  })
+
+  test('in a Lore run a worker does not name its branch: the mod does', () => {
+    expect(updateTask(loreRaw(), AT, worker, { task: 't1', branch: 'elsewhere' }).text).toContain('The mod names a task\'s branch in a Lore run')
+  })
+})

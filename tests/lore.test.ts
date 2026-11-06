@@ -44,7 +44,7 @@ describe('Lore output', () => {
 
   test('a conflicted merge is a conflict although lore exits 0', () => {
     expect(mergeOf(0, MERGE_CONFLICT)).toEqual({ kind: 'conflict', files: ['a.txt'] })
-    expect(mergeOf(0, MERGE_CLEAN)).toEqual({ kind: 'merged', revision: REV_RUN })
+    expect(mergeOf(0, MERGE_CLEAN), 'with the revision it took in').toEqual({ kind: 'merged', revision: REV_RUN, source: REV_T1 })
     expect(mergeOf(0, MERGE_INTO_DONE)).toEqual({ kind: 'merged', revision: REV_ON_MAIN })
     const refused = mergeOf(17, MERGE_INTO_PROTECTED)
     expect(refused.kind).toBe('failed')
