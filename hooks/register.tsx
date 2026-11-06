@@ -439,9 +439,9 @@ const LONG_MS = 600_000
 const LIST_SCRIPT = 'find "$1" -mindepth 1 -type d -exec printf "%s/\\n" {} + > "$2" && find "$1" -mindepth 1 -type f >> "$2"'
 
 /** Runs a program without a shell. Never throws: one that could not run, or ran out of time, answers a non-zero exit with why. */
-async function runProgram($: EngineInterface, argv: readonly string[], timeoutMs = 30_000): Promise<Ran> {
+async function runProgram($: EngineInterface, argv: readonly string[], timeoutMs = 30_000, env?: Record<string, string>): Promise<Ran> {
   try {
-    const ran = await $.process.run([...argv], { timeoutMs })
+    const ran = await $.process.run([...argv], { timeoutMs, ...(env === undefined ? {} : { env }) })
 
     return { exitCode: ran.exitCode, stdout: ran.stdout, stderr: ran.stderr, out: `${ran.stdout}${ran.stderr === '' ? '' : `\n${ran.stderr}`}` }
   } catch (cause) {
@@ -530,6 +530,108 @@ async function prepareWorkspace($: EngineInterface, at: Making): Promise<{ path:
   }
 
   return { path: at.path }
+}
+
+/**
+ * Starts the project's check on one revision, detached: the shell starts the
+ * program in the background and returns at once, so a check may run longer
+ * than one program may (the engine's ten minutes). The program and its
+ * arguments are the script's parameters, never part of it. Its output goes to
+ * a log beside the ledger, its exit code to `<log>.exit`, its process id to
+ * `<log>.pid`; the timer reads them.
+ */
+const CHECK_SCRIPT = 'cd "$1" || exit 97; shift 2; ( "$@" > "$OUT" 2>&1; echo $? > "$OUT.exit" ) > /dev/null 2>&1 < /dev/null & echo $! > "$OUT.pid"'
+
+const checkLog = (root: string, runId: string, target: string, revision: string): string => `${root}/${RUNS_DIR}/${runId}/checks/${target}-${rev7(revision)}.log`
+
+/** Starts a check for a task (or, with no task, for the run branch) and records it as running. Never throws. */
+async function startCheck($: EngineInterface, path: string, ledger: Ledger, target: { taskId?: string; cwd: string; revision: string }): Promise<void> {
+  try {
+    const check = ledger.run.config?.check
+    const here = await backendOf($)
+    if (check === undefined || here === null) return
+    const log = checkLog(here.root, ledger.run.id, target.taskId ?? '_run', target.revision)
+    await runProgram($, ['mkdir', '-p', log.slice(0, log.lastIndexOf('/'))])
+    const started = await runProgram($, ['/bin/sh', '-c', CHECK_SCRIPT, 'sh', target.cwd, '--', ...check.argv], 30_000, { OUT: log })
+    const at = iso(await $.clock.now())
+    const record = started.exitCode === 0 ? { revision: target.revision, verdict: 'running', at } : { revision: target.revision, verdict: 'failed', at, line: `the check could not start: ${lastLine(started)}`.slice(0, 200) }
+    await mutate($, path, raw => {
+      const holder = target.taskId === undefined ? (raw.run as Record<string, unknown>) : raw.tasks.find(one => one.id === target.taskId)
+      if (holder === undefined) return { value: undefined, isChanged: false }
+      holder.check = record
+
+      return { value: undefined, isChanged: true }
+    })
+  } catch {
+    // A check that could not start is started again when its task is judged green again.
+  }
+}
+
+/** A look at the checks under way: each one that ended, or ran out of time, is written down and told. Called by the timer. */
+let isLookingAtChecks = false
+async function watchChecks($: EngineInterface): Promise<void> {
+  if (isLookingAtChecks) return
+  isLookingAtChecks = true
+  try {
+    const path = await boundLedger($)
+    const here = await backendOf($)
+    if (path === undefined || here === null) return
+    const ledger = parseLedger((await textAt($, path)) ?? '').ledger
+    const check = ledger?.run.config?.check
+    if (ledger === undefined || check === undefined) return
+    const running = [
+      ...ledger.tasks.flatMap(one => (one.check?.verdict === 'running' ? [{ taskId: one.id as string | undefined, record: one.check }] : [])),
+      ...(ledger.run.check?.verdict === 'running' ? [{ taskId: undefined, record: ledger.run.check }] : []),
+    ]
+    const now = await $.clock.now()
+    for (const { taskId, record } of running) {
+      const log = checkLog(here.root, ledger.run.id, taskId ?? '_run', record.revision)
+      const exit = await textAt($, `${log}.exit`)
+      let ended: { verdict: 'passed' | 'failed'; line?: string } | undefined
+      if (exit !== undefined) {
+        const code = Number(exit.trim())
+        const last = ((await textAt($, log)) ?? '').split('\n').map(one => one.trim()).filter(one => one !== '').at(-1)
+        ended = code === 0 ? { verdict: 'passed' } : { verdict: 'failed', line: (last ?? `exit ${exit.trim()}`).slice(0, 200) }
+      } else if (now - Date.parse(record.at) > check.timeoutMin * 60_000) {
+        const pid = (await textAt($, `${log}.pid`))?.trim()
+        if (pid !== undefined && /^\d+$/.test(pid)) await runProgram($, ['kill', pid])
+        ended = { verdict: 'failed', line: `timed out after ${check.timeoutMin} min` }
+      }
+      if (ended === undefined) continue
+      const at = iso(now)
+      const whose = taskId ?? `the run branch (${ledger.run.lore?.branch ?? 'run'})`
+      const tell = `Run board: the check on ${whose} ${ended.verdict === 'passed' ? 'passed' : `failed: ${ended.line ?? ''}`} (${rev7(record.revision)}).`
+      const finished = ended
+      await mutate($, path, raw => {
+        const holder = taskId === undefined ? (raw.run as Record<string, unknown>) : raw.tasks.find(one => one.id === taskId)
+        const kept = holder?.check as { revision?: string } | undefined
+        if (holder === undefined || kept?.revision !== record.revision) return { value: undefined, isChanged: false }
+        holder.check = { revision: record.revision, verdict: finished.verdict, at, ...(finished.line === undefined ? {} : { line: finished.line }) }
+
+        return { value: undefined, isChanged: true }
+      })
+      carry({ isChanged: true, isError: false, text: tell, tell })
+    }
+  } catch {
+    // Looked at again on the next tick.
+  } finally {
+    isLookingAtChecks = false
+  }
+}
+
+/** After a task_update: a Lore task judged green whose revision has no check on it gets its check started. Never throws. */
+async function checkOnGreen($: EngineInterface, taskId: unknown): Promise<void> {
+  try {
+    const path = await boundLedger($)
+    if (path === undefined || typeof taskId !== 'string') return
+    const ledger = parseLedger((await textAt($, path)) ?? '').ledger
+    const task = ledger?.tasks.find(one => one.id === taskId)
+    if (ledger?.run.lore === undefined || ledger.run.config?.check === undefined || task === undefined) return
+    if (task.status !== 'green' || task.revision === undefined || task.workspace === undefined || task.check?.revision === task.revision) return
+    await startCheck($, path, ledger, { taskId, cwd: task.workspace, revision: task.revision })
+  } catch {
+    // Nothing started.
+  }
 }
 
 /**
@@ -1634,6 +1736,9 @@ async function runSyncBase($: EngineInterface, call: ToolCall): Promise<{ result
   if (result.kind === 'refused') return fail(`the run branch could not be pushed: ${result.text}.`)
   const written = await settle($, path, raw => baseBroughtIn(raw, baseNow))
   if (written === undefined) return fail('the board could not be written.')
+  const head2 = result.kind === 'pushed' ? result.revision : outcome.revision
+  const now2 = parseLedger((await textAt($, path)) ?? '').ledger
+  if (now2 !== undefined) await startCheck($, path, now2, { cwd: run, revision: head2 })
   const landed = result.kind === 'pushed' ? rev7(result.revision) : rev7(outcome.revision)
 
   return say(`Brought ${base} into ${runLore.branch} as ${landed}. A new approval is needed: tell the owner what changed and ask them to type /approve-main.`)
@@ -1735,6 +1840,9 @@ async function loreMergeTool($: EngineInterface, call: ToolCall, isCheckOnly: bo
   isolated.delete(id)
   workspaces.delete(id)
   await issueDone($, path, id)
+  // The last task merged: the run branch's own head gets the project's check before it may go into the base.
+  const after = parseLedger((await textAt($, path)) ?? '').ledger
+  if (after !== undefined && after.tasks.every(one => one.status === 'done')) await startCheck($, path, after, { cwd: run, revision: sent.revision })
 
   return say(done?.text ?? `Merged: ${id} is on ${runLore.branch} as ${rev7(sent.revision)}, but the board could not be written.`)
 }
@@ -2062,6 +2170,7 @@ export const register: Register = (on, options) => {
       void flush($)
       void rotation($)
       if (flushTicks % WATCH_EVERY === 0) {
+        void watchChecks($)
         void watchClaim($)
         void watchMain($)
         void lookAgain($)
@@ -2607,8 +2716,8 @@ export const register: Register = (on, options) => {
       return { isChanged: false, isError: false, text }
     })
   }).catch(broke)
-  on('tool.call', { tool: /^mcp__conductor__task_update$/ }, ($, e) =>
-    answer($, e as unknown as ToolCall, (raw, at, caller, input) => {
+  on('tool.call', { tool: /^mcp__conductor__task_update$/ }, async ($, e) => {
+    const said = await answer($, e as unknown as ToolCall, (raw, at, caller, input) => {
       const outcome = updateTask(raw, at, caller, input)
       if (outcome.isError || input.status !== 'green' || typeof input.task !== 'string') return outcome
       // A green task is what the tasks behind it were waiting for: said here, where the orchestrator reads it.
@@ -2619,8 +2728,11 @@ export const register: Register = (on, options) => {
       if (ledger?.run.pausedAt !== undefined) return { ...outcome, text: `${outcome.text} The run is paused: once the owner types /unpause, these can start before this one is merged: ${names}.` }
 
       return { ...outcome, text: `${outcome.text} Can start now, before this one is merged: ${names}. Merge ${input.task} all the same as soon as nothing else is merging.` }
-    }),
-  ).catch(broke)
+    })
+    if (said.isError === undefined && (e as unknown as ToolCall).status === 'green') await checkOnGreen($, (e as unknown as ToolCall).task)
+
+    return said
+  }).catch(broke)
   on('tool.call', { tool: /^mcp__conductor__merge_check$/ }, ($, e) => mergeTool($, e as unknown as ToolCall, true)).catch(broke)
   on('tool.call', { tool: /^mcp__conductor__merge$/ }, ($, e) => mergeTool($, e as unknown as ToolCall, false)).catch(broke)
   on('tool.call', { tool: /^mcp__conductor__problem_report$/ }, ($, e) =>
@@ -2813,8 +2925,11 @@ export const register: Register = (on, options) => {
     await $.ui.open({ id: PANE, title: TITLE })
     asks.push(planning(id, source, title))
 
+    // The mod runs the project's check itself, without Claude Code's permission prompt: the owner sees the program now.
+    const checkLine = project.check === undefined ? '' : ` Its check command, which the mod runs on each judged revision: ${project.check.argv.join(' ')}.`
+
     return {
-      text: `Run ${id} is started from ${source}${title === undefined ? '' : `, called "${title}"`}. The plan comes next; nothing starts before you /approve it.`,
+      text: `Run ${id} is started from ${source}${title === undefined ? '' : `, called "${title}"`}. The plan comes next; nothing starts before you /approve it.${checkLine}`,
     }
   })
 

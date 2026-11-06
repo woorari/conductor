@@ -72,7 +72,7 @@ export const DF = `Filesystem 1024-blocks      Used Available Capacity Mounted o
 
 /** A bound session in a Lore workspace whose run's plan is approved, with every program answering as on a good day. */
 export async function lored($: Engine, on: Parameters<typeof world>[0], ledger: Ledger = RUN) {
-  mock.clock(on, { now: NOW })
+  const clock = mock.clock(on, { now: NOW })
   const files: Files = {
     [PATH]: { text: JSON.stringify(ledger), mtimeMs: 1 },
     [`${LORE_ROOT}/.loreignore`]: { text: '/Saved/\n/Intermediate/\n**/Intermediate/\n*.log\n.claude/conductor/runs/\n', mtimeMs: 1 },
@@ -102,7 +102,7 @@ export async function lored($: Engine, on: Parameters<typeof world>[0], ledger: 
   await startIn($)
   await board($, 'ABC-12')
 
-  return { files, engine }
+  return { files, engine, clock }
 }
 /** The lore commands that ran in a folder, as their arguments joined. */
 export const ranIn = (engine: World, cwd: string): string[] => loreRan(engine).filter(one => one.cwd === cwd).map(one => one.args.join(' '))

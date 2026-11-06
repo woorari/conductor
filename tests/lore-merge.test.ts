@@ -171,3 +171,14 @@ test('the branch merged is the one the mod names, never one written on the task'
   expect(merges[0]).toBe(`branch merge ${T1_BRANCH} --message=t1: Task t1`)
   expect(ranIn(engine, RUN_WS).some(one => one.includes('--force'))).toBe(false)
 })
+
+test('once the last task is merged, the run branch\'s own check starts in the run workspace', async ($, on) => {
+  const config = { check: { argv: ['./check.sh'], timeoutMin: 20 } }
+  const passed = { revision: REV_T1, verdict: 'passed' as const, at: '2026-10-09T10:20:00.000Z' }
+  const { engine } = await green($, on, { ...GREEN, run: { ...GREEN.run, config }, tasks: [{ ...GREEN.tasks[0]!, check: passed }] })
+
+  await call($, 'merge', MERGE)
+  const checks = engine.calls.filter(one => one.argv[0] === '/bin/sh' && one.argv.includes('--'))
+  expect(checks.map(one => one.argv[4])).toEqual([RUN_WS])
+  expect(checks[0]?.env).toEqual({ OUT: `${LORE_RUNS}/ABC-12/checks/_run-${REV_RUN.slice(0, 7)}.log` })
+})

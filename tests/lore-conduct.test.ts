@@ -55,6 +55,7 @@ test('/conduct ABC-12 starts a Linear run with the config frozen and the run bra
 
   const said = await conduct($, 'ABC-12 Retry the flaky upload')
   expect(said.text).toContain('Run ABC-12 is started from ABC-12')
+  expect(said.text, 'the owner sees the program the mod will run').toContain('Its check command, which the mod runs on each judged revision: ./check.sh')
   const { run } = stored(files, 'ABC-12')
   expect(run.source).toBe('ABC-12')
   expect(run.tickets).toBe('linear')

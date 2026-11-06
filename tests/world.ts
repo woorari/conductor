@@ -199,7 +199,7 @@ export type World = {
   /** How any other program answers (cp, df, rm, sh...): the first entry that matches; none matching is a program that is not there. */
   programs: LoreAnswer[]
   /** Every program run, with the folder it ran in. */
-  calls: { argv: string[]; cwd?: string; timeoutMs?: number }[]
+  calls: { argv: string[]; cwd?: string; timeoutMs?: number; env?: Record<string, string> }[]
   /** What `fs.list` answers for a folder, where a test says; other folders are derived from the files. */
   listings: Record<string, { name: string; kind: 'dir' | 'file' }[]>
   /** Folders that exist, for `fs.exists`: a Lore workspace's `.lore`, say. */
@@ -294,7 +294,7 @@ export function world(on: On, files: Files, repo: { root: string } | null = { ro
     state.processes.push([...e.argv])
     const isTokenAsked = e.argv.join(' ') === 'gh auth token'
     const cwd = e.init?.cwd
-    state.calls.push({ argv: [...e.argv], ...(cwd === undefined ? {} : { cwd }), ...(e.init?.timeoutMs === undefined ? {} : { timeoutMs: e.init.timeoutMs }) })
+    state.calls.push({ argv: [...e.argv], ...(cwd === undefined ? {} : { cwd }), ...(e.init?.timeoutMs === undefined ? {} : { timeoutMs: e.init.timeoutMs }), ...(e.init?.env === undefined ? {} : { env: { ...e.init.env } }) })
     const program = state.programs.find(one => one.match(e.argv, cwd))?.answer
     if (program !== undefined) {
       return { value: { exitCode: program.exitCode, stdout: program.stdout, stderr: program.stderr ?? '', isStdoutTruncated: false, isStderrTruncated: false } }
