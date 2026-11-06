@@ -34,9 +34,9 @@ import { dashboardSvg } from './dashboard'
 import { KEEP, ROTATE_AT, carried, handover } from './handover'
 import { LINEAR_KEY, RUN_ID, STATUSES, TIERS, parseLedger } from './ledger'
 import { LINEAR_API, M_CREATE, M_UPDATE, Q_ISSUE, Q_TEAM, apiKeyOf, createdOf, errorsOf, issueOf, issueText, stateFor, teamOf, updatedOf } from './linear'
-import { repositoryInfoOf } from './lore'
+import { branchInfoOf, ignoreRules, pushOf, repositoryInfoOf, statusOf } from './lore'
 import { CONFIG_PATH, LORE_DEFAULTS, PLACEHOLDER_SNIPPET, hasPlaceholder, parseConfig, runsIgnored } from './project'
-import { runBranchOf } from './workspace'
+import { removals, runBranchOf, taskBranchOf, topLevel, workspaceOf, workspacesOf } from './workspace'
 import type { RepositoryInfo } from './lore'
 import { pauseRun, unpauseRun } from './pause'
 import { LOOK_AGAIN_MIN, dueForLook, isUnderway, unsettled } from './problems'
@@ -289,11 +289,17 @@ function learn(ledger: Ledger, path: string): void {
     inbox.clear()
     handed.length = 0
     wakes.clear()
+    isolated.clear()
+    workspaces.clear()
     learnedFrom = path
     // What the ledger says still waits for a reader waits again after a reload.
     for (const delivery of waiting(ledger)) inbox.set(delivery.taskId, [...(inbox.get(delivery.taskId) ?? []), delivery])
   }
   for (const task of ledger.tasks) {
+    if (task.workspace !== undefined) {
+      isolated.add(task.id)
+      workspaces.set(task.id, task.workspace)
+    }
     if (task.agentId === undefined) continue
     agents.set(task.agentId, task.id)
     workers.add(task.agentId)
@@ -424,6 +430,128 @@ async function backendOf($: EngineInterface): Promise<Backend | null> {
   backend = { kind: 'lore', root: found, bin, info }
 
   return backend
+}
+
+/** How long a copy, a merge, a push or a listing of a large workspace may take: the engine's ceiling for one program. */
+const LONG_MS = 600_000
+/** Lists a copy's folders (each ending in /) and files into a file; the paths are parameters, never part of the script. */
+const LIST_SCRIPT = 'find "$1" -mindepth 1 -type d -exec printf "%s/\\n" {} + > "$2" && find "$1" -mindepth 1 -type f >> "$2"'
+
+/** Runs a program without a shell. Never throws: one that could not run, or ran out of time, answers a non-zero exit with why. */
+async function runProgram($: EngineInterface, argv: readonly string[], timeoutMs = 30_000): Promise<Ran> {
+  try {
+    const ran = await $.process.run([...argv], { timeoutMs })
+
+    return { exitCode: ran.exitCode, stdout: ran.stdout, stderr: ran.stderr, out: `${ran.stdout}${ran.stderr === '' ? '' : `\n${ran.stderr}`}` }
+  } catch (cause) {
+    const reason = because(cause)
+
+    return { exitCode: 1, stdout: '', stderr: reason, out: reason }
+  }
+}
+
+/** The last line a program printed, for saying why it failed. */
+const lastLine = (ran: Ran): string => ran.out.trim().split(/\n/).filter(line => line.trim() !== '').at(-1)?.trim() ?? `exit ${ran.exitCode}`
+
+/** Runs a program on many paths, at most 200 to a call. Answers the first failure, or undefined. */
+async function onPaths($: EngineInterface, head: readonly string[], paths: readonly string[]): Promise<Ran | undefined> {
+  for (let at = 0; at < paths.length; at += 200) {
+    const ran = await runProgram($, [...head, ...paths.slice(at, at + 200)], LONG_MS)
+    if (ran.exitCode !== 0) return ran
+  }
+
+  return undefined
+}
+
+type Making = { root: string; path: string; branch: string; from: string; carry: readonly string[]; minFreeGB: number; runId: string; taskId: string }
+
+/**
+ * Makes a Lore workspace for one task: a copy-on-write copy of the owner's
+ * workspace that takes the tracked files and the folders the project carries
+ * and nothing else, made a workspace of its own, on its own branch. The
+ * owner's workspace is only read. On any failure the half-made copy is
+ * removed and the reason answered.
+ */
+async function prepareWorkspace($: EngineInterface, at: Making): Promise<{ path: string; error?: undefined } | { error: string }> {
+  const fail = async (why: string) => {
+    await runProgram($, ['rm', '-rf', '--', at.path], LONG_MS)
+
+    return { error: why }
+  }
+  const made = await runProgram($, ['mkdir', '-p', at.path])
+  if (made.exitCode !== 0) return fail(`its folder could not be made: ${lastLine(made)}`)
+  const df = await runProgram($, ['df', '-Pk', at.path])
+  const freeKb = Number(df.stdout.trim().split(/\n/).at(-1)?.trim().split(/\s+/)[3])
+  if (df.exitCode !== 0 || !Number.isFinite(freeKb)) return fail(`df did not say how much disk is free: ${lastLine(df)}`)
+  const freeGb = Math.floor(freeKb / 1024 / 1024)
+  if (freeGb < at.minFreeGB) {
+    return fail(`only ${freeGb} GB are free on the disk that holds ${at.path}, and a worker's workspace needs at least ${at.minFreeGB} GB free (lore.minFreeGB in .claude/conductor/config.json)`)
+  }
+  const rules = ignoreRules((await textAt($, `${at.root}/.loreignore`)) ?? '')
+  const entries = (await $.fs.list(at.root)).map(one => ({ name: one.name, isDir: one.kind === 'dir' }))
+  for (const entry of topLevel(entries, rules, at.carry)) {
+    const copied = await runProgram($, ['cp', '-c', '-R', `${at.root}/${entry}`, `${at.path}/`], LONG_MS)
+    if (copied.exitCode !== 0) return fail(`${entry} could not be copied: ${lastLine(copied)}`)
+  }
+  const listing = `${at.root}/${RUNS_DIR}/${at.runId}/listing-${at.taskId}.txt`
+  const listed = await runProgram($, ['/bin/sh', '-c', LIST_SCRIPT, 'sh', at.path, listing], LONG_MS)
+  if (listed.exitCode !== 0) return fail(`the copy's files could not be listed: ${lastLine(listed)}`)
+  const relativeListing = ((await textAt($, listing)) ?? '')
+    .split('\n')
+    .map(line => (line.startsWith(`${at.path}/`) ? line.slice(at.path.length + 1) : line))
+    .join('\n')
+  const removedFailed = await onPaths($, ['rm', '-rf', '--'], removals(relativeListing, rules, at.carry).map(one => `${at.path}/${one}`))
+  if (removedFailed !== undefined) return fail(`what the copy must not hold could not be removed: ${lastLine(removedFailed)}`)
+  const step = async (args: readonly string[], timeoutMs = 30_000): Promise<Ran> => lore($, args, at.path, timeoutMs)
+  const updated = await step(['repository', 'update-path'])
+  if (updated.exitCode !== 0) return fail(`lore did not take the copy as a workspace of its own: ${lastLine(updated)}`)
+  const scanned = await step(['status', '--scan'], LONG_MS)
+  const status = statusOf(scanned.out)
+  if (scanned.exitCode !== 0 || status === undefined) return fail(`lore could not read the copy's status: ${lastLine(scanned)}`)
+  const untrackedFailed = await onPaths($, ['rm', '-f', '--'], status.untracked.map(one => `${at.path}/${one}`))
+  if (untrackedFailed !== undefined) return fail(`the copy's untracked files could not be removed: ${lastLine(untrackedFailed)}`)
+  const from = await step(['branch', 'switch', at.from, '--reset'], LONG_MS)
+  if (from.exitCode !== 0) return fail(`lore could not switch the copy to ${at.from}: ${lastLine(from)}`)
+  const info = branchInfoOf((await step(['branch', 'info', at.branch])).out)
+  if (info?.remoteLatest !== undefined) {
+    // A task started again goes on from what its branch holds.
+    const again = await step(['branch', 'switch', at.branch, '--reset'], LONG_MS)
+    if (again.exitCode !== 0) return fail(`lore could not switch the copy to ${at.branch}: ${lastLine(again)}`)
+  } else {
+    const created = await step(['branch', 'create', at.branch])
+    if (created.exitCode !== 0) return fail(`lore could not make the branch ${at.branch}: ${lastLine(created)}`)
+    const pushed = await step(['push'], LONG_MS)
+    const outcome = pushOf(pushed.exitCode, pushed.out)
+    if (outcome.kind === 'refused') return fail(`lore could not push the new branch ${at.branch}: ${outcome.text}`)
+  }
+
+  return { path: at.path }
+}
+
+/** A worker's workspace made and not handed to the engine yet, by task. */
+const prepared = new Map<string, string>()
+/** Starts whose workspace waits for the engine's WorktreeCreate, oldest first. One is in flight at a time. */
+const awaitingWorktree: { taskId: string; path: string }[] = []
+/** The tasks whose worker was handed a workspace of its own: the others' workers may not write. */
+const isolated = new Set<string>()
+/** Each such task's workspace, for reading the paths its worker changes. */
+const workspaces = new Map<string, string>()
+let startChain: Promise<void> = Promise.resolve()
+
+/**
+ * One Lore worker start at a time, from making its workspace until the engine
+ * has started it: the engine names the workspace it asks for after the agent,
+ * not the task, so the start in flight is the one it is for.
+ */
+function exclusive(): Promise<() => void> {
+  let unlock: () => void = () => undefined
+  const mine = new Promise<void>(resolve => {
+    unlock = resolve
+  })
+  const prior = startChain
+  startChain = prior.then(() => mine)
+
+  return prior.then(() => unlock)
 }
 
 /** A file's text, or undefined when it is not there or cannot be read. */
@@ -1941,6 +2069,42 @@ export const register: Register = (on, options) => {
     const release = async (): Promise<void> => {
       if (reservation !== undefined) await mutate($, path, raw => ({ value: undefined, isChanged: released(raw, reservation) }))
     }
+    // In Lore a worker builds in a workspace of its own, made now, before the engine starts it.
+    let unlock: (() => void) | undefined
+    const here = await backendOf($)
+    const runLore = read.ledger.run.lore
+    if (decided.kind === 'worker' && here?.kind === 'lore' && runLore !== undefined) {
+      unlock = await exclusive()
+      const project = read.ledger.run.config
+      const taskId = decided.taskId
+      const workspace = workspaceOf(workspacesOf(here.root, project?.lore?.workspaces), read.ledger.run.id, taskId)
+      const isThere = await $.fs.exists(`${workspace}/.lore`).catch(() => false)
+      const made = isThere
+        ? { path: workspace }
+        : await prepareWorkspace($, {
+            root: here.root,
+            path: workspace,
+            branch: taskBranchOf(runLore.branch, taskId),
+            from: decided.base?.branch ?? runLore.branch,
+            carry: project?.lore?.carry ?? LORE_DEFAULTS.carry,
+            minFreeGB: project?.lore?.minFreeGB ?? LORE_DEFAULTS.minFreeGB,
+            runId: read.ledger.run.id,
+            taskId,
+          })
+      if (made.error !== undefined) {
+        unlock()
+        await release()
+
+        return { deny: `conductor: ${taskId}'s Lore workspace could not be made, so no worker was started: ${made.error}.` }
+      }
+      prepared.set(taskId, workspace)
+      awaitingWorktree.push({ taskId, path: workspace })
+    }
+    const finished = (): void => {
+      const waiting = awaitingWorktree.findIndex(one => decided.kind === 'worker' && one.taskId === decided.taskId)
+      if (waiting >= 0) awaitingWorktree.splice(waiting, 1)
+      unlock?.()
+    }
     try {
       // A worker also starts knowing how it reports and what the board already holds for it.
       const task = decided.kind === 'worker' ? read.ledger.tasks.find(one => one.id === decided.taskId) : undefined
@@ -1950,7 +2114,12 @@ export const register: Register = (on, options) => {
         task === undefined || decided.kind !== 'worker'
           ? e.prompt
           : `${e.prompt}\n${briefing(read.ledger, task, { brief, slot: decided.slot }, decided.base)}`
-      const started = await next({ ...e, model: decided.model, prompt })
+      let started: Awaited<ReturnType<typeof next>>
+      try {
+        started = await next({ ...e, model: decided.model, prompt })
+      } finally {
+        finished()
+      }
       // The engine started nothing after all: the task stands again as it stood.
       if ((started as { agentId?: string }).agentId === undefined) await release()
       else await heard($, path, e.name ?? decided.taskId, decided, started)
@@ -1961,6 +2130,51 @@ export const register: Register = (on, options) => {
       throw cause
     }
   }).catch(unrouted)
+
+  // Outside git, Claude Code asks for a worker's isolated copy here. In a Lore run the mod made it already;
+  // in git the mod answers nothing and the engine makes its own worktree, as it does unhooked.
+  on('classic.WorktreeCreate', async ($, e, next) => {
+    try {
+      const here = await backendOf($)
+      if (here?.kind !== 'lore') return {}
+      // The engine names the workspace after the agent: a worker it started already is found by its id, else it is the start in flight.
+      const agentId = /^agent-(.+)$/.exec(e.name)?.[1]
+      let taskId = agentId === undefined ? undefined : agents.get(agentId)
+      let workspace = taskId === undefined ? undefined : prepared.get(taskId)
+      if (workspace === undefined) {
+        const head = awaitingWorktree.shift()
+        taskId = head?.taskId
+        workspace = head?.path
+        if (agentId !== undefined && taskId !== undefined) agents.set(agentId, taskId)
+      } else {
+        const waiting = awaitingWorktree.findIndex(one => one.taskId === taskId)
+        if (waiting >= 0) awaitingWorktree.splice(waiting, 1)
+      }
+      // Nothing of this run's: the project's own WorktreeCreate hook says why the engine cannot make one here.
+      if (taskId === undefined || workspace === undefined) return next(e)
+      prepared.delete(taskId)
+      const path = await boundLedger($)
+      if (path !== undefined) {
+        const forTask = taskId
+        const handed = workspace
+        await mutate($, path, raw => {
+          const task = raw.tasks.find(one => one.id === forTask)
+          const runLore = (raw.run as { lore?: { branch?: unknown } }).lore
+          if (task === undefined) return { value: undefined, isChanged: false }
+          task.workspace = handed
+          if (typeof runLore?.branch === 'string') task.branch = taskBranchOf(runLore.branch, forTask)
+
+          return { value: undefined, isChanged: true }
+        })
+      }
+      isolated.add(taskId)
+      workspaces.set(taskId, workspace)
+
+      return { worktreePath: workspace }
+    } catch {
+      return {}
+    }
+  })
 
   // What a worker is doing, from its own tool calls: remembered here, written by the flush.
   // And the way board news reaches its reader: with the result of the reader's own call.
@@ -1982,12 +2196,28 @@ export const register: Register = (on, options) => {
       }
     }
     const taskId = call.agentId === undefined ? undefined : agents.get(call.agentId)
+    // A Lore worker that was not handed a workspace of its own would build in the owner's: it may not write at all.
+    if (taskId !== undefined && (WRITES.has(call.tool) || call.tool === 'Bash') && !isolated.has(taskId) && (await backendOf($))?.kind === 'lore') {
+      const path = await boundLedger($).catch(() => undefined)
+      const ledger = path === undefined ? undefined : parseLedger(await textAt($, path) ?? '').ledger
+      const task = ledger?.tasks.find(one => one.id === taskId)
+      if (ledger?.run.lore !== undefined && task !== undefined) {
+        if (task.workspace !== undefined) {
+          isolated.add(taskId)
+          workspaces.set(taskId, task.workspace)
+        } else {
+          return {
+            deny: `conductor: ${taskId}'s worker has no Lore workspace of its own, so it would change the owner's workspace. It was started without isolation: "worktree". Stop and hand back; the orchestrator starts it again with isolation: "worktree".`,
+          }
+        }
+      }
+    }
     if (taskId !== undefined && !call.tool.startsWith('mcp__conductor__')) {
       pending.set(taskId, activityText(call))
       const file = call.file_path ?? call.notebook_path
       if (WRITES.has(call.tool) && typeof file === 'string' && typeof root === 'string') {
         const set = changedFiles.get(taskId) ?? new Set<string>()
-        changedFiles.set(taskId, set.add(relative(file, root)))
+        changedFiles.set(taskId, set.add(relative(file, root, workspaces.get(taskId))))
       }
     }
     const ran = await next(e)

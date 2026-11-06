@@ -35,10 +35,12 @@ const list = (taskIds: readonly string[]): string => taskIds.join(', ')
 
 /**
  * A path as the board compares paths: relative to the repository, whichever
- * worktree of it the worker edits in.
+ * worktree of it the worker edits in. A Lore worker's own workspace is a copy
+ * of the repository's, so a path in it is relative to that workspace.
  */
-export function relative(path: string, root: string): string {
-  const inRepo = path.startsWith(`${root}/`) ? path.slice(root.length + 1) : path
+export function relative(path: string, root: string, workspace?: string): string {
+  const own = workspace !== undefined && path.startsWith(`${workspace}/`) ? path.slice(workspace.length + 1) : undefined
+  const inRepo = own ?? (path.startsWith(`${root}/`) ? path.slice(root.length + 1) : path)
 
   return normalise(inRepo.replace(/^(?:.*\/)?\.claude\/worktrees\/[^/]+\//, ''))
 }

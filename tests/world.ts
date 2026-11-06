@@ -196,6 +196,12 @@ export type World = {
   lore: LoreAnswer[]
   /** Every `lore` call (any binary named lore), with the folder it ran in. */
   loreCalls: { argv: string[]; cwd?: string }[]
+  /** How any other program answers (cp, df, rm, sh...): the first entry that matches; none matching is a program that is not there. */
+  programs: LoreAnswer[]
+  /** Every program run, with the folder it ran in. */
+  calls: { argv: string[]; cwd?: string; timeoutMs?: number }[]
+  /** What `fs.list` answers for a folder, where a test says; other folders are derived from the files. */
+  listings: Record<string, { name: string; kind: 'dir' | 'file' }[]>
   /** Folders that exist, for `fs.exists`: a Lore workspace's `.lore`, say. */
   dirs: string[]
   /** The session's working directory, as `$.session.cwd()` answers it. */
@@ -254,6 +260,9 @@ export function world(on: On, files: Files, repo: { root: string } | null = { ro
     processes: [],
     lore: [],
     loreCalls: [],
+    programs: [],
+    calls: [],
+    listings: {},
     dirs: [],
     cwd: repo?.root ?? ROOT,
     registered: [],
@@ -285,6 +294,11 @@ export function world(on: On, files: Files, repo: { root: string } | null = { ro
     state.processes.push([...e.argv])
     const isTokenAsked = e.argv.join(' ') === 'gh auth token'
     const cwd = e.init?.cwd
+    state.calls.push({ argv: [...e.argv], ...(cwd === undefined ? {} : { cwd }), ...(e.init?.timeoutMs === undefined ? {} : { timeoutMs: e.init.timeoutMs }) })
+    const program = state.programs.find(one => one.match(e.argv, cwd))?.answer
+    if (program !== undefined) {
+      return { value: { exitCode: program.exitCode, stdout: program.stdout, stderr: program.stderr ?? '', isStdoutTruncated: false, isStderrTruncated: false } }
+    }
     if (/(^|\/)lore$/.test(e.argv[0] ?? '')) {
       state.loreCalls.push({ argv: [...e.argv], ...(cwd === undefined ? {} : { cwd }) })
       const scripted = state.lore.find(one => one.match(e.argv, cwd))?.answer
@@ -375,6 +389,8 @@ export function world(on: On, files: Files, repo: { root: string } | null = { ro
     value: repo === null ? null : { ...repo, remote: state.origin, internal: false, name: null },
   }))
   on('fs.list', (_$, e) => {
+    const listed = state.listings[e.path]
+    if (listed !== undefined) return { value: listed.map(one => ({ name: one.name, kind: one.kind, size: 0, mtimeMs: 0, isLink: false })) }
     const runs = Object.keys(files)
       .filter(path => path.startsWith(`${e.path}/`))
       .map(path => path.slice(e.path.length + 1).split('/')[0] ?? '')
