@@ -47,7 +47,6 @@ const holds = (root: string, path: string): boolean => path === root || isWithin
  */
 export async function findHome(io: Io, cwd: string, gitRoot: string | null): Promise<Home | null> {
   const userHome = io.userHome === undefined ? undefined : trimmed(io.userHome)
-  const userReal = userHome === undefined || userHome === '' ? undefined : await io.real(userHome)
   const isRepository = async (dir: string): Promise<boolean> => dir === gitRoot || (await io.exists(`${dir}/.lore`))
   const isRoot = async (dir: string): Promise<boolean> => (await isRepository(dir)) || (await io.exists(`${dir}/.git`))
   const insideRepository = async (dir: string): Promise<boolean> => {
@@ -58,10 +57,12 @@ export async function findHome(io: Io, cwd: string, gitRoot: string | null): Pro
     return false
   }
   const isFolderHome = async (dir: string): Promise<boolean> => {
-    if (userHome === undefined || userReal === undefined || !isWithin(userHome, dir) || (await isRoot(dir)) || (await insideRepository(dir))) return false
+    if (userHome === undefined || userHome === '' || !isWithin(userHome, dir) || (await isRoot(dir)) || (await insideRepository(dir))) return false
+    // Real paths are asked for only here: a repository home runs no program to be found.
+    const userReal = await io.real(userHome)
     const real = await io.real(dir)
 
-    return real !== undefined && isWithin(userReal, real)
+    return userReal !== undefined && real !== undefined && isWithin(userReal, real)
   }
   for (let dir = trimmed(cwd); dir !== ''; dir = parentOf(dir)) {
     if (dir === userHome || !(await io.exists(`${dir}/${CONDUCTOR}`))) continue

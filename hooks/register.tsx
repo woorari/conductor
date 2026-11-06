@@ -36,6 +36,8 @@ import { LINEAR_KEY, RUN_ID, STATUSES, TIERS, parseLedger } from './ledger'
 import { approvedMain, baseBroughtIn, conflicted, letGo, loreReady, onBase, onRunBranch, readyForBase, rev7, startLoreMerge } from './lore-merge'
 import { LINEAR_API, M_CREATE, M_UPDATE, Q_ISSUE, Q_TEAM, apiKeyOf, createdOf, errorsOf, issueOf, issueText, stateFor, teamOf, updatedOf } from './linear'
 import { branchInfoOf, ignoreRules, loreByHand, mergeOf, pushOf, repositoryInfoOf, statusOf } from './lore'
+import { findHome } from './home'
+import type { Home, Io } from './home'
 import { CONFIG_PATH, LORE_DEFAULTS, PLACEHOLDER_SNIPPET, hasPlaceholder, parseConfig, runsIgnored } from './project'
 import type { ProjectConfig } from './project'
 import { checkWorkspaceOf, isInside, removals, runBranchOf, runWorkspaceOf, taskBranchOf, topLevel, workspaceOf, workspacesOf } from './workspace'
@@ -337,6 +339,42 @@ type LoreBackend = { kind: 'lore'; root: string; bin?: string; info?: Repository
 type Backend = { kind: 'git'; root: string; remote: string | null } | LoreBackend
 
 let backend: Backend | null | undefined
+/** Where conductor's home is, read once: a repository that is its own home, or a folder that holds places; null for none. */
+let home: Home | null | undefined
+
+/** The disk as the home's finder reads it. A real path is `pwd -P` run in the folder: no shell, nothing of the path in a command. */
+async function ioOf($: EngineInterface): Promise<Io> {
+  const userHome = await $.env.get('HOME').catch(() => undefined)
+
+  return {
+    exists: path => $.fs.exists(path).catch(() => false),
+    list: async path => (await $.fs.list(path)).map(one => ({ name: one.name, kind: one.kind === 'dir' ? ('dir' as const) : ('file' as const) })),
+    real: async path => {
+      try {
+        const ran = await $.process.run(['/bin/pwd', '-P'], { cwd: path, timeoutMs: 10_000 })
+        const real = ran.stdout.trim()
+
+        return ran.exitCode === 0 && real.startsWith('/') && !real.includes('\n') ? real : undefined
+      } catch {
+        return undefined
+      }
+    },
+    userHome: typeof userHome === 'string' && userHome.startsWith('/') ? userHome : undefined,
+  }
+}
+
+/** The session's home: found walking up from its folder; a repository home is the repository git or Lore names, as before. */
+async function homeOf($: EngineInterface): Promise<Home | null> {
+  if (home !== undefined) return home
+  const cwd = await $.session.cwd().catch(() => '')
+  const repo = await $.session.repo().catch(() => null)
+  home = cwd === '' ? null : await findHome(await ioOf($), cwd, repo?.root ?? null)
+
+  return home
+}
+
+/** Whether this session's home is a folder that is not a repository. */
+const isFolderHome = async ($: EngineInterface): Promise<boolean> => (await homeOf($))?.kind === 'folder'
 /** The `lore` binary that ran, once one did: kept for this module's life. */
 let loreFound: string | undefined
 
@@ -409,6 +447,7 @@ async function loreRoot($: EngineInterface): Promise<string | null> {
 /** Where the session works, read once: git first, as before, then a Lore workspace. Null outside both. */
 async function backendOf($: EngineInterface): Promise<Backend | null> {
   if (backend !== undefined) return backend
+  if (await isFolderHome($)) return null
   const repo = await $.session.repo().catch(() => null)
   if (repo !== null && repo !== undefined) {
     backend = { kind: 'git', root: repo.root, remote: repo.remote }
@@ -868,6 +907,9 @@ async function textAt($: EngineInterface, path: string): Promise<string | undefi
 
 /** The root of the repository or workspace the session is in, read again on a rescan; null outside both. */
 async function rootOf($: EngineInterface, rescan = false): Promise<string | null> {
+  // A home that is not a repository keeps its runs itself: the workspace a run works in is the run's.
+  const found = await homeOf($)
+  if (found?.kind === 'folder') return found.root
   if (rescan && backend?.kind !== 'lore') backend = undefined
 
   return (await backendOf($))?.root ?? null
@@ -2368,6 +2410,9 @@ async function listTool($: EngineInterface, spec: Parameters<EngineInterface['to
  */
 async function isHome($: EngineInterface): Promise<boolean> {
   try {
+    const found = await homeOf($)
+    if (found === null) return false
+    if (found.kind === 'folder') return true
     if (root === undefined) root = await rootOf($)
 
     return root !== null && (await $.fs.exists(`${root}/.claude/conductor`))
@@ -2505,6 +2550,22 @@ export const register: Register = (on, options) => {
       },
       isDeferred: false,
     })
+    if (await isFolderHome($)) {
+      await listTool($, {
+        name: 'run_workspace',
+        description:
+          "Run board: in a home that is not a repository, the orchestrator picks the workspace the run works in, from those the run lists, before it plans. It can pick again until the owner approves the plan; then the workspace is fixed.",
+        inputSchema: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: 'The workspace, by its full path as the run lists it.' },
+          },
+          required: ['path'],
+          additionalProperties: false,
+        },
+        isDeferred: false,
+      })
+    }
     await listTool($, {
       name: 'merge_check',
       description:
@@ -2950,6 +3011,7 @@ export const register: Register = (on, options) => {
   on('tool.call', { tool: /^mcp__conductor__run_plan$/ }, ($, e) =>
     answer($, e as unknown as ToolCall, (raw, _at, caller, input) => proposePlan(raw, caller, input)),
   ).catch(broke)
+  on('tool.call', { tool: /^mcp__conductor__run_workspace$/ }, () => ({ result: 'Nothing to pick yet.', text: 'Nothing to pick yet.' })).catch(broke)
   on('tool.call', { tool: /^mcp__conductor__task_add$/ }, ($, e) =>
     answer($, e as unknown as ToolCall, (raw, _at, caller, input) => addTask(raw, caller, input)),
   ).catch(broke)
