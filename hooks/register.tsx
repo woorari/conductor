@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { CatchHandler, Elements, EngineInterface, Hook, Register } from 'claude-code'
 
-import type { BoardState, Ledger, ModelTier } from '../types'
+import type { BoardState, Candidate, Ledger, ModelTier, Place, RunWorkspace } from '../types'
 import {
   API,
   CLAIM_GRACE_MIN,
@@ -36,15 +36,16 @@ import { LINEAR_KEY, RUN_ID, STATUSES, TIERS, parseLedger } from './ledger'
 import { approvedMain, baseBroughtIn, conflicted, letGo, loreReady, onBase, onRunBranch, readyForBase, rev7, startLoreMerge } from './lore-merge'
 import { LINEAR_API, M_CREATE, M_UPDATE, Q_ISSUE, Q_TEAM, apiKeyOf, createdOf, errorsOf, issueOf, issueText, stateFor, teamOf, updatedOf } from './linear'
 import { branchInfoOf, ignoreRules, loreByHand, mergeOf, pushOf, repositoryInfoOf, statusOf } from './lore'
-import { findHome } from './home'
+import { candidatesFor, findHome, workspaceOfSpec } from './home'
 import type { Home, Io } from './home'
-import { CONFIG_PATH, LORE_DEFAULTS, PLACEHOLDER_SNIPPET, hasPlaceholder, parseConfig, runsIgnored } from './project'
+import { CONFIG_PATH, LORE_DEFAULTS, PLACEHOLDER_SNIPPET, hasPlaceholder, homeConfigProblem, parseConfig, placeConfig, runsIgnored } from './project'
 import type { ProjectConfig } from './project'
 import { checkWorkspaceOf, isInside, removals, runBranchOf, runWorkspaceOf, taskBranchOf, topLevel, workspaceOf, workspacesOf } from './workspace'
 import type { RepositoryInfo } from './lore'
 import { pauseRun, unpauseRun } from './pause'
 import { LOOK_AGAIN_MIN, dueForLook, isUnderway, unsettled } from './problems'
 import { APPROVED, PLANNING, conducting, newRun, planning } from './plan'
+import type { Conducting } from './plan'
 import { ORCHESTRATOR, briefing, digest, post, relative, rule, touch, waiting } from './posts'
 import { HELPER_TYPES, familyOf, route, unlocked } from './router'
 import type { Route, Spawn } from './router'
@@ -471,6 +472,93 @@ async function backendOf($: EngineInterface): Promise<Backend | null> {
   backend = { kind: 'lore', root: found, bin, info }
 
   return backend
+}
+
+/** What a run in a home that is not a repository starts with: its workspace once fixed, or the ones the orchestrator picks from. */
+type Placed = { config: ProjectConfig; workspace?: RunWorkspace; candidates?: Candidate[]; lore?: Ledger['run']['lore'] }
+
+const ISSUE_IN_FOLDER =
+  "No run was started. In a home that is not a repository, tickets are Linear: give the ticket's key, like /conduct ABC-12. A GitHub issue is run from a session in its own repository."
+
+/** A Linear key's team: the part before the dash. */
+const teamOfKey = (key: string): string => key.slice(0, key.indexOf('-'))
+
+/** Whether the folder the session started in declares the WorktreeCreate placeholder: Claude Code reads project settings there. */
+async function placeholderHere($: EngineInterface): Promise<{ isThere: boolean; folder: string }> {
+  const folder = (await $.session.cwd().catch(() => '')).replace(/\/+$/, '')
+
+  return { isThere: hasPlaceholder([await textAt($, `${folder}/.claude/settings.json`), await textAt($, `${folder}/.claude/settings.local.json`)]), folder }
+}
+
+const placeholderMissing = (folder: string): string =>
+  `No run was started. Outside git, Claude Code lets the mod make each worker's workspace only when the project declares a WorktreeCreate hook, in the folder the session started in. Add this to ${folder}/.claude/settings.local.json (or ${folder}/.claude/settings.json), then give /conduct again; if a worker still cannot start, start a new session:\n\n${PLACEHOLDER_SNIPPET}`
+
+/**
+ * Fixes the workspace a run works in, doing what /conduct does for its kind:
+ * for Lore, the repository's info and the run's branch; for git, its origin.
+ * Either way the session's folder must declare the placeholder when it is not
+ * inside git. The run keeps its place's settings, with the ticket's team.
+ */
+async function fixWorkspace(
+  $: EngineInterface,
+  run: { id: string; source: string; title?: string },
+  candidate: Candidate,
+  place: Place,
+  team: string,
+): Promise<{ workspace: RunWorkspace; config: ProjectConfig; lore?: Ledger['run']['lore'] } | { error: string }> {
+  const base = place.base ?? config.base
+  const settings = placeConfig(place, team)
+  const isInGit = (await $.session.repo().catch(() => null)) !== null
+  if (!isInGit) {
+    const here = await placeholderHere($)
+    if (!here.isThere) return { error: placeholderMissing(here.folder) }
+  }
+  if (candidate.kind === 'lore') {
+    const bin = await loreBin($, candidate.root)
+    if (bin === undefined) return { error: `No run was started. ${LORE_MISSING}` }
+    const asked = await lore($, ['repository', 'info'], candidate.root)
+    const info = asked.exitCode === 0 ? repositoryInfoOf(asked.out) : undefined
+    if (info === undefined) return { error: `No run was started. lore could not read the repository of ${candidate.root}: ${asked.out.trim() || `exit ${asked.exitCode}`}` }
+
+    return {
+      workspace: { kind: 'lore', root: candidate.root, place: place.folder, base },
+      config: settings,
+      lore: { remote: info.remote, repository: info.name, base, branch: runBranchOf(place.lore?.branchPrefix ?? LORE_DEFAULTS.branchPrefix, run.source, run.id, run.title) },
+    }
+  }
+  const ran = await runProgram($, ['git', '-C', candidate.root, 'remote', 'get-url', 'origin'])
+  const remote = ran.exitCode === 0 ? ran.stdout.trim() : ''
+
+  return { workspace: { kind: 'git', root: candidate.root, place: place.folder, base, ...(remote === '' ? {} : { remote }) }, config: settings }
+}
+
+/**
+ * Where a run started in a home that is not a repository works: the
+ * workspace of its spec, the one workspace its ticket's team has, or the
+ * candidates the orchestrator picks from.
+ */
+async function placeRun($: EngineInterface, homeRoot: string, asked: Conducting, project: ProjectConfig): Promise<Placed | { error: string }> {
+  const problem = homeConfigProblem(project, 'folder')
+  if (problem !== undefined) return { error: `No run was started: ${problem}` }
+  if (asked.kind === 'issue') return { error: ISSUE_IN_FOLDER }
+  const places = project.places ?? []
+  const io = await ioOf($)
+  const placeOf = (candidate: Candidate): Place | undefined => places.find(one => one.folder === candidate.place)
+  if (asked.kind === 'spec') {
+    const found = await workspaceOfSpec(io, homeRoot, places, asked.source)
+    if ('error' in found) return found
+    const place = placeOf(found.candidate)
+
+    return place === undefined ? { error: 'No run was started: the spec\'s place is not in config.json.' } : await fixWorkspace($, asked, found.candidate, place, found.team)
+  }
+  const team = teamOfKey(asked.source)
+  const found = await candidatesFor(io, homeRoot, places, team)
+  if ('error' in found) return found
+  const only = found.candidates.length === 1 ? found.candidates[0] : undefined
+  const place = only === undefined ? undefined : placeOf(only)
+  if (only !== undefined && place !== undefined) return await fixWorkspace($, asked, only, place, team)
+
+  return { config: { places: places.filter(one => one.teams.includes(team)) }, candidates: found.candidates }
 }
 
 /** How long a copy, a merge, a push or a listing of a large workspace may take: the engine's ceiling for one program. */
@@ -3223,14 +3311,19 @@ export const register: Register = (on, options) => {
     const read = parseConfig(configText)
     if ('error' in read) return { text: `No run was started: ${read.error}` }
     const project = read.config
-    const tickets = asked.kind === 'linear' || (asked.kind === 'spec' && project.tickets === 'linear') ? ('linear' as const) : undefined
-    if (tickets === 'linear' && asked.kind === 'spec' && project.linear?.team === undefined) {
+    // A home that is not a repository: the run's workspace comes from its ticket or spec, and its settings from the place.
+    const placed = (await isFolderHome($)) ? await placeRun($, root, asked, project) : undefined
+    if (placed !== undefined && 'error' in placed) return { text: placed.error }
+    const own = placed === undefined ? homeConfigProblem(project, 'repository') : undefined
+    if (own !== undefined) return { text: `No run was started: ${own}` }
+    const tickets = placed !== undefined || asked.kind === 'linear' || (asked.kind === 'spec' && project.tickets === 'linear') ? ('linear' as const) : undefined
+    if (placed === undefined && tickets === 'linear' && asked.kind === 'spec' && project.linear?.team === undefined) {
       return {
         text: 'No run was started. A run from a spec with its tickets in Linear files them in one team: set linear.team in .claude/conductor/config.json, for example {"linear": {"team": "ABC"}}.',
       }
     }
-    let loreRun: Ledger['run']['lore']
-    if (here?.kind === 'lore' && here.info !== undefined) {
+    let loreRun: Ledger['run']['lore'] = placed?.lore
+    if (placed === undefined && here?.kind === 'lore' && here.info !== undefined) {
       if (!runsIgnored(await textAt($, `${root}/.loreignore`))) {
         return {
           text: 'No run was started. The run ledgers are rewritten every few seconds and stay out of Lore: add the line .claude/conductor/runs/ to the .loreignore at the root of this workspace.',
@@ -3255,7 +3348,10 @@ export const register: Register = (on, options) => {
       }
     }
     const now = await $.clock.now()
-    const more = { tickets, config: configText === undefined ? undefined : project, lore: loreRun }
+    const more =
+      placed !== undefined
+        ? { tickets, config: placed.config, lore: loreRun, workspace: placed.workspace, candidates: placed.candidates }
+        : { tickets, config: configText === undefined ? undefined : project, lore: loreRun }
     await $.fs.write(path, `${JSON.stringify(newRun(id, source, iso(now), title, more), null, 2)}\n`)
     await flush($)
     await bind($, id)
@@ -3266,7 +3362,8 @@ export const register: Register = (on, options) => {
     asks.push(planning(id, source, title))
 
     // The mod runs the project's check itself, without Claude Code's permission prompt: the owner sees the program now.
-    const checkLine = project.check === undefined ? '' : ` Its check command, which the mod runs on each judged revision: ${project.check.argv.join(' ')}.`
+    const check = placed === undefined ? project.check : placed.config.check
+    const checkLine = check === undefined ? '' : ` Its check command, which the mod runs on each judged revision: ${check.argv.join(' ')}.`
 
     return {
       text: `Run ${id} is started from ${source}${title === undefined ? '' : `, called "${title}"`}. The plan comes next; nothing starts before you /approve it.${checkLine}`,
