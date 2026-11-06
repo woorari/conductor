@@ -156,6 +156,7 @@ In a folder home, "where the session works" (the `backend` today) becomes the bo
   - It is removed with `git worktree remove` at the points where Lore removes its copies. WorktreeRemove doesn't fire for a workspace the mod made.
   - A git worker needs no new pinning. Its worktree shares the repository's remotes, and it starts in its worktree, as a worker in a repository home does today.
 - **A session inside a different git repository:** a session may start in git repository X under the home while the run works in Y. The mod answers WorktreeCreate with its own worktree for every run of a folder home. The plan checks this against the real engine early, with a throwaway repository, before anything builds on it. If the engine ignores the mod's answer in a git session, the mod refuses such a run and says to start the session in the home folder. The owner is told which way it went.
+  - **Checked on 2026-11-06 (Claude Code, haiku session):** from a session inside git repository X, a mod's `classic.WorktreeCreate` that answered `{ worktreePath }` with a `git worktree add` of repository Y was taken. The agent ran in Y's worktree, and X got no worktree. So no refusal is needed.
 - **Guards:** `byHand`, which allows no merge or push to the base branch by hand, is unchanged.
 - **In a repository home:** everything as today, including `next(e)` for the engine's own worktree.
 
