@@ -17,7 +17,7 @@
 - The mod's own tools are matched by pattern (`/^mcp__conductor__ticket_read$/`), never by a string literal.
 - The ledger stays `version: 1`. Every new field is optional. A ledger written before this change reads.
 - Every Lore call is `[bin, '--non-interactive', ...args]` through `$.process.run` with an explicit `cwd`. No shell string is ever built from a path, a branch name, a message or config. Where a shell is unavoidable (redirecting `find`, the detached check), values travel as positional parameters (`['/bin/sh', '-c', SCRIPT, 'sh', ...values]`).
-- Paths may contain spaces (the first real workspace is `.../Ultracore 5.8`).
+- Paths may contain spaces (the first real workspace's name has one, like `.../Big Game 5.8`).
 - `$.process.run` timeouts: 30 s by default, 10 min (600 000 ms) for a copy, a merge, a push or a find. Never more: that is the engine's ceiling.
 - The mod never writes into the owner's workspace. No Lore write command runs with `cwd` = the session root, and no `$.fs.write` goes under the root except `.claude/conductor/runs/`.
 - The Linear key goes into a request's `Authorization` header and nowhere else: not the ledger, a message, a toast, a problem, a log line.
@@ -481,7 +481,7 @@ Write the full 64-hex values from the outputs file where the sketch shortens the
 
 - [ ] **Step 1: Run the whole suite and the validator.** Run `claude plugin validate . && claude plugin test .`. Expected: validation passes, and every test passes (the 381 plus the new ones).
 - [ ] **Step 2: Prove the tests can fail** (README rule). Copy the repository to a scratch folder and break three things there: make `mergeOf` treat a conflict as merged, drop the `protect` from the `finally`, and copy `Saved`. Expected: `claude plugin test <copy>` fails in `lore-output`/`lore-merge`, `lore-main` and `lore-workers`. Delete the copy.
-- [ ] **Step 3: Scan for private names.** Run `grep -rn -i -E "rieck|ultracore|coreborn|kuro|10\.100\." --exclude-dir=.git .`. Expected: no output.
+- [ ] **Step 3: Scan for private names.** Grep the repository for the owner's private server, studio and project names and private addresses (the list is the owner's, not this file's). Expected: no match outside the author's own name.
 - [ ] **Step 4: Commit.** `git commit -am "docs: Lore and Linear in the README and manifest"` (add `brief/example-lore.md`).
 - [ ] **Step 5: The live end-to-end run, with the owner.** This needs the owner's Linear key in the mod's option and a throwaway Linear issue. Ask the owner to:
   - set the key;
