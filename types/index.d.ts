@@ -40,7 +40,6 @@ export type ProjectConfig = {
   tickets?: 'github' | 'linear'
   linear?: { team?: string }
   lore?: {
-    bin?: string
     branchPrefix?: string
     workspaces?: string
     carry?: string[]

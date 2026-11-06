@@ -15,7 +15,9 @@ export const LORE_DEFAULTS = { branchPrefix: 'conductor/', minFreeGB: 20, carry:
 
 const TOP = ['tickets', 'linear', 'lore', 'check'] as const
 const LINEAR = ['team'] as const
-const LORE = ['bin', 'branchPrefix', 'workspaces', 'carry', 'minFreeGB', 'lockPatterns'] as const
+// Which program runs is never a project's to say: a repository could name any program. That is the mod's
+// Lore program option, or LORE_BIN, both the person's own.
+const LORE = ['branchPrefix', 'workspaces', 'carry', 'minFreeGB', 'lockPatterns'] as const
 const CHECK = ['argv', 'timeoutMin'] as const
 
 class Wrong extends Error {}
@@ -56,11 +58,10 @@ export function parseConfig(text: string | undefined): { config: ProjectConfig }
     }
     if (top.lore !== undefined) {
       const lore = keysOf(top.lore, 'lore', LORE)
-      for (const key of ['bin', 'branchPrefix', 'workspaces'] as const) {
+      for (const key of ['branchPrefix', 'workspaces'] as const) {
         if (lore[key] !== undefined && typeof lore[key] !== 'string') throw new Wrong(`config.json: lore.${key} is a string.`)
       }
       if (typeof lore.workspaces === 'string' && !lore.workspaces.startsWith('/')) throw new Wrong('config.json: lore.workspaces is an absolute path.')
-      if (typeof lore.bin === 'string' && lore.bin.trim() === '') throw new Wrong('config.json: lore.bin is the path of the lore program.')
       for (const key of ['carry', 'lockPatterns'] as const) {
         if (lore[key] !== undefined && !strings(lore[key])) throw new Wrong(`config.json: lore.${key} is a list of paths or patterns.`)
       }

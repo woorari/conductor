@@ -151,7 +151,7 @@ export type World = {
   /** The repository's `origin`: the GitHub clone's unless a test says otherwise; null for a repository with none. */
   origin: string | null
   /** The environment variables a token may come from: GH_TOKEN holds the test token unless a test says otherwise. */
-  env: { GH_TOKEN?: string; GITHUB_TOKEN?: string }
+  env: { GH_TOKEN?: string; GITHUB_TOKEN?: string; LINEAR_API_KEY?: string; LORE_BIN?: string }
   /** What `gh auth token` answers: by default gh is not signed in. */
   gh: { exitCode: number; stdout: string }
   /** Every command the mod ran on the host, as its argument vector. */
@@ -241,7 +241,7 @@ export function world(on: On, files: Files, repo: { root: string } | null = { ro
     },
   }
   on('env.get', (_$, e) => ({
-    value: e.name === 'HOME' ? HOME : e.name === 'GH_TOKEN' ? state.env.GH_TOKEN : e.name === 'GITHUB_TOKEN' ? state.env.GITHUB_TOKEN : undefined,
+    value: e.name === 'HOME' ? HOME : e.name === 'GH_TOKEN' || e.name === 'GITHUB_TOKEN' || e.name === 'LINEAR_API_KEY' || e.name === 'LORE_BIN' ? state.env[e.name] : undefined,
   }))
   on('process.run', (_$, e) => {
     state.processes.push([...e.argv])

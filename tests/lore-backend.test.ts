@@ -28,6 +28,16 @@ test('a Lore workspace without .claude/conductor stays off', async ($, on) => {
   expect(engine.registered).toEqual([])
 })
 
+test('LORE_BIN names the lore that runs', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  const engine = loreWorld(on, {})
+  engine.env.LORE_BIN = '/srv/lore'
+  engine.lore.unshift({ match: argv => argv[0] === '/srv/lore' && argv[1] === '--version', answer: { exitCode: 0, stdout: 'lore 0.12.0' } })
+  await startIn($)
+
+  expect(engine.loreCalls.find(call => call.argv.includes('info'))?.argv[0]).toBe('/srv/lore')
+})
+
 test('lore is found in HOME/.local/bin when PATH lacks it', async ($, on) => {
   mock.clock(on, { now: NOW })
   const engine = loreWorld(on, {})
@@ -44,7 +54,7 @@ test('lore is found in HOME/.local/bin when PATH lacks it', async ($, on) => {
   expect(engine.processes.some(argv => argv[0] === 'lore' && argv[1] === '--version'), 'lore on the PATH was tried first').toBe(true)
 })
 
-test('with lore not running at all, /conduct says to set lore.bin', async ($, on) => {
+test('with lore not running at all, /conduct says to set the Lore program option or LORE_BIN', async ($, on) => {
   mock.clock(on, { now: NOW })
   const files = {}
   const engine = loreWorld(on, files)
@@ -52,8 +62,8 @@ test('with lore not running at all, /conduct says to set lore.bin', async ($, on
   await startIn($)
 
   const said = await conduct($, 'ABC-12 Retry the flaky upload')
-  expect(said.text).toContain('lore.bin')
-  expect(said.text).toContain('.claude/conductor/config.json')
+  expect(said.text).toContain('Lore program')
+  expect(said.text).toContain('LORE_BIN')
   expect(Object.keys(files), 'no run was started').toEqual([])
 })
 

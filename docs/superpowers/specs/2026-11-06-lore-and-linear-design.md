@@ -165,11 +165,11 @@ The orchestrator's instructions, the worker brief, the board, the handover and t
 
 ### 5.10 Options and project config
 
-- New mod option: **Linear API key** (sensitive). The existing options stay. `mergeMethod` is GitHub's only.
+- New mod options: **Linear API key** (sensitive) and **Lore program** (the lore binary's path). The existing options stay. `mergeMethod` is GitHub's only.
 - New optional per-project file `.claude/conductor/config.json`. Every field is optional, and it can be committed with the project:
   - `tickets`: `"github"` or `"linear"`, to fix the ticket backend;
   - `linear.team`: the team key a run's issue must belong to;
-  - `lore.bin`, `lore.branchPrefix`, `lore.workspaces`, `lore.carry`, `lore.minFreeGB`, `lore.lockPatterns`;
+  - `lore.branchPrefix`, `lore.workspaces`, `lore.carry`, `lore.minFreeGB`, `lore.lockPatterns`;
   - `check`: `{ "argv": [...], "timeoutMin": N }`.
 - The config is read once, at `/conduct`, from the session's root (where `brief.md` is read today), and frozen in the run's ledger. A branch that changes `config.json` doesn't change the run it's part of, so a worker can't make its own task green by editing `check`. The check still runs the code on the task branch, as any CI does. The orchestrator's review covers changes to the scripts a check runs.
 - In a Lore project the README says to add `.claude/conductor/runs/` to `.loreignore`, the counterpart of `.gitignore` today. `/conduct` refuses with that instruction when the runs folder isn't ignored.
@@ -229,7 +229,7 @@ Run in throwaway folders, a throwaway Lore repository and a throwaway mod, with 
    - `issue(id: "ABC-12")` takes the key;
    - a team's states are `team.states { nodes { id name type position } }`;
    - `issueCreate(input: { teamId, title, description, parentId, stateId })` and `issueUpdate(id, input: { stateId })`.
-9. **The Lore binary.** A host program such as the desktop app may not have `~/.local/bin` on its PATH. The mod runs `lore.bin` from the project config when it's set. Otherwise it runs `lore` and then `$HOME/.local/bin/lore` (where Epic's install script puts it).
+9. **The Lore binary.** A host program such as the desktop app may not have `~/.local/bin` on its PATH. The mod runs the path in its own **Lore program** option, or `LORE_BIN`, when either is set. Otherwise it runs `lore` and then `$HOME/.local/bin/lore` (where Epic's install script puts it). The project config never names the program: a repository could name any program, and the mod would run it when a session opens (a security review finding, 2026-11-06).
 
 ## 8. Calls I made (the owner checks these)
 

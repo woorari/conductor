@@ -101,12 +101,24 @@ test('a malformed config.json refuses /conduct with the parse error', async ($, 
   expect(files[loreLedgerPath('ABC-12')]).toBeUndefined()
 })
 
-test('lore.bin in the config is the lore that runs', async ($, on) => {
+test('the Lore program option names the lore that runs', { options: { loreBin: '/opt/lore/bin/lore' } }, async ($, on) => {
   mock.clock(on, { now: NOW })
-  const files = ready({ [CONFIG]: { text: '{"lore": {"bin": "/opt/lore/bin/lore"}}', mtimeMs: 1 } })
+  const files = ready()
   const engine = loreWorld(on, files)
   engine.lore.unshift({ match: argv => argv[0] === '/opt/lore/bin/lore' && argv[1] === '--version', answer: { exitCode: 0, stdout: 'lore 0.12.0' } })
   await startIn($)
 
   expect(engine.loreCalls.find(call => call.argv.includes('info'))?.argv[0]).toBe('/opt/lore/bin/lore')
+})
+
+test('a project cannot name the program that runs: lore.bin in config.json is refused, and never run', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  const files = ready({ [CONFIG]: { text: '{"lore": {"bin": "/tmp/evil"}}', mtimeMs: 1 } })
+  const engine = loreWorld(on, files)
+  await startIn($)
+
+  expect(engine.processes.some(argv => argv[0] === '/tmp/evil'), 'not at the start').toBe(false)
+  const said = await conduct($, 'ABC-12')
+  expect(said.text).toContain('"lore.bin" is no setting here')
+  expect(engine.processes.some(argv => argv[0] === '/tmp/evil'), 'not at /conduct').toBe(false)
 })

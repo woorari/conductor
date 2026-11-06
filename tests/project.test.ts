@@ -20,7 +20,7 @@ describe('a project config', () => {
     const config = {
       tickets: 'linear',
       linear: { team: 'ABC' },
-      lore: { bin: '/opt/lore', branchPrefix: 'eng/', workspaces: '/work/ws', carry: ['Intermediate', 'DerivedDataCache'], minFreeGB: 30, lockPatterns: ['*.uasset'] },
+      lore: { branchPrefix: 'eng/', workspaces: '/work/ws', carry: ['Intermediate', 'DerivedDataCache'], minFreeGB: 30, lockPatterns: ['*.uasset'] },
       check: { argv: ['./Script/check.sh', '--fast'], timeoutMin: 45 },
     }
     expect(parseConfig(JSON.stringify(config))).toEqual({ config })
@@ -28,7 +28,10 @@ describe('a project config', () => {
 
   test('an unknown key, a bad check, a relative workspaces folder and bad JSON are refused, by name', () => {
     expect(error('{"tickts": "linear"}')).toBe('config.json: "tickts" is no setting here (tickets, linear, lore, check).')
-    expect(error('{"lore": {"bins": "x"}}')).toBe('config.json: "lore.bins" is no setting here (bin, branchPrefix, workspaces, carry, minFreeGB, lockPatterns).')
+    expect(error('{"lore": {"bins": "x"}}')).toBe('config.json: "lore.bins" is no setting here (branchPrefix, workspaces, carry, minFreeGB, lockPatterns).')
+    expect(error('{"lore": {"bin": "/tmp/evil"}}'), 'which program runs is never the project\'s to say').toBe(
+      'config.json: "lore.bin" is no setting here (branchPrefix, workspaces, carry, minFreeGB, lockPatterns).',
+    )
     expect(error('{"tickets": "jira"}')).toBe('config.json: tickets is "github" or "linear".')
     expect(error('{"check": {"argv": [], "timeoutMin": 5}}')).toBe('config.json: check.argv is a non-empty list of strings: the program and its arguments.')
     expect(error('{"check": {"argv": ["x"], "timeoutMin": 0}}')).toBe('config.json: check.timeoutMin is a whole number of minutes from 1 to 240.')

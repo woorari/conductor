@@ -332,15 +332,19 @@ let backend: Backend | null | undefined
 let loreFound: string | undefined
 
 const LORE_MISSING =
-  'lore could not be run: not as lore on the PATH, and not as ~/.local/bin/lore. Set its full path as lore.bin in .claude/conductor/config.json, for example {"lore": {"bin": "/usr/local/bin/lore"}}.'
+  "lore could not be run: not as lore on the PATH, and not as ~/.local/bin/lore. Set its full path in the mod's Lore program option, or export LORE_BIN, then start a new session."
+/** The person's own word on which lore to run: the mod's Lore program option. LORE_BIN comes after it. */
+let loreOption: string | undefined
 
 type Ran = { exitCode: number; stdout: string; stderr: string; out: string }
 
 /** The `lore` binary to run: the one that answered `--version`, tried on the PATH and then in ~/.local/bin. */
-async function loreBin($: EngineInterface, cwd: string, configured?: string): Promise<string | undefined> {
+async function loreBin($: EngineInterface, cwd: string): Promise<string | undefined> {
   if (loreFound !== undefined) return loreFound
   const home = await $.env.get('HOME').catch(() => undefined)
-  // A path the project gives is the one: no other lore is tried in its place.
+  // Only the person says which program runs, never the repository: a path they give is the one, and no other is tried in its place.
+  const fromEnv = (await $.env.get('LORE_BIN').catch(() => undefined))?.trim()
+  const configured = loreOption ?? (fromEnv === undefined || fromEnv === '' ? undefined : fromEnv)
   const candidates = configured !== undefined ? [configured] : ['lore', ...(home === undefined ? [] : [`${home}/.local/bin/lore`])]
   for (const candidate of candidates) {
     try {
@@ -404,8 +408,7 @@ async function backendOf($: EngineInterface): Promise<Backend | null> {
 
     return backend
   }
-  const project = parseConfig(await textAt($, `${found}/${CONFIG_PATH}`))
-  const bin = await loreBin($, found, 'config' in project ? project.config.lore?.bin : undefined)
+  const bin = await loreBin($, found)
   if (bin === undefined) {
     // Not kept: lore may be installed meanwhile, and the next look finds it.
     return { kind: 'lore', root: found, problem: LORE_MISSING }
@@ -1420,6 +1423,8 @@ async function isHome($: EngineInterface): Promise<boolean> {
 
 export const register: Register = (on, options) => {
   config = configOf(options)
+  const given = (options as Record<string, unknown> | undefined)?.loreBin
+  loreOption = typeof given === 'string' && given.trim() !== '' ? given.trim() : undefined
   on('session.start', async ($, e, next) => {
     if (!(await isHome($))) return next(e)
     // The timers first: whatever a registration below runs into, the board stays live.
