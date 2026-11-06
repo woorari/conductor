@@ -1,20 +1,21 @@
 import type { Ledger } from '../types'
 import { RUN_ID } from './ledger'
+import { linearKeyOf } from './linear'
 import { FILES_PER_TASK, tidy } from './signals'
 
 /** What `/conduct` was asked to start. */
 export type Conducting = {
-  /** The run's id: the issue's number, the spec file's name, or the name given with `id=`. */
+  /** The run's id: the issue's number or Linear key, the spec file's name, or the name given with `id=`. */
   id: string
-  /** What the run starts from, as the orchestrator is told it: `#12`, or the spec's path. */
+  /** What the run starts from, as the orchestrator is told it: `#12`, `ABC-12`, or the spec's path. */
   source: string
-  kind: 'issue' | 'spec'
+  kind: 'issue' | 'linear' | 'spec'
   /** What the owner called the run, when they did. */
   title?: string
 }
 
 export const CONDUCT_USAGE =
-  'Say what the run starts from: /conduct #12 for an issue, or /conduct <spec path> for a spec document. Any other words name the run: /conduct #12 Retry the flaky upload.'
+  'Say what the run starts from: /conduct #12 for a GitHub issue, /conduct ABC-12 for a Linear issue, or /conduct <spec path> for a spec document. Any other words name the run: /conduct #12 Retry the flaky upload.'
 
 const TITLE_MAX = 120
 
@@ -59,29 +60,44 @@ export function conducting(args: string): Conducting | { error: string } {
     return { error: `"${explicit}" is no run id: letters, digits, _ and -, at most 64, a letter or digit first.` }
   }
   let at = rest.findIndex(one => issueOf(one) !== undefined)
+  const linearAt = at === -1 ? rest.findIndex(one => linearKeyOf(one) !== undefined) : -1
+  if (linearAt !== -1) at = linearAt
   if (at === -1 && /^\d{1,9}$/.test(rest[0] ?? '') && Number(rest[0]) >= 1) at = 0
-  const issue = at === -1 ? undefined : (issueOf(rest[at] ?? '') ?? Number(rest[at]))
-  if (issue === undefined) at = rest.findIndex(isPath)
+  const linear = linearAt === -1 ? undefined : linearKeyOf(rest[at] ?? '')
+  const issue = at === -1 || linear !== undefined ? undefined : (issueOf(rest[at] ?? '') ?? Number(rest[at]))
+  if (issue === undefined && linear === undefined) at = rest.findIndex(isPath)
   const from = rest[at]
   if (from === undefined) return { error: CONDUCT_USAGE }
   const title = tidy(rest.filter((_, index) => index !== at).join(' ')).slice(0, TITLE_MAX)
-  const id = explicit ?? (issue === undefined ? named(from) : String(issue))
+  const id = explicit ?? linear ?? (issue === undefined ? named(from) : String(issue))
   if (!RUN_ID.test(id)) {
     return { error: `The name of ${from} gives no run id. Name the run yourself: /conduct ${from} id=<run id> (letters, digits, _ and -).` }
   }
 
   return {
     id,
-    source: issue === undefined ? from : `#${issue}`,
-    kind: issue === undefined ? 'spec' : 'issue',
+    source: linear ?? (issue === undefined ? from : `#${issue}`),
+    kind: linear !== undefined ? 'linear' : issue === undefined ? 'spec' : 'issue',
     ...(title === '' ? {} : { title }),
   }
 }
 
+/** What a new run keeps beyond its source: where its tickets are, the project's config, and its Lore branch. */
+export type RunMore = Pick<Ledger['run'], 'tickets' | 'config' | 'lore'>
+
 /** A new run's ledger: nothing in it yet, and no worker may start before its plan is approved. */
-export const newRun = (id: string, source: string, at: string, title?: string): Ledger => ({
+export const newRun = (id: string, source: string, at: string, title?: string, more: RunMore = {}): Ledger => ({
   version: 1,
-  run: { id, title: title ?? `Run ${id}`, source, startedAt: at, plan: 'draft' },
+  run: {
+    id,
+    title: title ?? `Run ${id}`,
+    source,
+    startedAt: at,
+    plan: 'draft',
+    ...(more.tickets === undefined ? {} : { tickets: more.tickets }),
+    ...(more.config === undefined ? {} : { config: more.config }),
+    ...(more.lore === undefined ? {} : { lore: more.lore }),
+  },
   tasks: [],
   problems: [],
   posts: [],

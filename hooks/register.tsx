@@ -34,6 +34,8 @@ import { dashboardSvg } from './dashboard'
 import { KEEP, ROTATE_AT, carried, handover } from './handover'
 import { LINEAR_KEY, RUN_ID, STATUSES, TIERS, parseLedger } from './ledger'
 import { repositoryInfoOf } from './lore'
+import { CONFIG_PATH, LORE_DEFAULTS, PLACEHOLDER_SNIPPET, hasPlaceholder, parseConfig, runsIgnored } from './project'
+import { runBranchOf } from './workspace'
 import type { RepositoryInfo } from './lore'
 import { pauseRun, unpauseRun } from './pause'
 import { LOOK_AGAIN_MIN, dueForLook, isUnderway, unsettled } from './problems'
@@ -335,10 +337,11 @@ const LORE_MISSING =
 type Ran = { exitCode: number; stdout: string; stderr: string; out: string }
 
 /** The `lore` binary to run: the one that answered `--version`, tried on the PATH and then in ~/.local/bin. */
-async function loreBin($: EngineInterface, cwd: string): Promise<string | undefined> {
+async function loreBin($: EngineInterface, cwd: string, configured?: string): Promise<string | undefined> {
   if (loreFound !== undefined) return loreFound
   const home = await $.env.get('HOME').catch(() => undefined)
-  const candidates = ['lore', ...(home === undefined ? [] : [`${home}/.local/bin/lore`])]
+  // A path the project gives is the one: no other lore is tried in its place.
+  const candidates = configured !== undefined ? [configured] : ['lore', ...(home === undefined ? [] : [`${home}/.local/bin/lore`])]
   for (const candidate of candidates) {
     try {
       const ran = await $.process.run([candidate, '--version'], { cwd, timeoutMs: 10_000 })
@@ -401,7 +404,8 @@ async function backendOf($: EngineInterface): Promise<Backend | null> {
 
     return backend
   }
-  const bin = await loreBin($, found)
+  const project = parseConfig(await textAt($, `${found}/${CONFIG_PATH}`))
+  const bin = await loreBin($, found, 'config' in project ? project.config.lore?.bin : undefined)
   if (bin === undefined) {
     // Not kept: lore may be installed meanwhile, and the next look finds it.
     return { kind: 'lore', root: found, problem: LORE_MISSING }
@@ -412,6 +416,15 @@ async function backendOf($: EngineInterface): Promise<Backend | null> {
   backend = { kind: 'lore', root: found, bin, info }
 
   return backend
+}
+
+/** A file's text, or undefined when it is not there or cannot be read. */
+async function textAt($: EngineInterface, path: string): Promise<string | undefined> {
+  try {
+    return await $.fs.read(path)
+  } catch {
+    return undefined
+  }
 }
 
 /** The root of the repository or workspace the session is in, read again on a rescan; null outside both. */
@@ -1972,14 +1985,44 @@ export const register: Register = (on, options) => {
       const isThere = (await $.fs.exists(source).catch(() => false)) || (!source.startsWith('/') && (await $.fs.exists(`${root}/${source}`).catch(() => false)))
       if (!isThere) return { text: `There is no file ${source} here, so there is nothing to start a run from. For an issue, give its number: /conduct #12.` }
     }
+    const configText = await textAt($, `${root}/${CONFIG_PATH}`)
+    const read = parseConfig(configText)
+    if ('error' in read) return { text: `No run was started: ${read.error}` }
+    const project = read.config
+    const tickets = asked.kind === 'linear' || (asked.kind === 'spec' && project.tickets === 'linear') ? ('linear' as const) : undefined
+    if (tickets === 'linear' && asked.kind === 'spec' && project.linear?.team === undefined) {
+      return {
+        text: 'No run was started. A run from a spec with its tickets in Linear files them in one team: set linear.team in .claude/conductor/config.json, for example {"linear": {"team": "ABC"}}.',
+      }
+    }
+    let loreRun: Ledger['run']['lore']
+    if (here?.kind === 'lore' && here.info !== undefined) {
+      if (!runsIgnored(await textAt($, `${root}/.loreignore`))) {
+        return {
+          text: 'No run was started. The run ledgers are rewritten every few seconds and stay out of Lore: add the line .claude/conductor/runs/ to the .loreignore at the root of this workspace.',
+        }
+      }
+      if (!hasPlaceholder([await textAt($, `${root}/.claude/settings.json`), await textAt($, `${root}/.claude/settings.local.json`)])) {
+        return {
+          text: `No run was started. Outside git, Claude Code lets the mod make each worker's Lore workspace only when the project declares a WorktreeCreate hook. Add this to .claude/settings.local.json (or .claude/settings.json), then give /conduct again; if a worker still cannot start, start a new session:\n\n${PLACEHOLDER_SNIPPET}`,
+        }
+      }
+      loreRun = {
+        remote: here.info.remote,
+        repository: here.info.name,
+        base: config.base,
+        branch: runBranchOf(project.lore?.branchPrefix ?? LORE_DEFAULTS.branchPrefix, source, id, title),
+      }
+    }
     const path = ledgerPath(root, id)
     if (await $.fs.exists(path)) {
       return {
-        text: `Run ${id} exists already: /board ${id} binds this session to it. For another run from the same ${asked.kind === 'issue' ? 'issue' : 'spec'}, give it a name of its own: /conduct ${source} id=<run id>.`,
+        text: `Run ${id} exists already: /board ${id} binds this session to it. For another run from the same ${asked.kind === 'spec' ? 'spec' : 'issue'}, give it a name of its own: /conduct ${source} id=<run id>.`,
       }
     }
     const now = await $.clock.now()
-    await $.fs.write(path, `${JSON.stringify(newRun(id, source, iso(now), title), null, 2)}\n`)
+    const more = { tickets, config: configText === undefined ? undefined : project, lore: loreRun }
+    await $.fs.write(path, `${JSON.stringify(newRun(id, source, iso(now), title, more), null, 2)}\n`)
     await flush($)
     await bind($, id)
     await update($, nowMs, () => now)
