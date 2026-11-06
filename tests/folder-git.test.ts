@@ -64,8 +64,8 @@ test('a worker gets a worktree the mod made', async ($, on) => {
   engine.agentIds.push('a1')
   await spawn($, 't1')
   const path = `${GIT_WS}.conductor/ABC-12/t1`
-  expect(gitRan(engine)).toContainEqual(['git', '-C', GIT_WS, 'fetch', 'origin', 'main'])
-  expect(gitRan(engine)).toContainEqual(['git', '-C', GIT_WS, 'worktree', 'add', '-b', 'conductor/ABC-12/t1', path, 'origin/main'])
+  expect(gitRan(engine)).toContainEqual(['git', '-C', GIT_WS, 'fetch', 'origin', '+refs/heads/main:refs/remotes/origin/main'])
+  expect(gitRan(engine)).toContainEqual(['git', '-C', GIT_WS, 'worktree', 'add', '-b', 'conductor/ABC-12/t1', path, 'refs/remotes/origin/main'])
   expect(await worktree($, 'agent-a1'), "the mod's own worktree, not the person's hook beneath").toEqual({ worktreePath: path })
 })
 
@@ -104,5 +104,24 @@ test("a place's base is the run's base", async ($, on) => {
   expect(denied.deny).toContain('master')
   engine.agentIds.push('a1')
   await spawn($, 't1')
-  expect(gitRan(engine)).toContainEqual(['git', '-C', GIT_WS, 'worktree', 'add', '-b', 'conductor/ABC-12/t1', `${GIT_WS}.conductor/ABC-12/t1`, 'origin/master'])
+  expect(gitRan(engine)).toContainEqual(['git', '-C', GIT_WS, 'worktree', 'add', '-b', 'conductor/ABC-12/t1', `${GIT_WS}.conductor/ABC-12/t1`, 'refs/remotes/origin/master'])
+})
+
+test('a branch to build on that is no plain branch name reaches no git command', async ($, on) => {
+  const ledger: Ledger = {
+    version: 1,
+    run: { id: 'ABC-12', title: 'Retry', source: 'ABC-12', plan: 'approved', tickets: 'linear', startedAt: '2026-10-09T10:00:00.000Z', config: placeConfig(STUDIO, 'ABC') },
+    tasks: [
+      { id: 't0', title: 'Task t0', tier: 'sonnet', tierReason: 'a change', status: 'green', files: ['src/z.ts'], pr: 5, branch: '--upload-pack=touch x' },
+      { id: 't1', title: 'Task t1', tier: 'sonnet', tierReason: 'a change', status: 'queued', files: ['src/a.ts'], dependsOn: ['t0'] },
+    ],
+    problems: [],
+    posts: [],
+    rulings: [],
+  }
+  const { engine } = await gitBound($, on, { ledger })
+  engine.agentIds.push('a1')
+  const started = (await spawn($, 't1')) as { deny?: string }
+  expect(started.deny).toContain('is no plain branch name')
+  expect(gitRan(engine).filter(one => one[3] === 'fetch' || one[3] === 'worktree'), 'neither fetch nor worktree ran').toEqual([])
 })

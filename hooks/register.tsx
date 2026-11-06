@@ -1068,6 +1068,14 @@ async function workspaceFor($: EngineInterface, making: Making): Promise<{ path:
 }
 
 /**
+ * A branch name git takes as a plain word: letters, digits and . _ / -, a
+ * letter or digit first; no `..`, `//` or `/.`, and not ending in `/`, `.` or
+ * `.lock`. Nothing that starts with a dash, so never an option.
+ */
+const isPlainBranch = (name: string): boolean =>
+  /^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(name) && !name.includes('..') && !name.includes('//') && !name.includes('/.') && !name.endsWith('/') && !name.endsWith('.') && !name.endsWith('.lock')
+
+/**
  * Makes a git worker's worktree in a home that is not a repository, where the
  * engine makes none: beside the repository, never inside it, on a branch of
  * its own, from the base branch (or the branch it builds on) as it is on
@@ -1078,11 +1086,15 @@ async function gitWorktreeFor(
   at: { root: string; base: string; path: string; branch: string; start: string },
 ): Promise<{ path: string; error?: undefined } | { error: string }> {
   if (!isInside(at.base, at.path) || at.path === at.root || at.path.startsWith(`${at.root}/`)) return { error: `${at.path} is no place for a worktree: it must lie inside ${at.base}, outside ${at.root}` }
+  // A branch name may come from the ledger, where a worker records it: only a plain one reaches git, and only inside a full ref.
+  for (const name of [at.start, at.branch]) {
+    if (!isPlainBranch(name)) return { error: `"${name}" is no plain branch name, so no git command takes it` }
+  }
   if (await $.fs.exists(`${at.path}/.git`).catch(() => false)) return { path: at.path }
   if (await $.fs.exists(at.path).catch(() => true)) return { error: `${at.path} is there already and is no worktree; it is left as it is. Move it away, then start the worker again` }
-  const fetched = await runProgram($, ['git', '-C', at.root, 'fetch', 'origin', at.start], LONG_MS)
+  const fetched = await runProgram($, ['git', '-C', at.root, 'fetch', 'origin', `+refs/heads/${at.start}:refs/remotes/origin/${at.start}`], LONG_MS)
   if (fetched.exitCode !== 0) return { error: `git could not fetch ${at.start}: ${lastLine(fetched)}` }
-  const added = await runProgram($, ['git', '-C', at.root, 'worktree', 'add', '-b', at.branch, at.path, `origin/${at.start}`], LONG_MS)
+  const added = await runProgram($, ['git', '-C', at.root, 'worktree', 'add', '-b', at.branch, at.path, `refs/remotes/origin/${at.start}`], LONG_MS)
   if (added.exitCode !== 0) return { error: lastLine(added) }
 
   return { path: at.path }
