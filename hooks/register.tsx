@@ -35,7 +35,7 @@ import { KEEP, ROTATE_AT, carried, handover } from './handover'
 import { LINEAR_KEY, RUN_ID, STATUSES, TIERS, parseLedger } from './ledger'
 import { approvedMain, baseBroughtIn, conflicted, letGo, loreReady, onBase, onRunBranch, readyForBase, rev7, startLoreMerge } from './lore-merge'
 import { LINEAR_API, M_CREATE, M_UPDATE, Q_ISSUE, Q_TEAM, apiKeyOf, createdOf, errorsOf, issueOf, issueText, stateFor, teamOf, updatedOf } from './linear'
-import { branchInfoOf, ignoreRules, mergeOf, pushOf, repositoryInfoOf, statusOf } from './lore'
+import { branchInfoOf, ignoreRules, loreByHand, mergeOf, pushOf, repositoryInfoOf, statusOf } from './lore'
 import { CONFIG_PATH, LORE_DEFAULTS, PLACEHOLDER_SNIPPET, hasPlaceholder, parseConfig, runsIgnored } from './project'
 import { isInside, removals, runBranchOf, runWorkspaceOf, taskBranchOf, topLevel, workspaceOf, workspacesOf } from './workspace'
 import type { RepositoryInfo } from './lore'
@@ -2628,6 +2628,23 @@ export const register: Register = (on, options) => {
       }
     }
     const taskId = call.agentId === undefined ? undefined : agents.get(call.agentId)
+    // In a bound Lore run the mod does the Lore writes: a worker moves only its own branch, the orchestrator only reads.
+    if (call.tool === 'Bash' && typeof call.command === 'string' && /(^|[\s/;&|])lore(\s|$)/.test(call.command) && (await backendOf($))?.kind === 'lore') {
+      const path = await boundLedger($).catch(() => undefined)
+      const runLore = path === undefined ? undefined : parseLedger((await textAt($, path)) ?? '').ledger?.run.lore
+      if (runLore !== undefined) {
+        const isWorker = call.agentId !== undefined
+        const own = isWorker && taskId !== undefined ? taskBranchOf(runLore.branch, taskId) : undefined
+        const what = loreByHand(call.command, { base: runLore.base, runBranch: runLore.branch, ownBranch: own, caller: isWorker ? 'worker' : 'orchestrator' })
+        if (what !== undefined) {
+          return {
+            deny: isWorker
+              ? `conductor: this command ${what}. A worker builds only on its own branch ${own ?? '(none yet)'}: it never merges, switches or creates branches, and never pushes another branch. Commit and push your own branch, set your task to review with the revision you pushed, and hand back.`
+              : `conductor: this command ${what} by hand. In a bound Lore run the mod does the Lore writes and the owner's workspace is only read: a judged task merges with ${TOOL_MERGE}, the run branch reaches ${runLore.base} only by the owner's /approve-main, and ${runLore.base} is brought into the run branch with mcp__conductor__run_sync_base. /board none lets go of the run.`,
+          }
+        }
+      }
+    }
     // A Lore worker that was not handed a workspace of its own would build in the owner's: it may not write at all.
     if (taskId !== undefined && (WRITES.has(call.tool) || call.tool === 'Bash') && !isolated.has(taskId) && (await backendOf($))?.kind === 'lore') {
       const path = await boundLedger($).catch(() => undefined)
@@ -2756,6 +2773,21 @@ export const register: Register = (on, options) => {
     if (run === null) return composed
     // GitHub's side of a run is told only where the repository is on GitHub; anywhere else, what stands in its place.
     const isHere = await isAtForge($)
+    // A Lore run: its branches, its workspaces and its merges stand where GitHub's pull requests would.
+    const boundPath = await boundLedger($).catch(() => undefined)
+    const bound = boundPath === undefined ? undefined : parseLedger((await textAt($, boundPath)) ?? '').ledger
+    const runLore = (await backendOf($))?.kind === 'lore' ? bound?.run.lore : undefined
+    const checkArgv = bound?.run.config?.check?.argv
+    const loreBullets =
+      runLore === undefined
+        ? []
+        : [
+            `- This is a Lore workspace. The run has its own branch, ${runLore.branch}, made from ${runLore.base} when the owner approved the plan. Each task's worker builds in a Lore workspace of its own, on its own branch ${runLore.branch}/<task id>: the mod copies it from the owner's workspace when the worker starts. The owner's workspace is only read: never stage, commit, sync, switch or push there.`,
+            `- A worker hands back with the revision it pushed (task_update with revision). A task you judged green (its change reviewed${checkArgv === undefined ? '' : ', its check passed'}) is merged into ${runLore.branch} through ${TOOL_MERGE} alone, pinned to that revision, one at a time; ${TOOL_CHECK} says what stands in the way. A conflict comes back as a blocked task with the files named: have its worker bring the run branch in and resolve, never by picking one side of a binary file. A new revision on a green task sends it back to review.`,
+            ...(checkArgv === undefined ? [] : [`- The project's check (${checkArgv.join(' ')}) runs on each revision you judge green, and on the run branch's head once every task is merged. Its verdict reaches you as a board notice; a task is merged only once its check passed.`]),
+            `- When every task is merged into ${runLore.branch} and no blocker or warning is open, tell the owner in a line or two what changed and how to try it, and ask them to type /approve-main. Only the owner merges the run branch into ${runLore.base}: no tool of yours does. When ${runLore.base} moved since the run branch last took it in, /approve-main is refused: bring it in with mcp__conductor__run_sync_base, then ask the owner again.`,
+            '- Workers never merge. A lore write by hand (push, merge, switch, sync, protect) is refused in a bound session; read with lore status, lore history, lore diff and lore branch info.',
+          ]
     const text = [
       '# Run board (conductor)',
       '',
@@ -2769,9 +2801,15 @@ export const register: Register = (on, options) => {
       `- A task starts once everything it waits for is green (reviewed, its checks green) or done: it does not wait for the merge. Start it then; the mod tells its worker to build on the green task's branch, which works for one unmerged branch at a time. ${isHere ? `${TOOL_MERGE} takes a task only after everything it waits for is done, so merge in that order.` : 'A task is merged only after everything it waits for is done, so merge in that order.'}`,
       `- A start is refused for an agent that is no task's worker, for a task that is done, already building or waiting on tasks that are not green yet, and when the run's limit of workers building at once is reached. Read-only helpers of type ${HELPER_TYPES.join(', ')} start without a task. A worker's own subagents never run on a dearer tier than the worker.`,
       '- The owner holds a run with /pause and lets it go on with /unpause. While it is paused the mod starts no worker and merges nothing; workers that are building finish and hand back, you judge their hand-backs and answer their questions, and a merge in flight is still settled with GitHub. When nothing is building any more, tell the owner in a line or two where the run stands, and stop. When the pause ends, read the board and go on: judge what was handed back, start what can start, and merge what is green, in order.',
-      '- A task that is building while its worker is not running (the session was restarted meanwhile; ListAgents shows who runs) gets its worker started again with a message to the agent id the board lists: tell it first to run git status and git diff, and to commit and push what is its own.',
-      '- After a hand-back the orchestrator judges it and sets the task to review, green, blocked or failed, or to done when it has no pull request.',
-      ...(isHere
+      runLore === undefined
+        ? '- A task that is building while its worker is not running (the session was restarted meanwhile; ListAgents shows who runs) gets its worker started again with a message to the agent id the board lists: tell it first to run git status and git diff, and to commit and push what is its own.'
+        : '- A task that is building while its worker is not running (the session was restarted meanwhile; ListAgents shows who runs) gets its worker started again with a message to the agent id the board lists: tell it first to run lore status --scan and lore diff in its workspace, and to commit and push what is its own.',
+      runLore === undefined
+        ? '- After a hand-back the orchestrator judges it and sets the task to review, green, blocked or failed, or to done when it has no pull request.'
+        : '- After a hand-back the orchestrator judges it and sets the task to review, green, blocked or failed, or to done when it changed no code.',
+      ...(runLore !== undefined
+        ? loreBullets
+        : isHere
         ? [
             `- A task with a pull request becomes done through ${TOOL_MERGE} alone, for a task you judged green: its checks green on its head, its change reviewed. The mod reads GitHub, merges into ${config.base} pinned to that head with GitHub's ${config.method} method, never two at once (across runs too), marks the task done once GitHub has merged it and tells you. ${TOOL_CHECK} says what stands in the way and changes nothing. Before each merge tell the other sessions that may merge (ListAgents) and name them in told. Workers never merge, and a merge by hand (gh pr merge, GitHub's merge call, a push to ${config.base}) is refused in a bound session.`,
             `- When the board tells you a task is done, go on at once: start what can start and merge the next green task. After each merge the board watches the checks on ${config.base}: when they fail, find the merge that broke them and repair it before anything else merges; the repair's own merge takes onRedMain: true.`,
@@ -2784,8 +2822,10 @@ export const register: Register = (on, options) => {
       `- When your context is about ${ROTATE_AT}% full, the mod compacts this conversation between your turns and brings the run's state back from the ledger; handover.md beside the ledger holds the same state. So keep what matters on the board (a task's note, a ruling) and not only in the conversation. ${TOOL_READ} gives you the whole run at any time.`,
       `- Name the files a task is expected to change when you add it. The mod sees which files each worker changes and tells you when two open tasks change the same one.`,
     ].join('\n')
+    // What the shared lines say of GitHub reads as Lore's in a Lore run.
+    const said = runLore === undefined ? text : text.replace('hand back as one pull request', 'hand back as one branch').replace('a merge in flight is still settled with GitHub', 'a merge in flight is still settled')
 
-    return { sections: [...composed.sections, { id: 'conductor:run', text, scope: 'session' as const }] }
+    return { sections: [...composed.sections, { id: 'conductor:run', text: said, scope: 'session' as const }] }
   })
 
   on('command.run', { command: 'board' }, async ($, e) => {

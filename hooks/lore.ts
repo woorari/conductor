@@ -270,3 +270,107 @@ export function isIgnored(rules: readonly IgnoreRule[], path: string, isDir: boo
   }
   return own(rules, parts.join('/'), isDir)
 }
+
+/** Lore's global options that take a value: skipped, with their value, on the way to the subcommand. */
+const VALUE_OPTIONS = new Set([
+  '--repository',
+  '--log-level',
+  '--identity',
+  '--identity-token',
+  '--access-token',
+  '--max-connections',
+  '--file-count-limit',
+  '--file-size-limit',
+  '--compress-limit',
+  '--search-limit',
+  '--event-interval',
+])
+
+/** What the orchestrator may run by hand in a bound Lore run: reading, and nothing that writes, the owner's workspace included. */
+const READS: readonly string[][] = [
+  ['status'],
+  ['history'],
+  ['diff'],
+  ['branch', 'info'],
+  ['branch', 'list'],
+  ['branch', 'diff'],
+  ['branch', 'latest'],
+  ['file', 'history'],
+  ['file', 'diff'],
+  ['file', 'info'],
+  ['file', 'audit'],
+  ['revision', 'info'],
+  ['revision', 'history'],
+  ['revision', 'diff'],
+  ['revision', 'find'],
+  ['repository', 'info'],
+  ['repository', 'list'],
+  ['lock', 'status'],
+  ['lock', 'query'],
+  ['layer', 'list'],
+  ['link', 'list'],
+  ['link', 'info'],
+]
+
+/** What a worker may not run, even in its own workspace: whatever moves a branch other than its own. */
+const WORKER_NEVER: readonly string[][] = [
+  ['branch', 'merge'],
+  ['branch', 'switch'],
+  ['branch', 'create'],
+  ['branch', 'protect'],
+  ['branch', 'unprotect'],
+  ['branch', 'archive'],
+  ['branch', 'reset'],
+  ['branch', 'push'],
+  ['sync'],
+  ['revision', 'sync'],
+  ['revision', 'cherry-pick'],
+  ['revision', 'revert'],
+  ['revision', 'restore'],
+  ['repository', 'create'],
+  ['repository', 'delete'],
+]
+
+/** The words of one shell command, quotes taken off; a quote left open runs to the end. */
+const tokens = (segment: string): string[] => [...segment.matchAll(/"([^"]*)"?|'([^']*)'?|(\S+)/g)].map(found => found[1] ?? found[2] ?? found[3] ?? '')
+
+/**
+ * Whether a shell line runs `lore` by hand in a way a bound Lore run refuses:
+ * a worker moving any branch but its own, or the orchestrator writing at all
+ * (the mod does the Lore writes; the owner's workspace is only read). Answers
+ * what the command does, or undefined. It reads the command's text, so a
+ * `lore` hidden inside a script is not seen.
+ */
+export function loreByHand(command: string, ctx: { base: string; runBranch?: string; ownBranch?: string; caller: 'orchestrator' | 'worker' }): string | undefined {
+  for (const segment of command.split(/&&|\|\||;|\||\n/)) {
+    const words = tokens(segment.trim())
+    let at = 0
+    while (at < words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[at] ?? '')) at += 1
+    if (!/(^|\/)lore$/.test(words[at] ?? '')) continue
+    at += 1
+    const rest: string[] = []
+    for (; at < words.length; at += 1) {
+      const word = words[at] ?? ''
+      if (VALUE_OPTIONS.has(word)) {
+        at += 1
+        continue
+      }
+      if (word.startsWith('--') && word.includes('=')) continue
+      rest.push(word)
+    }
+    const positional = rest.filter(one => !one.startsWith('-'))
+    const is = (path: readonly string[]): boolean => path.every((one, index) => positional[index] === one)
+    const name = positional.slice(0, 2).join(' ')
+    if (ctx.caller === 'worker') {
+      if (WORKER_NEVER.some(is)) return `runs lore ${name}`
+      if (is(['push'])) {
+        const target = positional[1]
+        if (target !== undefined && target !== ctx.ownBranch) return `pushes ${target}`
+      }
+      continue
+    }
+    if (!READS.some(is) || (is(['status']) && rest.includes('--scan'))) return `runs lore ${name === '' ? '(nothing)' : name}${rest.includes('--scan') ? ' --scan' : ''}`
+  }
+
+  return undefined
+}

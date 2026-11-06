@@ -1,0 +1,83 @@
+import { describe, expect, test } from 'claude-code/testing'
+import type { Engine } from 'claude-code/testing'
+
+import { detail } from '../hooks/board'
+import { loreByHand } from '../hooks/lore'
+import { briefing } from '../hooks/posts'
+import type { Ledger } from '../types'
+import { REV_MAIN, REV_T1 } from './lore-output'
+import { BASE, RUN, RUN_BRANCH, lored, task } from './lore-world'
+
+type Ran = { text?: string; deny?: string }
+const raise = ($: Engine, input: Record<string, unknown>) => ($.tool.call as unknown as (input: Record<string, unknown>) => Promise<Ran>)(input)
+const bash = ($: Engine, command: string, agentId?: string) =>
+  raise($, { tool: 'Bash', tool_use_id: 'bash', command, description: 'A command', ...(agentId === undefined ? {} : { agentId }) })
+
+const WORKER = { base: 'main', runBranch: RUN_BRANCH, ownBranch: `${RUN_BRANCH}/t1`, caller: 'worker' as const }
+const ORCH = { base: 'main', runBranch: RUN_BRANCH, caller: 'orchestrator' as const }
+
+describe('a lore command by hand, in a bound Lore run', () => {
+  test('a worker builds only on its own branch', () => {
+    expect(loreByHand(`lore push ${RUN_BRANCH}/t2`, WORKER)).toBeDefined()
+    expect(loreByHand('lore push', WORKER)).toBeUndefined()
+    expect(loreByHand(`lore push ${RUN_BRANCH}/t1`, WORKER)).toBeUndefined()
+    expect(loreByHand('lore --non-interactive stage --scan Source && lore commit "t1: fix" && lore push', WORKER)).toBeUndefined()
+    for (const command of ['lore branch merge x', 'lore branch switch main', 'lore branch create y', 'lore sync main@LATEST', 'lore branch unprotect main', 'cd x && lore branch merge y']) {
+      expect(loreByHand(command, WORKER), command).toBeDefined()
+    }
+  })
+
+  test('the orchestrator only reads: the mod does the Lore writes', () => {
+    for (const command of ['lore status', 'lore history --oneline 5', `lore branch info ${RUN_BRANCH}`, 'lore branch list', 'lore diff a.txt', 'lore file history Source/a.cpp', 'ls -la']) {
+      expect(loreByHand(command, ORCH), command).toBeUndefined()
+    }
+    for (const command of ['/home/u/.local/bin/lore branch unprotect main', 'lore push', 'lore status --scan', 'lore stage --scan .', 'lore commit "x"', 'lore sync', 'FOO=1 lore branch merge y', 'lore --repository /x branch archive z']) {
+      expect(loreByHand(command, ORCH), command).toBeDefined()
+    }
+  })
+})
+
+describe('what a Lore run is told', () => {
+  const RUNNING: Ledger = {
+    ...RUN,
+    run: { ...RUN.run, config: { lore: { lockPatterns: ['*.uasset', '*.umap'] } }, lore: { ...RUN.run.lore!, workspace: `${BASE}/ABC-12/_run`, baseAt: REV_MAIN } },
+    tasks: [task('t1', { status: 'building', branch: `${RUN_BRANCH}/t1`, workspace: `${BASE}/ABC-12/t1`, agentId: 'a1', worker: 't1' }), task('t2', { status: 'green', branch: `${RUN_BRANCH}/t2`, revision: REV_T1 })],
+  }
+
+  test("a worker's brief names its branch, its lore commands and its locks", () => {
+    const brief = briefing(RUNNING, RUNNING.tasks[0]!)
+    expect(brief).toContain(`your branch ${RUN_BRANCH}/t1`)
+    expect(brief).toContain('lore stage --scan')
+    expect(brief).toContain('lore push')
+    expect(brief).toContain('revision')
+    expect(brief).toContain('lore lock acquire')
+    expect(brief).toContain('*.uasset, *.umap')
+    expect(brief).not.toContain('pull request')
+  })
+
+  test('the orchestrator in a Lore run is told the Lore rules and nothing of pull requests', async ($, on) => {
+    await lored($, on, RUNNING)
+    const composed = await $.prompt.compose({ model: 'claude-opus-5-5', promptModel: 'claude-opus-5-5', surfaces: ['terminal'], tools: [], outputStyle: null, traits: [] } as never)
+    const text = (composed as { sections: { id: string; text: string }[] }).sections.find(one => one.id === 'conductor:run')?.text ?? ''
+    expect(text).toContain('/approve-main')
+    expect(text).toContain('run_sync_base')
+    expect(text).toContain(RUN_BRANCH)
+    expect(text).not.toContain('pull request')
+    expect(text).not.toContain('git status')
+  })
+
+  test('a by-hand lore merge is refused in a bound session, and a worker pushing another branch too', async ($, on) => {
+    await lored($, on, RUNNING)
+
+    expect((await bash($, 'lore branch merge x')).deny).toContain('/approve-main')
+    expect((await bash($, `lore push ${RUN_BRANCH}/t2`, 'a1')).deny).toContain(`${RUN_BRANCH}/t1`)
+    expect((await bash($, 'lore status')).deny).toBeUndefined()
+  })
+
+  test('the board shows a Lore task by its revision and its check', () => {
+    const row = { ...RUNNING.tasks[1]!, waitsFor: [], check: { revision: REV_T1, verdict: 'running' as const, at: '2026-10-09T10:00:00.000Z' } }
+    const line = detail(row as never)
+    expect(line).toContain(`rev ${REV_T1.slice(0, 7)}`)
+    expect(line).toContain('check running')
+  })
+})
