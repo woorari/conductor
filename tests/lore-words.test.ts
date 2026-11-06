@@ -90,6 +90,27 @@ describe('the guard fails closed where it cannot read a command', () => {
   })
 })
 
+describe('the guard reads options the way lore does (security review after the merge)', () => {
+  const OWN = { ...WORKER, ownWorkspace: '/work/Big Game 5.8.conductor/ABC-12/t1' }
+
+  test('an option and its value between subcommand words do not hide the command', () => {
+    for (const command of ['lore branch --log-level info merge x', 'lore branch --repository info merge x', 'lore branch --id x merge y', 'lore file --weird history a.txt']) {
+      expect(loreByHand(command, ORCH), command).toBeDefined()
+    }
+    expect(loreByHand('lore branch --log-level info merge x', OWN)).toBeDefined()
+    expect(loreByHand('lore branch info --remote main', ORCH), 'an option after the command words is fine').toBeUndefined()
+    expect(loreByHand('lore status --repository /x', ORCH), 'a read stays a read').toBeUndefined()
+  })
+
+  test("a worker's lore runs in its own workspace only", () => {
+    for (const command of ['lore --repository /work/Big\\ Game\\ 5.8 commit x', `lore --repository=/elsewhere push`, 'cd /work/Big\\ Game\\ 5.8 && lore commit x', 'pushd /tmp; lore push', 'lore commit x --repository /elsewhere']) {
+      expect(loreByHand(command, OWN), command).toBeDefined()
+    }
+    expect(loreByHand(`lore --repository "${OWN.ownWorkspace}" commit x`, OWN), 'its own workspace, named').toBeUndefined()
+    expect(loreByHand('lore commit "t1: fix" && lore push', OWN)).toBeUndefined()
+  })
+})
+
 describe('what a Lore run is told', () => {
   const RUNNING: Ledger = {
     ...RUN,

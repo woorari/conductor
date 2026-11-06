@@ -2866,7 +2866,8 @@ export const register: Register = (on, options) => {
         // subagent the board does not know) gets the orchestrator's read-only rules.
         const isWorker = call.agentId !== undefined && taskId !== undefined && (isolated.has(taskId) || boundRun?.tasks.find(one => one.id === taskId)?.workspace !== undefined)
         const own = isWorker && taskId !== undefined ? taskBranchOf(runLore.branch, taskId) : undefined
-        const what = loreByHand(call.command, { base: runLore.base, runBranch: runLore.branch, ownBranch: own, caller: isWorker ? 'worker' : 'orchestrator' })
+        const ownWorkspace = isWorker && taskId !== undefined ? (workspaces.get(taskId) ?? boundRun?.tasks.find(one => one.id === taskId)?.workspace) : undefined
+        const what = loreByHand(call.command, { base: runLore.base, runBranch: runLore.branch, ownBranch: own, ownWorkspace, caller: isWorker ? 'worker' : 'orchestrator' })
         if (what !== undefined) {
           return {
             deny: isWorker
