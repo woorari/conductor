@@ -37,6 +37,7 @@ import { approvedMain, baseBroughtIn, conflicted, letGo, loreReady, onBase, onRu
 import { LINEAR_API, M_CREATE, M_UPDATE, Q_ISSUE, Q_TEAM, apiKeyOf, createdOf, errorsOf, issueOf, issueText, stateFor, teamOf, updatedOf } from './linear'
 import { branchInfoOf, ignoreRules, loreByHand, mergeOf, pushOf, repositoryInfoOf, statusOf } from './lore'
 import { CONFIG_PATH, LORE_DEFAULTS, PLACEHOLDER_SNIPPET, hasPlaceholder, parseConfig, runsIgnored } from './project'
+import type { ProjectConfig } from './project'
 import { checkWorkspaceOf, isInside, removals, runBranchOf, runWorkspaceOf, taskBranchOf, topLevel, workspaceOf, workspacesOf } from './workspace'
 import type { RepositoryInfo } from './lore'
 import { pauseRun, unpauseRun } from './pause'
@@ -484,6 +485,11 @@ async function prepareWorkspace($: EngineInterface, at: Making): Promise<{ path:
   }
   const made = await runProgram($, ['mkdir', '-p', at.path])
   if (made.exitCode !== 0) return fail(`its folder could not be made: ${lastLine(made)}`)
+  // A copy-on-write copy is one only on the same disk: across disks cp -c quietly copies every byte.
+  const [rootDisk, pathDisk] = [await runProgram($, ['stat', '-f', '%d', at.root]), await runProgram($, ['stat', '-f', '%d', at.path])]
+  if (rootDisk.exitCode !== 0 || pathDisk.exitCode !== 0 || rootDisk.stdout.trim() !== pathDisk.stdout.trim()) {
+    return fail(`${at.path} lies on another disk than ${at.root} (or its disk could not be read), so a copy there would be a full copy, not a copy-on-write one. Put the workspaces on the same disk (lore.workspaces in .claude/conductor/config.json)`)
+  }
   const df = await runProgram($, ['df', '-Pk', at.path])
   const freeKb = Number(df.stdout.trim().split(/\n/).at(-1)?.trim().split(/\s+/)[3])
   if (df.exitCode !== 0 || !Number.isFinite(freeKb)) return fail(`df did not say how much disk is free: ${lastLine(df)}`)
@@ -592,8 +598,8 @@ async function startCheckNow($: EngineInterface, path: string, ledger: Ledger, t
       const base = workspacesOf(here.root, ledger.run.config?.lore?.workspaces)
       cwd = checkWorkspaceOf(base, ledger.run.id)
       const branch = taskBranchOf(runLore.branch, target.taskId)
-      if (!(await $.fs.exists(`${cwd}/.lore`).catch(() => false))) {
-        const made = await prepareWorkspace($, {
+      {
+        const made = await workspaceFor($, {
           root: here.root,
           base,
           path: cwd,
@@ -712,9 +718,9 @@ async function loreApprove($: EngineInterface, path: string): Promise<string | u
   const project = ledger.run.config
   const workspacesBase = workspacesOf(here.root, project?.lore?.workspaces)
   const workspace = runLore.workspace ?? runWorkspaceOf(workspacesBase, ledger.run.id)
-  if (!(await $.fs.exists(`${workspace}/.lore`).catch(() => false))) {
+  if (!(await $.fs.exists(readyMark(here.root, ledger.run.id, '_run')).catch(() => false)) || !(await $.fs.exists(`${workspace}/.lore`).catch(() => false))) {
     await Promise.resolve($.ui.toast("Run board: making the run's Lore workspace. A large workspace takes a minute or two.")).catch(() => undefined)
-    const made = await prepareWorkspace($, {
+    const made = await workspaceFor($, {
       root: here.root,
       base: workspacesBase,
       path: workspace,
@@ -746,6 +752,43 @@ async function loreApprove($: EngineInterface, path: string): Promise<string | u
   })
 
   return written.error ?? (written.value ? undefined : 'the run has no Lore branch any more.')
+}
+
+/** A run's config, checked again as it is read: a hand-edited ledger may hold what /conduct would have refused. */
+function projectOf(ledger: Ledger): ProjectConfig | undefined {
+  const read = parseConfig(JSON.stringify(ledger.run.config ?? {}))
+
+  return 'config' in read ? read.config : undefined
+}
+
+/** Whether a folder is one of this run's own workspaces, safe to remove: inside its workspaces folder, apart from the owner's workspace. */
+function isRemovable(root: string, ledger: Ledger, folder: string): boolean {
+  const project = projectOf(ledger)
+  if (project === undefined) return false
+  const base = workspacesOf(root, project.lore?.workspaces)
+  const isOwners = folder === root || folder.startsWith(`${root}/`) || root.startsWith(`${folder}/`)
+
+  return base !== '' && base !== '/' && isInside(base, folder) && !isOwners
+}
+
+/** The file that says a workspace was finished: only then is a folder there reused. */
+const readyMark = (root: string, runId: string, taskId: string): string => `${root}/${RUNS_DIR}/${runId}/ready-${taskId}`
+
+/**
+ * A workspace to hand on: a finished one is reused as it is; one the mod began
+ * and never finished (its `.lore` is there, its mark is not) is removed and
+ * made again; a folder that is no Lore workspace is left alone and refused by
+ * `prepareWorkspace`.
+ */
+async function workspaceFor($: EngineInterface, making: Making): Promise<{ path: string; error?: undefined } | { error: string }> {
+  const mark = readyMark(making.root, making.runId, making.taskId)
+  const hasLore = await $.fs.exists(`${making.path}/.lore`).catch(() => false)
+  if (hasLore && (await $.fs.exists(mark).catch(() => false))) return { path: making.path }
+  if (hasLore && isInside(making.base, making.path)) await runProgram($, ['rm', '-rf', '--', making.path], LONG_MS)
+  const made = await prepareWorkspace($, making)
+  if (made.error === undefined) await $.fs.write(mark, 'ready\n').catch(() => undefined)
+
+  return made
 }
 
 /** A worker's workspace made and not handed to the engine yet, by task. */
@@ -1756,10 +1799,14 @@ async function approveMain($: EngineInterface, origin: string): Promise<string> 
     if (archived.exitCode !== 0) notArchived.push(one.id)
   }
   const kept: string[] = []
-  for (const folder of [...ledger.tasks.flatMap(one => (one.workspace === undefined ? [] : [one.workspace])), run]) {
+  const hereBase = await backendOf($)
+  const ownBase = hereBase === null ? '' : workspacesOf(hereBase.root, projectOf(ledger)?.lore?.workspaces)
+  // The folders removed are the ones the mod derives for this run, never a path read off the ledger.
+  const derivedFolders = ownBase === '' ? [] : ledger.tasks.flatMap(one => (one.workspace === undefined ? [] : [workspaceOf(ownBase, ledger.run.id, one.id)]))
+  for (const folder of [...derivedFolders, ...(ownBase === '' ? [] : [runWorkspaceOf(ownBase, ledger.run.id)])]) {
     const scanned = statusOf((await lore($, ['status', '--scan'], folder, LONG_MS)).out)
     const here = await backendOf($)
-    if (scanned?.isClean === true && scanned.isInSync && here !== null && isInside(workspacesOf(here.root, ledger.run.config?.lore?.workspaces), folder)) await runProgram($, ['rm', '-rf', '--', folder], LONG_MS)
+    if (scanned?.isClean === true && scanned.isInSync && here !== null && isRemovable(here.root, ledger, folder)) await runProgram($, ['rm', '-rf', '--', folder], LONG_MS)
     else kept.push(folder)
   }
   const tail = [
@@ -1907,7 +1954,9 @@ async function loreMergeTool($: EngineInterface, call: ToolCall, isCheckOnly: bo
   if (task.workspace !== undefined) {
     const scanned = await lore($, ['status', '--scan'], task.workspace, LONG_MS)
     const status = statusOf(scanned.out)
-    if (status?.isClean === true && status.isInSync && isInside(workspacesOf((await backendOf($))?.root ?? '', ledger.run.config?.lore?.workspaces), task.workspace)) {
+    const hereNow = await backendOf($)
+    const derived = hereNow === null || projectOf(ledger) === undefined ? undefined : workspaceOf(workspacesOf(hereNow.root, projectOf(ledger)?.lore?.workspaces), ledger.run.id, id)
+    if (status?.isClean === true && status.isInSync && hereNow !== null && derived === task.workspace && isRemovable(hereNow.root, ledger, derived)) {
       await runProgram($, ['rm', '-rf', '--', task.workspace], LONG_MS)
       workspaceLine = 'Its workspace is removed: everything in it is in Lore.'
     } else {
@@ -2593,10 +2642,7 @@ export const register: Register = (on, options) => {
       const taskId = decided.taskId
       const workspacesBase = workspacesOf(here.root, project?.lore?.workspaces)
       const workspace = workspaceOf(workspacesBase, read.ledger.run.id, taskId)
-      const isThere = await $.fs.exists(`${workspace}/.lore`).catch(() => false)
-      const made = isThere
-        ? { path: workspace }
-        : await prepareWorkspace($, {
+      const made = await workspaceFor($, {
             root: here.root,
             base: workspacesBase,
             path: workspace,

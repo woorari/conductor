@@ -152,3 +152,40 @@ test('workspaces of two starts in one message are made side by side, not one aft
   const lastOfT1 = order.map((one, at) => (one.includes('/ABC-12/t1') ? at : -1)).reduce((a, b) => Math.max(a, b), -1)
   expect(firstOfT2, 'the second copy starts before the first workspace is finished').toBeLessThan(lastOfT1)
 })
+
+test('a workspace folder on another disk than the owner\'s is refused: a copy there would be a full one', async ($, on) => {
+  const { files, engine } = await lored($, on)
+  engine.programs.unshift({ match: argv => argv[0] === 'stat' && (argv.at(-1) ?? '').startsWith(BASE), answer: { exitCode: 0, stdout: '16777240\n' } })
+  engine.agentIds.push('a1')
+
+  const said = await spawn($, 't1')
+  expect((said as { deny?: string }).deny).toContain('another disk')
+  expect(engine.calls.some(one => one.argv[0] === 'cp')).toBe(false)
+  expect(stored(files).tasks[0]?.status).toBe('queued')
+})
+
+test('a half-made workspace (its .lore copied, never finished) is made again; a finished one is reused', async ($, on) => {
+  const { files, engine } = await lored($, on)
+  engine.dirs.push(`${BASE}/ABC-12/t1`, `${BASE}/ABC-12/t1/.lore`)
+  engine.programs.unshift({
+    match: argv => argv[0] === 'rm' && argv[1] === '-rf',
+    answer: argv => {
+      const gone = argv.at(-1) ?? ''
+      engine.dirs.splice(0, engine.dirs.length, ...engine.dirs.filter(one => one !== gone && !one.startsWith(`${gone}/`)))
+
+      return { exitCode: 0, stdout: '' }
+    },
+  })
+  engine.agentIds.push('a1', 'a2')
+
+  await spawn($, 't1')
+  expect(engine.calls.map(one => one.argv)).toContainEqual(['rm', '-rf', '--', `${BASE}/ABC-12/t1`])
+  expect(engine.calls.some(one => one.argv[0] === 'cp' && one.argv.at(-1) === `${BASE}/ABC-12/t1/`), 'and copied afresh').toBe(true)
+  expect(files[`${LORE_RUNS}/ABC-12/ready-t1`], 'a finished workspace is marked').toBeDefined()
+
+  engine.dirs.push(`${BASE}/ABC-12/t2`, `${BASE}/ABC-12/t2/.lore`)
+  files[`${LORE_RUNS}/ABC-12/ready-t2`] = { text: 'ready\n', mtimeMs: 1 }
+  const copiesBefore = engine.calls.filter(one => one.argv[0] === 'cp').length
+  await spawn($, 't2')
+  expect(engine.calls.filter(one => one.argv[0] === 'cp').length, 'a finished one is reused as it is').toBe(copiesBefore)
+})

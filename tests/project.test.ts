@@ -36,6 +36,7 @@ describe('a project config', () => {
     expect(error('{"check": {"argv": [], "timeoutMin": 5}}')).toBe('config.json: check.argv is a non-empty list of strings: the program and its arguments.')
     expect(error('{"check": {"argv": ["x"], "timeoutMin": 0}}')).toBe('config.json: check.timeoutMin is a whole number of minutes from 1 to 240.')
     expect(error('{"lore": {"workspaces": "ws"}}')).toBe('config.json: lore.workspaces is an absolute path.')
+    expect(error('{"lore": {"workspaces": "/"}}')).toBe('config.json: lore.workspaces is an absolute path.')
     expect(error('{"lore": {"minFreeGB": -1}}')).toBe('config.json: lore.minFreeGB is a whole number of gigabytes from 0.')
     expect(error('{"linear": {"team": "abc"}}')).toBe('config.json: linear.team is a Linear team key, like ABC.')
     expect(error('{oops')).toBe('config.json is not valid JSON.')

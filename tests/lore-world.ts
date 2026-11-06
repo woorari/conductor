@@ -88,7 +88,7 @@ export async function lored($: Engine, on: Parameters<typeof world>[0], ledger: 
     { name: 'Source', kind: 'dir' },
     { name: 'Game.uproject', kind: 'file' },
   ]
-  engine.programs.push(program('df', ok(DF)), program('cp', ok()), program('mkdir', ok()), program('/bin/sh', ok()), program('rm', ok()))
+  engine.programs.push(program('df', ok(DF)), program('stat', ok('16777232\n')), program('cp', ok()), program('mkdir', ok()), program('/bin/sh', ok()), program('rm', ok()))
   engine.lore.unshift(
     answers(['repository', 'update-path'], ok()),
     answers(['status', '--scan'], ok(STATUS_CLEAN)),

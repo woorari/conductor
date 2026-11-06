@@ -192,3 +192,20 @@ test('a task is never merged onto a run branch head the board did not leave', as
   expect(ranIn(engine, RUN_WS).some(one => one.startsWith(`branch merge ${T1_BRANCH}`))).toBe(false)
   expect(stored(files).merge).toBeUndefined()
 })
+
+test('a workspace path written on the task is never what gets removed: the mod derives it', async ($, on) => {
+  const { engine } = await green($, on, { ...GREEN, tasks: [{ ...GREEN.tasks[0]!, workspace: '/work/Big Game 5.8' }, GREEN.tasks[1]!] })
+  engine.lore.unshift(answers(['status', '--scan'], ok(STATUS_CLEAN)))
+
+  await call($, 'merge', MERGE)
+  const removed = engine.calls.filter(one => one.argv[0] === 'rm').map(one => one.argv.at(-1))
+  expect(removed).not.toContain('/work/Big Game 5.8')
+  expect(removed.every(one => (one ?? '').startsWith(`${BASE}/`))).toBe(true)
+})
+
+test('a run whose workspaces folder reads as / removes nothing', async ($, on) => {
+  const { engine } = await green($, on, { ...GREEN, run: { ...GREEN.run, config: { lore: { workspaces: '/' } } } })
+
+  await call($, 'merge', MERGE)
+  expect(engine.calls.filter(one => one.argv[0] === 'rm' && one.argv[1] === '-rf')).toEqual([])
+})
