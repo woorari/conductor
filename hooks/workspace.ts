@@ -46,6 +46,9 @@ export const workspaceOf = (base: string, runId: string, taskId: string): string
 /** The run's own workspace, on the run branch: where the mod merges. */
 export const runWorkspaceOf = (base: string, runId: string): string => `${base}/${plain(runId)}/_run`
 
+/** The run's check workspace: the mod's own, put at each judged revision before its check runs. */
+export const checkWorkspaceOf = (base: string, runId: string): string => `${base}/${plain(runId)}/_check`
+
 /** Whether a path lies strictly inside a folder, with no `..` or `.` part on the way: what alone may be removed. */
 export const isInside = (base: string, path: string): boolean =>
   path.startsWith(`${base}/`) && path.slice(base.length + 1).split('/').every(part => part !== '' && part !== '.' && part !== '..')

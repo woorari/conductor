@@ -145,7 +145,8 @@ export type Linear = {
 /** One scripted answer of the pretend Lore CLI. */
 export type LoreAnswer = {
   match: (argv: readonly string[], cwd?: string) => boolean
-  answer: { exitCode: number; stdout: string; stderr?: string }
+  /** The answer, or a function that makes it from the call (a pretend lore that keeps state). */
+  answer: { exitCode: number; stdout: string; stderr?: string } | ((argv: readonly string[], cwd?: string) => { exitCode: number; stdout: string; stderr?: string })
 }
 
 /** What the world hands back for the engine's side of things a test wants to steer or read. */
@@ -295,13 +296,15 @@ export function world(on: On, files: Files, repo: { root: string } | null = { ro
     const isTokenAsked = e.argv.join(' ') === 'gh auth token'
     const cwd = e.init?.cwd
     state.calls.push({ argv: [...e.argv], ...(cwd === undefined ? {} : { cwd }), ...(e.init?.timeoutMs === undefined ? {} : { timeoutMs: e.init.timeoutMs }), ...(e.init?.env === undefined ? {} : { env: { ...e.init.env } }) })
-    const program = state.programs.find(one => one.match(e.argv, cwd))?.answer
+    const found = state.programs.find(one => one.match(e.argv, cwd))?.answer
+    const program = typeof found === 'function' ? found(e.argv, cwd) : found
     if (program !== undefined) {
       return { value: { exitCode: program.exitCode, stdout: program.stdout, stderr: program.stderr ?? '', isStdoutTruncated: false, isStderrTruncated: false } }
     }
     if (/(^|\/)lore$/.test(e.argv[0] ?? '')) {
       state.loreCalls.push({ argv: [...e.argv], ...(cwd === undefined ? {} : { cwd }) })
-      const scripted = state.lore.find(one => one.match(e.argv, cwd))?.answer
+      const given = state.lore.find(one => one.match(e.argv, cwd))?.answer
+      const scripted = typeof given === 'function' ? given(e.argv, cwd) : given
       if (scripted !== undefined) {
         return { value: { exitCode: scripted.exitCode, stdout: scripted.stdout, stderr: scripted.stderr ?? '', isStdoutTruncated: false, isStderrTruncated: false } }
       }

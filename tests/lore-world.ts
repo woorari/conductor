@@ -24,7 +24,7 @@ export const answers = (args: readonly string[], answer: LoreAnswer['answer'], c
   answer,
 })
 
-export const ok = (stdout = ''): LoreAnswer['answer'] => ({ exitCode: 0, stdout })
+export const ok = (stdout = ''): { exitCode: number; stdout: string } => ({ exitCode: 0, stdout })
 
 /**
  * The world beneath the mod in a Lore workspace: no git repository, a `.lore`
@@ -78,7 +78,7 @@ export async function lored($: Engine, on: Parameters<typeof world>[0], ledger: 
     [`${LORE_ROOT}/.loreignore`]: { text: '/Saved/\n/Intermediate/\n**/Intermediate/\n*.log\n.claude/conductor/runs/\n', mtimeMs: 1 },
     [`${LORE_ROOT}/.claude/settings.local.json`]: { text: PLACEHOLDER_SNIPPET, mtimeMs: 1 },
   }
-  for (const id of ['t1', 't2', '_run']) files[`${LORE_RUNS}/ABC-12/listing-${id}.txt`] = { text: 'Source/\nSource/a.cpp\nSource/build.log\n', mtimeMs: 1 }
+  for (const id of ['t1', 't2', '_run', '_check']) files[`${LORE_RUNS}/ABC-12/listing-${id}.txt`] = { text: 'Source/\nSource/a.cpp\nSource/build.log\n', mtimeMs: 1 }
   const engine = loreWorld(on, files)
   engine.listings[LORE_ROOT] = [
     { name: '.lore', kind: 'dir' },
@@ -92,6 +92,7 @@ export async function lored($: Engine, on: Parameters<typeof world>[0], ledger: 
   engine.lore.unshift(
     answers(['repository', 'update-path'], ok()),
     answers(['status', '--scan'], ok(STATUS_CLEAN)),
+    answers(['status'], ok(STATUS_CLEAN)),
     answers(['branch', 'switch'], ok(BRANCH_SWITCH)),
     answers(['branch', 'info'], ok(BRANCH_INFO_NEW)),
     answers(['branch', 'create'], ok(BRANCH_CREATE)),
