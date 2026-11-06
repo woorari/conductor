@@ -341,7 +341,8 @@ const WRAPPERS = new Set(['env', 'command', 'sudo', 'doas', 'xargs', 'time', 'no
 /** The words of one shell command, quotes taken off; a quote left open runs to the end. */
 const tokens = (segment: string): string[] => [...segment.matchAll(/"([^"]*)"?|'([^']*)'?|(\S+)/g)].map(found => found[1] ?? found[2] ?? found[3] ?? '')
 
-const isLore = (word: string | undefined): boolean => /(^|\/)lore$/.test(word ?? '')
+// The file system may not tell case apart (APFS does not by default): LORE runs lore too.
+const isLore = (word: string | undefined): boolean => /(^|\/)lore$/i.test(word ?? '')
 
 /** The value a command gives an option, as `--name value` or `--name=value`. */
 function optionValue(words: readonly string[], name: string): string | undefined {
@@ -370,9 +371,9 @@ export function loreByHand(command: string, ctx: { base: string; runBranch?: str
   // A program named only by variables (`$L$R`) could be lore whatever the line says: refused in a bound Lore run.
   for (const segment of plain.split(/&&|\|\||\|&|;|\||&|\n/)) {
     const first = tokens(segment.trim()).map(one => one.replace(/^[({]+/, '')).find(one => one !== '' && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(one)) ?? ''
-    if (/^(?:\$\{?[A-Za-z_][A-Za-z0-9_]*\}?)+$/.test(first)) return 'runs a program named by a variable, which the board cannot read'
+    if (/[$*?[]|\{[^}]*,[^}]*\}/.test(first)) return 'runs a program whose name the shell works out (a variable, a pattern or braces), which the board cannot read'
   }
-  if (!/(^|[^A-Za-z0-9_])lore($|[^A-Za-z0-9_])/.test(plain)) return undefined
+  if (!/(^|[^A-Za-z0-9_])lore($|[^A-Za-z0-9_])/i.test(plain)) return undefined
   if (/\$\(|`|<\(|>\(/.test(command) || /(^|[\s;&|(])eval\s/.test(plain)) {
     return 'runs lore inside a substitution or another shell, which the board cannot read'
   }
@@ -384,7 +385,7 @@ export function loreByHand(command: string, ctx: { base: string; runBranch?: str
       return `runs ${first}, and lore through it cannot be read`
     }
     // Outside a lore invocation, lore may not show up at all: inside a script, behind a wrapper, as an argument.
-    if (!isLore(first) && words.some(word => word.split(/[^A-Za-z0-9_./-]+/).some(part => part === 'lore' || part.endsWith('/lore')))) {
+    if (!isLore(first) && words.some(word => word.split(/[^A-Za-z0-9_./-]+/).some(part => isLore(part)))) {
       return WRAPPERS.has(first.split('/').pop() ?? '') ? `runs lore behind ${first}` : 'runs lore in a way the board cannot read'
     }
     let at = 0

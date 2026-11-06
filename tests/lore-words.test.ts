@@ -73,8 +73,14 @@ describe('the guard fails closed where it cannot read a command', () => {
     for (const command of ['env python3 -c "import os; os.system(\'lore push x\')"', 'python3.11 -c "os.system(\'lore push x\')"', 'env -i PATH=/bin lore push x', 'L=lo; R=re; $L$R push x', '${L}${R} push x']) {
       expect(loreByHand(command, WORKER), command).toBeDefined()
     }
-    for (const command of ['cat Docs/lore-notes.md', '"$HOME/bin/build.sh" --fast', 'lore commit "update the lore docs"']) {
+    for (const command of ['cat Docs/lore-notes.md', './Script/build.sh --fast', '/Users/me/bin/build.sh', 'lore commit "update the lore docs"']) {
       expect(loreByHand(command, WORKER), command).toBeUndefined()
+    }
+  })
+
+  test('lore in any case is lore (APFS is case-insensitive), and a program the shell works out is refused', () => {
+    for (const command of ['LORE push x', 'Lore branch merge y', '/Users/me/.local/bin/LoRe push x', '"$HOME/bin/build.sh" --fast', '/usr/*/bin/lore push x', '~/.local/bin/lo?e push x', '/bin/{lore,true} push x']) {
+      expect(loreByHand(command, WORKER), command).toBeDefined()
     }
   })
 
