@@ -180,6 +180,42 @@ function checkRecord(value: unknown, where: string): CheckRecord | undefined {
   }
 }
 
+/** An absolute path: a workspace is always named by where it is, never relative to anything. */
+function absolute(from: Fields, key: string, where: string): string {
+  const value = text(from, key, where)
+  if (!value.startsWith('/')) refuse(`${where}.${key}`, 'an absolute path', value)
+
+  return value
+}
+
+const KINDS = ['git', 'lore'] as const
+
+function runWorkspace(value: unknown): Ledger['run']['workspace'] {
+  if (value === undefined) return undefined
+  const where = 'run.workspace'
+  const from = fields(value, where)
+  const remote = optionalText(from, 'remote', where)
+
+  return {
+    kind: oneOf(from, 'kind', where, KINDS),
+    root: absolute(from, 'root', where),
+    place: text(from, 'place', where),
+    base: text(from, 'base', where),
+    ...(remote === undefined ? {} : { remote }),
+  }
+}
+
+function candidates(value: unknown): Ledger['run']['candidates'] {
+  if (value === undefined) return undefined
+
+  return list(value, 'run.candidates').map((one, at) => {
+    const where = `run.candidates[${at}]`
+    const from = fields(one, where)
+
+    return { kind: oneOf(from, 'kind', where, KINDS), root: absolute(from, 'root', where), place: text(from, 'place', where), about: text(from, 'about', where) }
+  })
+}
+
 function loreRun(value: unknown): Ledger['run']['lore'] {
   if (value === undefined) return undefined
   const where = 'run.lore'
@@ -468,6 +504,8 @@ export function parseLedger(source: string): Parsed {
         tickets: run.tickets === undefined ? undefined : oneOf(run, 'tickets', 'run', ['github', 'linear'] as const),
         issue: optionalKey(run, 'issue', 'run'),
         config: run.config === undefined ? undefined : (fields(run.config, 'run.config') as ProjectConfig),
+        workspace: runWorkspace(run.workspace),
+        candidates: candidates(run.candidates),
         lore: loreRun(run.lore),
         approval: approval(run.approval),
         merged: mergedRun(run.merged),

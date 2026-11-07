@@ -187,6 +187,12 @@ export type World = {
   stepTokens: number
   /** Whether the repository has a `.claude/conductor` folder: where the mod works at all. */
   isHome: boolean
+  /**
+   * The folders that hold `.claude/conductor`, where a test says so. Left
+   * out, the repository's root (or a Lore root, a folder with `.lore`) holds it
+   * when `isHome` says so, and no other folder does.
+   */
+  homes?: string[]
   /** The repository's `origin`: the GitHub clone's unless a test says otherwise; null for a repository with none. */
   origin: string | null
   /** The environment variables a token may come from: GH_TOKEN holds the test token unless a test says otherwise. */
@@ -426,7 +432,10 @@ export function world(on: On, files: Files, repo: { root: string } | null = { ro
     return { value: undefined }
   })
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
-  on('fs.exists', (_$, e) => ({ value: e.path.endsWith('.claude/conductor') ? state.isHome : files[e.path] !== undefined || state.dirs.includes(e.path) }))
+  const conductorAt = (dir: string): boolean => (state.homes !== undefined ? state.homes.includes(dir) : state.isHome && (dir === repo?.root || state.dirs.includes(`${dir}/.lore`)))
+  on('fs.exists', (_$, e) => ({
+    value: e.path.endsWith('/.claude/conductor') ? conductorAt(e.path.slice(0, -'/.claude/conductor'.length)) : files[e.path] !== undefined || state.dirs.includes(e.path),
+  }))
   on('session.cwd', () => ({ value: state.cwd }))
   on('classic.WorktreeCreate', () => ({ ...state.worktree }))
   on('command.register', (_$, e) => {

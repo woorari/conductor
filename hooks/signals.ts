@@ -331,11 +331,16 @@ function retier(task: RawTask, caller: Caller, tier: unknown, reason: unknown): 
 
 const planOf = (raw: Raw): Record<string, unknown> => raw.run as Record<string, unknown>
 
+/** In a home that is not a repository: the run lists workspaces and none is picked yet. */
+const isPickOpen = (run: Record<string, unknown>): boolean => run.candidates !== undefined && run.workspace === undefined
+const PICK_FIRST = "Pick the run's workspace first: run_workspace takes one of the workspaces this run lists."
+
 /** `run_plan`: the orchestrator says the plan is ready for the owner, and may name the run. */
 export function proposePlan(raw: Raw, caller: Caller, input: Record<string, unknown>): Outcome {
   if (caller.kind !== 'orchestrator') return refused('Only the orchestrator proposes the run’s plan.')
   const run = planOf(raw)
   if (run.plan === 'approved' || run.plan === undefined) return refused('The plan of this run is approved already.')
+  if (isPickOpen(run)) return refused(PICK_FIRST)
   if (raw.tasks.length === 0) return refused('A plan needs tasks: add them with task_add first.')
   if (input.title !== undefined) {
     if (typeof input.title !== 'string' || tidy(input.title) === '') return refused('title names the run in a few words.')
@@ -352,6 +357,7 @@ export function proposePlan(raw: Raw, caller: Caller, input: Record<string, unkn
 export function approvePlan(raw: Raw): Outcome {
   const run = planOf(raw)
   if (run.plan === 'approved' || run.plan === undefined) return refused('The plan of this run is approved already.')
+  if (isPickOpen(run)) return refused(PICK_FIRST)
   if (run.plan !== 'proposed') return refused('The orchestrator has not proposed a plan yet: there is nothing to approve.')
   run.plan = 'approved'
 

@@ -47,6 +47,40 @@ export type ProjectConfig = {
     lockPatterns?: string[]
   }
   check?: { argv: string[]; timeoutMin: number }
+  /** In a home that is not a repository: the folders inside it a run may work in. */
+  places?: Place[]
+}
+
+/**
+ * A folder inside a home that is not a repository, relative to it: the Linear
+ * teams whose tickets may land there, and one line on what belongs there,
+ * which the orchestrator reads when it picks. Its git or Lore workspaces are
+ * found, never configured.
+ */
+export type Place = {
+  folder: string
+  teams: string[]
+  about: string
+  /** The base branch of its workspaces; else the mod's base option. */
+  base?: string
+  lore?: ProjectConfig['lore']
+  check?: ProjectConfig['check']
+}
+
+/** The kinds of workspace a run can work in. */
+export type WorkspaceKind = 'git' | 'lore'
+
+/** A workspace a run may work in, while the orchestrator has not picked one: `root` is a real absolute path, `place` its place's folder. */
+export type Candidate = { kind: WorkspaceKind; root: string; place: string; about: string }
+
+/** The workspace a run in a home that is not a repository works in, fixed once picked. */
+export type RunWorkspace = {
+  kind: WorkspaceKind
+  root: string
+  place: string
+  base: string
+  /** A git workspace's `origin`, read when the workspace was fixed. */
+  remote?: string
 }
 
 /** What a worker was last seen doing: written by the mod from the worker's own tool calls. */
@@ -246,6 +280,10 @@ export type Ledger = {
     /** The project's config as it was when the run started: what the run keeps to. */
     config?: ProjectConfig
     /** A Lore run: the repository, the base branch, the run's own branch and its workspace. */
+    /** In a home that is not a repository: the workspace the run works in, once fixed. */
+    workspace?: RunWorkspace
+    /** In a home that is not a repository: the workspaces the orchestrator picks from, while none is fixed. */
+    candidates?: Candidate[]
     lore?: {
       remote: string
       repository: string

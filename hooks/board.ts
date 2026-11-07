@@ -45,6 +45,8 @@ export type Board = {
   plan?: 'draft' | 'proposed'
   /** Since when the owner holds the run, when they do. */
   pausedAt?: string
+  /** In a home that is not a repository: the workspace the run works in, relative to the home. */
+  workspace?: string
   building: TaskRow[]
   /** Handed back by their workers and not yet judged by the orchestrator. */
   returned: TaskRow[]
@@ -56,6 +58,15 @@ export type Board = {
   waiting: TaskRow[]
   /** Newest first by `finishedAt`; those without one keep the ledger's order, last. */
   done: TaskRow[]
+}
+
+/** A run's workspace as the board shows it: from its place's folder on, which is relative to the home. */
+function shownWorkspace(workspace: { root: string; place: string } | undefined): string | undefined {
+  if (workspace === undefined) return undefined
+  const place = workspace.place.replace(/\/+$/, '')
+  const at = workspace.root.lastIndexOf(`/${place}`)
+
+  return at === -1 ? workspace.root : workspace.root.slice(at + 1)
 }
 
 const SEVERITY_ORDER: Record<ProblemSeverity, number> = { blocker: 0, warning: 1, note: 2 }
@@ -87,6 +98,7 @@ export function boardView(ledger: Ledger, nowMs: number): Board {
 
   return {
     title: ledger.run.title,
+    ...(ledger.run.workspace === undefined ? {} : { workspace: shownWorkspace(ledger.run.workspace) }),
     total: rows.length,
     problems: [...open].sort((a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity]),
     resolved: ledger.problems.length - open.length,
@@ -139,6 +151,7 @@ export function summary(board: Board): string {
   const flight = board.review.find(row => row.merging !== undefined)
   const ready = board.review.filter(row => row.status === 'green' && row.merging === undefined).length
   const parts: string[] = []
+  if (board.workspace !== undefined) parts.push(`in ${board.workspace}`)
   if (board.pausedAt !== undefined) parts.push('paused')
   if (board.plan === 'proposed') parts.push('plan waits for your approval')
   if (board.plan === 'draft') parts.push('plan is being drafted')

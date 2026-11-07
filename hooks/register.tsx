@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { CatchHandler, Elements, EngineInterface, Hook, Register } from 'claude-code'
 
-import type { BoardState, Ledger, ModelTier } from '../types'
+import type { BoardState, Candidate, Ledger, ModelTier, Place, RunWorkspace } from '../types'
 import {
   API,
   CLAIM_GRACE_MIN,
@@ -36,13 +36,16 @@ import { LINEAR_KEY, RUN_ID, STATUSES, TIERS, parseLedger } from './ledger'
 import { approvedMain, baseBroughtIn, conflicted, letGo, loreReady, onBase, onRunBranch, readyForBase, rev7, startLoreMerge } from './lore-merge'
 import { LINEAR_API, M_CREATE, M_UPDATE, Q_ISSUE, Q_TEAM, apiKeyOf, createdOf, errorsOf, issueOf, issueText, stateFor, teamOf, updatedOf } from './linear'
 import { branchInfoOf, ignoreRules, loreByHand, mergeOf, pushOf, repositoryInfoOf, statusOf } from './lore'
-import { CONFIG_PATH, LORE_DEFAULTS, PLACEHOLDER_SNIPPET, hasPlaceholder, parseConfig, runsIgnored } from './project'
+import { candidatesFor, findHome, workspaceOfSpec } from './home'
+import type { Home, Io } from './home'
+import { CONFIG_PATH, LORE_DEFAULTS, PLACEHOLDER_SNIPPET, hasPlaceholder, homeConfigProblem, parseConfig, placeConfig, runsIgnored } from './project'
 import type { ProjectConfig } from './project'
 import { checkWorkspaceOf, isInside, removals, runBranchOf, runWorkspaceOf, taskBranchOf, topLevel, workspaceOf, workspacesOf } from './workspace'
 import type { RepositoryInfo } from './lore'
 import { pauseRun, unpauseRun } from './pause'
 import { LOOK_AGAIN_MIN, dueForLook, isUnderway, unsettled } from './problems'
 import { APPROVED, PLANNING, conducting, newRun, planning } from './plan'
+import type { Conducting } from './plan'
 import { ORCHESTRATOR, briefing, digest, post, relative, rule, touch, waiting } from './posts'
 import { HELPER_TYPES, familyOf, route, unlocked } from './router'
 import type { Route, Spawn } from './router'
@@ -316,7 +319,11 @@ function learn(ledger: Ledger, path: string): void {
  */
 async function isAtForge($: EngineInterface): Promise<boolean> {
   try {
-    if (typeof origin !== 'string') origin = (await $.session.repo())?.remote ?? null
+    // In a home that is not a repository the repository is the bound run's, and is read again for each run.
+    if (await isFolderHome($)) {
+      const here = await backendOf($)
+      origin = here?.kind === 'git' ? here.remote : null
+    } else if (typeof origin !== 'string') origin = (await $.session.repo())?.remote ?? null
   } catch {
     return false
   }
@@ -337,6 +344,42 @@ type LoreBackend = { kind: 'lore'; root: string; bin?: string; info?: Repository
 type Backend = { kind: 'git'; root: string; remote: string | null } | LoreBackend
 
 let backend: Backend | null | undefined
+/** Where conductor's home is, read once: a repository that is its own home, or a folder that holds places; null for none. */
+let home: Home | null | undefined
+
+/** The disk as the home's finder reads it. A real path is `pwd -P` run in the folder: no shell, nothing of the path in a command. */
+async function ioOf($: EngineInterface): Promise<Io> {
+  const userHome = await $.env.get('HOME').catch(() => undefined)
+
+  return {
+    exists: path => $.fs.exists(path).catch(() => false),
+    list: async path => (await $.fs.list(path)).map(one => ({ name: one.name, kind: one.kind === 'dir' ? ('dir' as const) : ('file' as const) })),
+    real: async path => {
+      try {
+        const ran = await $.process.run(['/bin/pwd', '-P'], { cwd: path, timeoutMs: 10_000 })
+        const real = ran.stdout.trim()
+
+        return ran.exitCode === 0 && real.startsWith('/') && !real.includes('\n') ? real : undefined
+      } catch {
+        return undefined
+      }
+    },
+    userHome: typeof userHome === 'string' && userHome.startsWith('/') ? userHome : undefined,
+  }
+}
+
+/** The session's home: found walking up from its folder; a repository home is the repository git or Lore names, as before. */
+async function homeOf($: EngineInterface): Promise<Home | null> {
+  if (home !== undefined) return home
+  const cwd = await $.session.cwd().catch(() => '')
+  const repo = await $.session.repo().catch(() => null)
+  home = cwd === '' ? null : await findHome(await ioOf($), cwd, repo?.root ?? null)
+
+  return home
+}
+
+/** Whether this session's home is a folder that is not a repository. */
+const isFolderHome = async ($: EngineInterface): Promise<boolean> => (await homeOf($))?.kind === 'folder'
 /** The `lore` binary that ran, once one did: kept for this module's life. */
 let loreFound: string | undefined
 
@@ -408,6 +451,7 @@ async function loreRoot($: EngineInterface): Promise<string | null> {
 
 /** Where the session works, read once: git first, as before, then a Lore workspace. Null outside both. */
 async function backendOf($: EngineInterface): Promise<Backend | null> {
+  if (await isFolderHome($)) return await runBackend($)
   if (backend !== undefined) return backend
   const repo = await $.session.repo().catch(() => null)
   if (repo !== null && repo !== undefined) {
@@ -421,6 +465,37 @@ async function backendOf($: EngineInterface): Promise<Backend | null> {
 
     return backend
   }
+
+  return await loreBackendAt($, found)
+}
+
+/** The run whose workspace `backend` holds, in a home that is not a repository. */
+let backendRun: string | undefined
+
+/**
+ * In a home that is not a repository, the session works where its bound run
+ * does: the run's workspace, read from its ledger, and read again when the
+ * session binds to another run. Null while no run is bound or none is picked.
+ */
+async function runBackend($: EngineInterface): Promise<Backend | null> {
+  const run = await read($, pinnedRun)
+  if (run === null) return null
+  // Read on every call: a new pick (here or in another session) changes the workspace, and the guards follow it.
+  const path = await boundLedger($).catch(() => undefined)
+  const workspace = path === undefined ? undefined : parseLedger((await textAt($, path)) ?? '').ledger?.run.workspace
+  if (workspace === undefined) return null
+  if (backend !== undefined && backend !== null && backendRun === run && backend.root === workspace.root && backend.kind === workspace.kind) return backend
+  const found: Backend = workspace.kind === 'git' ? { kind: 'git', root: workspace.root, remote: workspace.remote ?? null } : await loreBackendAt($, workspace.root)
+  // A Lore workspace whose lore could not be run is not kept: it is looked at again.
+  if (found.kind === 'lore' && found.problem !== undefined) return found
+  backend = found
+  backendRun = run
+
+  return backend
+}
+
+/** A Lore workspace's backend: its lore and its repository's info, or what is missing. */
+async function loreBackendAt($: EngineInterface, found: string): Promise<LoreBackend> {
   const bin = await loreBin($, found)
   if (bin === undefined) {
     // Not kept: lore may be installed meanwhile, and the next look finds it.
@@ -429,9 +504,167 @@ async function backendOf($: EngineInterface): Promise<Backend | null> {
   const asked = await lore($, ['repository', 'info'], found)
   const info = asked.exitCode === 0 ? repositoryInfoOf(asked.out) : undefined
   if (info === undefined) return { kind: 'lore', root: found, bin, problem: `lore could not read this workspace's repository: ${asked.out.trim() || `exit ${asked.exitCode}`}` }
-  backend = { kind: 'lore', root: found, bin, info }
+  const lored: LoreBackend = { kind: 'lore', root: found, bin, info }
+  if (!(await isFolderHome($))) backend = lored
 
-  return backend
+  return lored
+}
+
+/** What a run in a home that is not a repository starts with: its workspace once fixed, or the ones the orchestrator picks from. */
+type Placed = { config: ProjectConfig; workspace?: RunWorkspace; candidates?: Candidate[]; lore?: Ledger['run']['lore'] }
+
+const ISSUE_IN_FOLDER =
+  "No run was started. In a home that is not a repository, tickets are Linear: give the ticket's key, like /conduct ABC-12. A GitHub issue is run from a session in its own repository."
+
+/** A Linear key's team: the part before the dash. */
+const teamOfKey = (key: string): string => key.slice(0, key.indexOf('-'))
+
+/** Whether the folder the session started in declares the WorktreeCreate placeholder: Claude Code reads project settings there. */
+async function placeholderHere($: EngineInterface): Promise<{ isThere: boolean; folder: string }> {
+  const folder = (await $.session.cwd().catch(() => '')).replace(/\/+$/, '')
+
+  return { isThere: hasPlaceholder([await textAt($, `${folder}/.claude/settings.json`), await textAt($, `${folder}/.claude/settings.local.json`)]), folder }
+}
+
+const placeholderMissing = (folder: string): string =>
+  `No run was started. Outside git, Claude Code lets the mod make each worker's workspace only when the project declares a WorktreeCreate hook, in the folder the session started in. Add this to ${folder}/.claude/settings.local.json (or ${folder}/.claude/settings.json), then give /conduct again; if a worker still cannot start, start a new session:\n\n${PLACEHOLDER_SNIPPET}`
+
+/**
+ * Fixes the workspace a run works in, doing what /conduct does for its kind:
+ * for Lore, the repository's info and the run's branch; for git, its origin.
+ * Either way the session's folder must declare the placeholder when it is not
+ * inside git. The run keeps its place's settings, with the ticket's team.
+ */
+async function fixWorkspace(
+  $: EngineInterface,
+  run: { id: string; source: string; title?: string },
+  candidate: Candidate,
+  place: Place,
+  team: string,
+): Promise<{ workspace: RunWorkspace; config: ProjectConfig; lore?: Ledger['run']['lore'] } | { error: string }> {
+  const base = place.base ?? config.base
+  const settings = placeConfig(place, team)
+  const isInGit = (await $.session.repo().catch(() => null)) !== null
+  if (!isInGit) {
+    const here = await placeholderHere($)
+    if (!here.isThere) return { error: placeholderMissing(here.folder) }
+  }
+  if (candidate.kind === 'lore') {
+    const bin = await loreBin($, candidate.root)
+    if (bin === undefined) return { error: `No run was started. ${LORE_MISSING}` }
+    const asked = await lore($, ['repository', 'info'], candidate.root)
+    const info = asked.exitCode === 0 ? repositoryInfoOf(asked.out) : undefined
+    if (info === undefined) return { error: `No run was started. lore could not read the repository of ${candidate.root}: ${asked.out.trim() || `exit ${asked.exitCode}`}` }
+
+    return {
+      workspace: { kind: 'lore', root: candidate.root, place: place.folder, base },
+      config: settings,
+      lore: { remote: info.remote, repository: info.name, base, branch: runBranchOf(place.lore?.branchPrefix ?? LORE_DEFAULTS.branchPrefix, run.source, run.id, run.title) },
+    }
+  }
+  const ran = await runProgram($, ['git', '-C', candidate.root, 'remote', 'get-url', 'origin'])
+  const remote = ran.exitCode === 0 ? ran.stdout.trim() : ''
+
+  return { workspace: { kind: 'git', root: candidate.root, place: place.folder, base, ...(remote === '' ? {} : { remote }) }, config: settings }
+}
+
+/**
+ * Where a run started in a home that is not a repository works: the
+ * workspace of its spec, the one workspace its ticket's team has, or the
+ * candidates the orchestrator picks from.
+ */
+async function placeRun($: EngineInterface, homeRoot: string, asked: Conducting, project: ProjectConfig): Promise<Placed | { error: string }> {
+  const problem = homeConfigProblem(project, 'folder')
+  if (problem !== undefined) return { error: `No run was started: ${problem}` }
+  if (asked.kind === 'issue') return { error: ISSUE_IN_FOLDER }
+  const places = project.places ?? []
+  const io = await ioOf($)
+  const placeOf = (candidate: Candidate): Place | undefined => places.find(one => one.folder === candidate.place)
+  if (asked.kind === 'spec') {
+    const found = await workspaceOfSpec(io, homeRoot, places, asked.source)
+    if ('error' in found) return found
+    const place = placeOf(found.candidate)
+
+    return place === undefined ? { error: 'No run was started: the spec\'s place is not in config.json.' } : await fixWorkspace($, asked, found.candidate, place, found.team)
+  }
+  const team = teamOfKey(asked.source)
+  const found = await candidatesFor(io, homeRoot, places, team)
+  if ('error' in found) return found
+  const only = found.candidates.length === 1 ? found.candidates[0] : undefined
+  const place = only === undefined ? undefined : placeOf(only)
+  if (only !== undefined && place !== undefined) return await fixWorkspace($, asked, only, place, team)
+
+  return { config: { places: places.filter(one => one.teams.includes(team)) }, candidates: found.candidates }
+}
+
+/** A workspace as the owner reads it: relative to the home, when it lies inside. */
+async function relOf($: EngineInterface, root: string): Promise<string> {
+  const found = await homeOf($)
+  if (found?.kind !== 'folder') return root
+  if (root.startsWith(`${found.root}/`)) return root.slice(found.root.length + 1)
+  const real = await (await ioOf($)).real(found.root)
+
+  return real !== undefined && root.startsWith(`${real}/`) ? root.slice(real.length + 1) : root
+}
+
+/** "It works in <workspace>." for the bound run of a home that is not a repository, or nothing. */
+async function worksIn($: EngineInterface): Promise<string> {
+  const path = await boundLedger($).catch(() => undefined)
+  const workspace = path === undefined ? undefined : parseLedger((await textAt($, path)) ?? '').ledger?.run.workspace
+
+  return workspace === undefined ? '' : `It works in ${await relOf($, workspace.root)}.`
+}
+
+/**
+ * `run_workspace`: the orchestrator picks the workspace of a run that lists
+ * several. The workspaces are looked up again in the places frozen at
+ * /conduct, never the live config; the pick is fixed once the plan is approved.
+ */
+async function pickWorkspace($: EngineInterface, call: ToolCall): Promise<{ result: string; text: string; isError?: true }> {
+  const fail = (reason: string) => ({ isError: true as const, result: `${NOT_DONE} ${reason}`, text: `${NOT_DONE} ${reason}` })
+  if (call.agentId !== undefined) return fail("Only the orchestrator picks the run's workspace.")
+  const path = await boundLedger($)
+  if (path === undefined) return fail(NOT_BOUND)
+  const found = await homeOf($)
+  if (found?.kind !== 'folder') return fail('This home is a repository, and the run works in it: there is nothing to pick.')
+  const ledger = parseLedger((await textAt($, path)) ?? '').ledger
+  if (ledger === undefined) return fail("The run's ledger could not be read.")
+  if (ledger.run.plan === 'approved') return fail("This run's workspace is fixed: the plan naming it is approved.")
+  if (ledger.run.candidates === undefined) return fail("This run's workspace was fixed when it started: there is nothing to pick.")
+  const asked = typeof call.path === 'string' ? call.path.replace(/\/+$/, '') : ''
+  const places = ledger.run.config?.places ?? []
+  const source = ledger.run.source ?? ledger.run.id
+  const team = teamOfKey(source)
+  const fresh = await candidatesFor(await ioOf($), found.root, places, team)
+  if ('error' in fresh) return fail(fresh.error)
+  const chosen = fresh.candidates.find(one => one.root === asked)
+  const place = chosen === undefined ? undefined : places.find(one => one.folder === chosen.place)
+  if (chosen === undefined || place === undefined) return fail(`${asked || 'That'} is not one of the workspaces this run lists: ${fresh.candidates.map(one => one.root).join(', ')}.`)
+  const title = ledger.run.title === `Run ${ledger.run.id}` ? undefined : ledger.run.title
+  const fixed = await fixWorkspace($, { id: ledger.run.id, source, ...(title === undefined ? {} : { title }) }, chosen, place, team)
+  if ('error' in fixed) return fail(fixed.error)
+  const written = await mutate($, path, raw => {
+    const run = raw.run as Record<string, unknown>
+    if (run.plan === 'approved') return { value: false, isChanged: false }
+    // The owner approves the plan for the workspace it named: a new pick takes the proposal back.
+    const wasProposed = run.plan === 'proposed'
+    if (wasProposed) run.plan = 'draft'
+    run.workspace = fixed.workspace
+    // The places stay frozen beside the place's settings, so a pick can be made again until the plan is approved.
+    run.config = { ...fixed.config, places }
+    if (fixed.lore === undefined) delete run.lore
+    else run.lore = fixed.lore
+
+    return { value: wasProposed ? 'redrafted' : 'picked', isChanged: true }
+  })
+  if (written.error !== undefined) return fail(written.error)
+  if (written.value === false) return fail("This run's workspace is fixed: the plan naming it is approved.")
+  seen = undefined
+  await refresh($, false)
+  const redrafted = written.value === 'redrafted' ? ' The plan goes back to a draft: propose it again with run_plan, so the owner approves the plan for this workspace.' : ''
+  const text = `The run works in ${await relOf($, chosen.root)}, a ${chosen.kind === 'lore' ? 'Lore workspace' : 'git repository'}. Plan it there; you may pick again until the owner approves the plan.${redrafted}`
+
+  return { result: text, text }
 }
 
 /** How long a copy, a merge, a push or a listing of a large workspace may take: the engine's ceiling for one program. */
@@ -465,7 +698,8 @@ async function onPaths($: EngineInterface, head: readonly string[], paths: reado
   return undefined
 }
 
-type Making = { root: string; base: string; path: string; branch: string; from: string; carry: readonly string[]; minFreeGB: number; runId: string; taskId: string }
+/** `home` holds the run folders (ledger, listings, marks); `root` is the workspace copied. In a repository home they are one. */
+type Making = { home: string; root: string; base: string; path: string; branch: string; from: string; carry: readonly string[]; minFreeGB: number; runId: string; taskId: string }
 
 /**
  * Makes a Lore workspace for one task: a copy-on-write copy of the owner's
@@ -503,7 +737,7 @@ async function prepareWorkspace($: EngineInterface, at: Making): Promise<{ path:
     const copied = await runProgram($, ['cp', '-c', '-R', `${at.root}/${entry}`, `${at.path}/`], LONG_MS)
     if (copied.exitCode !== 0) return fail(`${entry} could not be copied: ${lastLine(copied)}`)
   }
-  const listing = `${at.root}/${RUNS_DIR}/${at.runId}/listing-${at.taskId}.txt`
+  const listing = `${at.home}/${RUNS_DIR}/${at.runId}/listing-${at.taskId}.txt`
   const listed = await runProgram($, ['/bin/sh', '-c', LIST_SCRIPT, 'sh', at.path, listing], LONG_MS)
   if (listed.exitCode !== 0) return fail(`the copy's files could not be listed: ${lastLine(listed)}`)
   const relativeListing = ((await textAt($, listing)) ?? '')
@@ -602,6 +836,7 @@ async function startCheckNow($: EngineInterface, path: string, ledger: Ledger, t
     {
       {
         const made = await workspaceFor($, {
+          home: await runsRootOf($, here.root),
           root: here.root,
           base,
           path: cwd,
@@ -620,7 +855,7 @@ async function startCheckNow($: EngineInterface, path: string, ledger: Ledger, t
         return void (await failed(`the check workspace could not be put at ${rev7(target.revision)}: ${lastLine(pinned)}`))
       }
     }
-    const log = checkLog(here.root, ledger.run.id, target.taskId ?? '_run', target.revision)
+    const log = checkLog(await runsRootOf($, here.root), ledger.run.id, target.taskId ?? '_run', target.revision)
     await runProgram($, ['mkdir', '-p', log.slice(0, log.lastIndexOf('/'))])
     const started = await runProgram($, ['/bin/sh', '-c', CHECK_SCRIPT, 'sh', cwd, '--', ...check.argv], 30_000, { OUT: log })
     if (started.exitCode !== 0) await failed(`the check could not start: ${lastLine(started)}`)
@@ -647,7 +882,7 @@ async function watchChecks($: EngineInterface): Promise<void> {
     ]
     const now = await $.clock.now()
     for (const { taskId, record } of running) {
-      const log = checkLog(here.root, ledger.run.id, taskId ?? '_run', record.revision)
+      const log = checkLog(await runsRootOf($, here.root), ledger.run.id, taskId ?? '_run', record.revision)
       const exit = await textAt($, `${log}.exit`)
       let ended: { verdict: 'passed' | 'failed'; line?: string } | undefined
       if (exit !== undefined) {
@@ -758,9 +993,10 @@ async function loreApprove($: EngineInterface, path: string): Promise<string | u
   const project = ledger.run.config
   const workspacesBase = workspacesOf(here.root, project?.lore?.workspaces)
   const workspace = runLore.workspace ?? runWorkspaceOf(workspacesBase, ledger.run.id)
-  if (!(await $.fs.exists(readyMark(here.root, ledger.run.id, '_run')).catch(() => false)) || !(await $.fs.exists(`${workspace}/.lore`).catch(() => false))) {
+  if (!(await $.fs.exists(readyMark(await runsRootOf($, here.root), ledger.run.id, '_run')).catch(() => false)) || !(await $.fs.exists(`${workspace}/.lore`).catch(() => false))) {
     await Promise.resolve($.ui.toast("Run board: making the run's Lore workspace. A large workspace takes a minute or two.")).catch(() => undefined)
     const made = await workspaceFor($, {
+      home: await runsRootOf($, here.root),
       root: here.root,
       base: workspacesBase,
       path: workspace,
@@ -821,7 +1057,7 @@ const readyMark = (root: string, runId: string, taskId: string): string => `${ro
  * `prepareWorkspace`.
  */
 async function workspaceFor($: EngineInterface, making: Making): Promise<{ path: string; error?: undefined } | { error: string }> {
-  const mark = readyMark(making.root, making.runId, making.taskId)
+  const mark = readyMark(making.home, making.runId, making.taskId)
   const hasLore = await $.fs.exists(`${making.path}/.lore`).catch(() => false)
   if (hasLore && (await $.fs.exists(mark).catch(() => false))) return { path: making.path }
   if (hasLore && isInside(making.base, making.path)) await runProgram($, ['rm', '-rf', '--', making.path], LONG_MS)
@@ -829,6 +1065,50 @@ async function workspaceFor($: EngineInterface, making: Making): Promise<{ path:
   if (made.error === undefined) await $.fs.write(mark, 'ready\n').catch(() => undefined)
 
   return made
+}
+
+/**
+ * A branch name git takes as a plain word: letters, digits and . _ / -, a
+ * letter or digit first; no `..`, `//` or `/.`, and not ending in `/`, `.` or
+ * `.lock`. Nothing that starts with a dash, so never an option.
+ */
+const isPlainBranch = (name: string): boolean =>
+  /^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(name) && !name.includes('..') && !name.includes('//') && !name.includes('/.') && !name.endsWith('/') && !name.endsWith('.') && !name.endsWith('.lock')
+
+/**
+ * Makes a git worker's worktree in a home that is not a repository, where the
+ * engine makes none: beside the repository, never inside it, on a branch of
+ * its own, from the base branch (or the branch it builds on) as it is on
+ * origin. A worktree the mod made for this task before is reused.
+ */
+async function gitWorktreeFor(
+  $: EngineInterface,
+  at: { root: string; base: string; path: string; branch: string; start: string },
+): Promise<{ path: string; error?: undefined } | { error: string }> {
+  if (!isInside(at.base, at.path) || at.path === at.root || at.path.startsWith(`${at.root}/`)) return { error: `${at.path} is no place for a worktree: it must lie inside ${at.base}, outside ${at.root}` }
+  // A branch name may come from the ledger, where a worker records it: only a plain one reaches git, and only inside a full ref.
+  for (const name of [at.start, at.branch]) {
+    if (!isPlainBranch(name)) return { error: `"${name}" is no plain branch name, so no git command takes it` }
+  }
+  if (await $.fs.exists(`${at.path}/.git`).catch(() => false)) return { path: at.path }
+  if (await $.fs.exists(at.path).catch(() => true)) return { error: `${at.path} is there already and is no worktree; it is left as it is. Move it away, then start the worker again` }
+  const fetched = await runProgram($, ['git', '-C', at.root, 'fetch', 'origin', `+refs/heads/${at.start}:refs/remotes/origin/${at.start}`], LONG_MS)
+  if (fetched.exitCode !== 0) return { error: `git could not fetch ${at.start}: ${lastLine(fetched)}` }
+  const added = await runProgram($, ['git', '-C', at.root, 'worktree', 'add', '-b', at.branch, at.path, `refs/remotes/origin/${at.start}`], LONG_MS)
+  if (added.exitCode !== 0) return { error: lastLine(added) }
+
+  return { path: at.path }
+}
+
+/** Removes a done task's worktree the mod made, unless it holds what is not committed: git refuses then, and it is kept. */
+async function retireWorktree($: EngineInterface, ledger: Ledger, taskId: string): Promise<void> {
+  const workspace = ledger.run.workspace
+  const task = ledger.tasks.find(one => one.id === taskId)
+  if (workspace?.kind !== 'git' || task?.workspace === undefined || !(await isFolderHome($))) return
+  // Only the folder the mod derives for this task, never a path read off the ledger alone.
+  const derived = workspaceOf(workspacesOf(workspace.root, undefined), ledger.run.id, taskId)
+  if (task.workspace !== derived) return
+  await runProgram($, ['git', '-C', workspace.root, 'worktree', 'remove', derived], LONG_MS)
 }
 
 /** A worker's workspace made and not handed to the engine yet, by task. */
@@ -857,6 +1137,25 @@ function exclusive(): Promise<() => void> {
   return prior.then(() => unlock)
 }
 
+/**
+ * The base branch of the bound run. In a home that is not a repository it is
+ * the run's workspace's, which its place may set; elsewhere the mod's option.
+ */
+async function runBase($: EngineInterface): Promise<string> {
+  if (!(await isFolderHome($))) return config.base
+  const path = await boundLedger($).catch(() => undefined)
+  const workspace = path === undefined ? undefined : parseLedger((await textAt($, path)) ?? '').ledger?.run.workspace
+
+  return workspace?.base ?? config.base
+}
+
+/** The folder that holds the run folders: the home's root, which in a repository home is the repository's. */
+async function runsRootOf($: EngineInterface, fallback: string): Promise<string> {
+  if (root === undefined) root = await rootOf($)
+
+  return root ?? fallback
+}
+
 /** A file's text, or undefined when it is not there or cannot be read. */
 async function textAt($: EngineInterface, path: string): Promise<string | undefined> {
   try {
@@ -868,6 +1167,9 @@ async function textAt($: EngineInterface, path: string): Promise<string | undefi
 
 /** The root of the repository or workspace the session is in, read again on a rescan; null outside both. */
 async function rootOf($: EngineInterface, rescan = false): Promise<string | null> {
+  // A home that is not a repository keeps its runs itself: the workspace a run works in is the run's.
+  const found = await homeOf($)
+  if (found?.kind === 'folder') return found.root
   if (rescan && backend?.kind !== 'lore') backend = undefined
 
   return (await backendOf($))?.root ?? null
@@ -1291,6 +1593,7 @@ async function lookAgain($: EngineInterface): Promise<void> {
  * verdict.
  */
 async function watchMain($: EngineInterface): Promise<void> {
+  const base = await runBase($)
   if (isWatchingMain) return
   isWatchingMain = true
   try {
@@ -1319,10 +1622,10 @@ async function watchMain($: EngineInterface): Promise<void> {
         if (main === undefined) return { isChanged: false, isError: true, text: '' }
         main.failed = line
         const recorded = reportProblem(raw, at, { kind: 'orchestrator' }, {
-          text: `The checks on ${config.base} failed for ${line}. Nothing merges onto a red ${config.base} but its repair.`,
+          text: `The checks on ${base} failed for ${line}. Nothing merges onto a red ${base} but its repair.`,
           severity: 'blocker',
         })
-        const text = `Run board: the checks on ${config.base} failed for ${line}. ${recorded.isError ? '' : recorded.text}`.trimEnd()
+        const text = `Run board: the checks on ${base} failed for ${line}. ${recorded.isError ? '' : recorded.text}`.trimEnd()
 
         return { isChanged: true, isError: false, text, wake: text, asks: `main ${line}` }
       })
@@ -1683,10 +1986,11 @@ async function checksAt($: EngineInterface, sha: string): Promise<Verdict | { er
 
 /** The base branch's head and the verdict of its checks. */
 async function lookAtBase($: EngineInterface): Promise<Look> {
-  const branch = await github($, `/branches/${encodeURIComponent(config.base)}`)
+  const base = await runBase($)
+  const branch = await github($, `/branches/${encodeURIComponent(base)}`)
   if (branch.error !== undefined) return { error: branch.error }
   const head = branch.status === 200 ? headOf(branch.json) : undefined
-  if (head === undefined) return { error: `the head of ${config.base} could not be read (HTTP ${branch.status})` }
+  if (head === undefined) return { error: `the head of ${base} could not be read (HTTP ${branch.status})` }
   const verdict = await checksAt($, head)
   if ('error' in verdict) return { error: verdict.error }
 
@@ -1695,6 +1999,7 @@ async function lookAtBase($: EngineInterface): Promise<Look> {
 
 /** What GitHub says about a pull request and about the base branch, right now. */
 async function survey($: EngineInterface, pr: number): Promise<{ facts: Facts; error?: undefined } | { error: string }> {
+  const branchName = await runBase($)
   const [pulled, base] = await Promise.all([github($, `/pulls/${pr}`), lookAtBase($)])
   if (pulled.error !== undefined) return { error: pulled.error }
   if (pulled.status === 404) return { error: `it knows no pull request ${pr} in ${repoHere() ?? 'this repository'}` }
@@ -1705,7 +2010,7 @@ async function survey($: EngineInterface, pr: number): Promise<{ facts: Facts; e
   const checks: Verdict | { error: string } = pull.isMerged ? { verdict: 'green', line: 'merged', failed: [] } : await checksAt($, pull.head)
   if ('error' in checks) return { error: checks.error }
 
-  return { facts: { pull, checks, base: config.base, baseHead: base.head, main: base.verdict } }
+  return { facts: { pull, checks, base: branchName, baseHead: base.head, main: base.verdict } }
 }
 
 /** The merges other runs of this repository have in flight. Never throws: a run that does not read is no reason to refuse. */
@@ -2032,6 +2337,7 @@ async function mergeTool(
   call: ToolCall,
   isCheckOnly: boolean,
 ): Promise<{ result: string; text: string; isError?: undefined } | { isError: true; result: string; text: string }> {
+  const base = await runBase($)
   const say = (text: string) => ({ result: text, text })
   const fail = (reason: string) => {
     const text = `${NOT_DONE} ${reason}`
@@ -2067,7 +2373,8 @@ async function mergeTool(
   if (pull.isMerged) {
     const where = pull.commit === undefined ? '' : ` as ${short(pull.commit)}`
     if (isCheckOnly) return say(`PR ${asked.pr} is merged already${where}, outside the board. ${TOOL_MERGE} takes it over and marks ${id} done.`)
-    const adopted = await settle($, path, raw => onMain(raw, iso(now), pull.commit ?? pull.head, config.base, { isAdopted: true, task: id, pr: asked.pr }))
+    const adopted = await settle($, path, raw => onMain(raw, iso(now), pull.commit ?? pull.head, base, { isAdopted: true, task: id, pr: asked.pr }))
+    await retireWorktree($, ledger, id)
     if (adopted !== undefined) await issueDone($, path, id)
 
     return adopted === undefined ? fail(`${id} could not be taken over: the board could not be written.`) : say(adopted.text)
@@ -2078,7 +2385,7 @@ async function mergeTool(
     if (blocks.length > 0) return say(`${id} cannot merge yet:\n${blocks.map(one => `- ${one}`).join('\n')}`)
 
     return say(
-      `${id} may merge now. PR ${asked.pr} is open and mergeable into ${config.base}, its checks are green on ${short(pull.head)} (${facts.checks.line}), the checks on ${config.base} are ${facts.main.verdict} for ${short(facts.baseHead)}, and ${closingLine(closes(`${pull.title}\n${pull.body}`))}. GitHub would merge it with its ${config.method} method. Before you call ${TOOL_MERGE}: tell the other sessions that may merge (ListAgents shows them) and name them in told.`,
+      `${id} may merge now. PR ${asked.pr} is open and mergeable into ${base}, its checks are green on ${short(pull.head)} (${facts.checks.line}), the checks on ${base} are ${facts.main.verdict} for ${short(facts.baseHead)}, and ${closingLine(closes(`${pull.title}\n${pull.body}`))}. GitHub would merge it with its ${config.method} method. Before you call ${TOOL_MERGE}: tell the other sessions that may merge (ListAgents shows them) and name them in told.`,
     )
   }
   if (blocks.length > 0) return fail(`Nothing was merged. ${id} cannot merge now:\n${blocks.map(one => `- ${one}`).join('\n')}`)
@@ -2103,10 +2410,11 @@ async function mergeTool(
   const settled = after.error !== undefined || after.status !== 200 ? undefined : pullOf(after.json)
   if (settled?.isMerged === true) {
     const commit = settled.commit ?? pull.head
-    const done = await settle($, path, raw => onMain(raw, now2, commit, config.base))
+    const done = await settle($, path, raw => onMain(raw, now2, commit, base))
+    await retireWorktree($, ledger, id)
     if (done !== undefined) await issueDone($, path, id)
 
-    return say(done?.text ?? `Merged: PR ${asked.pr} (${id}) is on ${config.base} as ${short(commit)}, but the board could not be written. Set it right with ${TOOL_MERGE} for ${id} again: it is taken over.`)
+    return say(done?.text ?? `Merged: PR ${asked.pr} (${id}) is on ${base} as ${short(commit)}, but the board could not be written. Set it right with ${TOOL_MERGE} for ${id} again: it is taken over.`)
   }
   if (settled !== undefined) {
     await mutate($, path, raw => {
@@ -2174,6 +2482,7 @@ async function settleStuckLore($: EngineInterface, path: string, ledger: Ledger)
 }
 
 async function watchClaim($: EngineInterface): Promise<void> {
+  const base = await runBase($)
   if (isWatching) return
   isWatching = true
   try {
@@ -2194,7 +2503,7 @@ async function watchClaim($: EngineInterface): Promise<void> {
     if (pull.isMerged) {
       // Nobody heard the merge tool's answer: the orchestrator is told now, and woken if it is idle.
       await settle($, path, raw => {
-        const done = onMain(raw, at, pull.commit ?? flight.head, config.base)
+        const done = onMain(raw, at, pull.commit ?? flight.head, base)
 
         return done.isError ? done : { ...done, wake: `Run board: PR ${flight.pr} (${flight.task}) is merged as ${short(pull.commit ?? flight.head)}, and the task is done.`, asks: `merge ${flight.task}` }
       })
@@ -2368,6 +2677,9 @@ async function listTool($: EngineInterface, spec: Parameters<EngineInterface['to
  */
 async function isHome($: EngineInterface): Promise<boolean> {
   try {
+    const found = await homeOf($)
+    if (found === null) return false
+    if (found.kind === 'folder') return true
     if (root === undefined) root = await rootOf($)
 
     return root !== null && (await $.fs.exists(`${root}/.claude/conductor`))
@@ -2505,6 +2817,22 @@ export const register: Register = (on, options) => {
       },
       isDeferred: false,
     })
+    if (await isFolderHome($)) {
+      await listTool($, {
+        name: 'run_workspace',
+        description:
+          "Run board: in a home that is not a repository, the orchestrator picks the workspace the run works in, from those the run lists, before it plans. It can pick again until the owner approves the plan; then the workspace is fixed.",
+        inputSchema: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: 'The workspace, by its full path as the run lists it.' },
+          },
+          required: ['path'],
+          additionalProperties: false,
+        },
+        isDeferred: false,
+      })
+    }
     await listTool($, {
       name: 'merge_check',
       description:
@@ -2736,6 +3064,7 @@ export const register: Register = (on, options) => {
       const workspacesBase = workspacesOf(here.root, project?.lore?.workspaces)
       const workspace = workspaceOf(workspacesBase, read.ledger.run.id, taskId)
       const made = await workspaceFor($, {
+            home: await runsRootOf($, here.root),
             root: here.root,
             base: workspacesBase,
             path: workspace,
@@ -2753,6 +3082,27 @@ export const register: Register = (on, options) => {
       }
       // Each start makes its own workspace side by side with the others; only handing it to the engine is one at a time,
       // since the engine names the workspace it asks for after the agent. A wait here counts against this hook's time.
+      unlock = await exclusive()
+      prepared.set(taskId, workspace)
+      awaitingWorktree.push({ taskId, path: workspace })
+    }
+    // In a home that is not a repository the engine makes no git worktree: the mod makes it, as it does for Lore.
+    if (decided.kind === 'worker' && here?.kind === 'git' && (await isFolderHome($))) {
+      const taskId = decided.taskId
+      const runBaseBranch = read.ledger.run.workspace?.base ?? config.base
+      const workspace = workspaceOf(workspacesOf(here.root, undefined), read.ledger.run.id, taskId)
+      const made = await gitWorktreeFor($, {
+        root: here.root,
+        base: workspacesOf(here.root, undefined),
+        path: workspace,
+        branch: `${LORE_DEFAULTS.branchPrefix}${read.ledger.run.id}/${taskId}`,
+        start: decided.base?.branch ?? runBaseBranch,
+      })
+      if (made.error !== undefined) {
+        await release()
+
+        return { deny: `conductor: ${taskId}'s worktree could not be made, so no worker was started: ${made.error}.` }
+      }
       unlock = await exclusive()
       prepared.set(taskId, workspace)
       awaitingWorktree.push({ taskId, path: workspace })
@@ -2795,7 +3145,7 @@ export const register: Register = (on, options) => {
     try {
       const here = await backendOf($)
       // In git the mod has nothing to say: the person's own hook beneath, or the engine's own worktree, answers.
-      if (here?.kind !== 'lore') return next(e)
+      if (here?.kind !== 'lore' && !(here?.kind === 'git' && (await isFolderHome($)))) return next(e)
       // The engine names the workspace after the agent: a worker it started already is found by its id, else it is the start in flight.
       const agentId = /^agent-(.+)$/.exec(e.name)?.[1]
       let taskId = agentId === undefined ? undefined : agents.get(agentId)
@@ -2841,7 +3191,8 @@ export const register: Register = (on, options) => {
     const call = e as unknown as ToolCall
     // In a run nothing reaches the base branch by hand: not a worker's command, and not the orchestrator's either.
     if (call.tool === 'Bash' && typeof call.command === 'string') {
-      const what = byHand(call.command, config.base)
+      const base = await runBase($)
+      const what = byHand(call.command, base)
       const isBound = what !== undefined && (await boundLedger($).catch(() => undefined)) !== undefined
       // A worker never merges, anywhere. The orchestrator's own merge is refused where the board merges: in a
       // repository that is not on GitHub it merges nothing, so there this is the repository's path, not a way round.
@@ -2849,8 +3200,19 @@ export const register: Register = (on, options) => {
         return {
           deny:
             call.agentId === undefined
-              ? `conductor: this command ${what} by hand. In a run a pull request reaches ${config.base} through ${TOOL_MERGE}, which merges pinned to the graded head, one at a time. ${TOOL_CHECK} says what stands in the way. /board none lets go of the run.`
-              : `conductor: this command ${what}. A worker never merges and never pushes to ${config.base}: set your task to review with its pull request and hand back. Merging is the orchestrator's.`,
+              ? `conductor: this command ${what} by hand. In a run a pull request reaches ${base} through ${TOOL_MERGE}, which merges pinned to the graded head, one at a time. ${TOOL_CHECK} says what stands in the way. /board none lets go of the run.`
+              : `conductor: this command ${what}. A worker never merges and never pushes to ${base}: set your task to review with its pull request and hand back. Merging is the orchestrator's.`,
+        }
+      }
+    }
+    // While a folder home's run has no workspace picked, nothing is written by hand: no lore write, no push to the base.
+    if (call.tool === 'Bash' && typeof call.command === 'string' && (await isFolderHome($))) {
+      const openPath = await boundLedger($).catch(() => undefined)
+      const openRun = openPath === undefined ? undefined : parseLedger((await textAt($, openPath)) ?? '').ledger
+      if (openRun?.run.candidates !== undefined && openRun.run.workspace === undefined) {
+        const what = loreByHand(call.command, { base: config.base, caller: 'orchestrator' }) ?? byHand(call.command, config.base)
+        if (what !== undefined) {
+          return { deny: `conductor: this command ${what} by hand. This run's workspace is not picked yet, so it only reads: pick it with mcp__conductor__run_workspace, then plan. /board none lets go of the run.` }
         }
       }
     }
@@ -2883,11 +3245,16 @@ export const register: Register = (on, options) => {
       }
     }
     // A Lore worker that was not handed a workspace of its own would build in the owner's: it may not write at all.
-    if (taskId !== undefined && (WRITES.has(call.tool) || call.tool === 'Bash') && !isolated.has(taskId) && (await backendOf($))?.kind === 'lore') {
+    if (taskId !== undefined && (WRITES.has(call.tool) || call.tool === 'Bash') && !isolated.has(taskId) && ((await backendOf($))?.kind === 'lore' || (await isFolderHome($)))) {
       const path = await boundLedger($).catch(() => undefined)
       const ledger = path === undefined ? undefined : parseLedger(await textAt($, path) ?? '').ledger
       const task = ledger?.tasks.find(one => one.id === taskId)
-      if (ledger?.run.lore !== undefined && task !== undefined) {
+      if (ledger !== undefined && ledger.run.lore === undefined && ledger.run.workspace?.kind === 'git' && task !== undefined && task.workspace === undefined) {
+        return {
+          deny: `conductor: ${taskId}'s worker has no worktree of its own, so it would work outside the run's repository. It was started without isolation: "worktree". Stop and hand back; the orchestrator starts it again with isolation: "worktree".`,
+        }
+      }
+      if ((ledger?.run.lore !== undefined || ledger?.run.workspace !== undefined) && task !== undefined) {
         if (task.workspace !== undefined) {
           isolated.add(taskId)
           workspaces.set(taskId, task.workspace)
@@ -2947,9 +3314,14 @@ export const register: Register = (on, options) => {
 
   // The mod's own tools: the one way the orchestrator and the workers change the board.
   // Matched by pattern: a tool's own name is no known tool to the types until the mod that registers it has loaded.
-  on('tool.call', { tool: /^mcp__conductor__run_plan$/ }, ($, e) =>
-    answer($, e as unknown as ToolCall, (raw, _at, caller, input) => proposePlan(raw, caller, input)),
-  ).catch(broke)
+  on('tool.call', { tool: /^mcp__conductor__run_plan$/ }, async ($, e) => {
+    const answered = await answer($, e as unknown as ToolCall, (raw, _at, caller, input) => proposePlan(raw, caller, input))
+    // In a home that is not a repository the owner learns where the run works with the plan they approve.
+    const where = answered.isError === true ? '' : await worksIn($)
+
+    return where === '' ? answered : { ...answered, result: `${answered.result} ${where}`, text: `${answered.text} ${where}` }
+  }).catch(broke)
+  on('tool.call', { tool: /^mcp__conductor__run_workspace$/ }, ($, e) => pickWorkspace($, e as unknown as ToolCall)).catch(broke)
   on('tool.call', { tool: /^mcp__conductor__task_add$/ }, ($, e) =>
     answer($, e as unknown as ToolCall, (raw, _at, caller, input) => addTask(raw, caller, input)),
   ).catch(broke)
@@ -3016,6 +3388,13 @@ export const register: Register = (on, options) => {
     const bound = boundPath === undefined ? undefined : parseLedger((await textAt($, boundPath)) ?? '').ledger
     const runLore = (await backendOf($))?.kind === 'lore' ? bound?.run.lore : undefined
     const checkArgv = bound?.run.config?.check?.argv
+    // In a home that is not a repository: where the run works, and that its commands run there.
+    const fixedIn = bound?.run.workspace
+    const quotedRoot = fixedIn === undefined ? '' : fixedIn.root.replace(/'/g, "'\\''")
+    const placedIn =
+      fixedIn === undefined
+        ? undefined
+        : `- This run works in ${await relOf($, fixedIn.root)}, a ${fixedIn.kind === 'lore' ? 'Lore workspace' : 'git repository'} inside this home. Run its commands there: cd -- '${quotedRoot}' first${fixedIn.kind === 'git' ? `, or git -C '${quotedRoot}'` : ''}.`
     const loreBullets =
       runLore === undefined
         ? []
@@ -3032,6 +3411,14 @@ export const register: Register = (on, options) => {
       `This session is bound to run \`${run}\`. Its board is the pane "Run board"; its ledger is ${RUNS_DIR}/${run}/ledger.json.`,
       '',
       REPORTING,
+      ...(placedIn === undefined ? [] : [placedIn]),
+      ...(bound?.run.candidates !== undefined && bound.run.workspace === undefined
+        ? [
+            `- This run's workspace is not picked yet. Read the ticket, then pick one of these with mcp__conductor__run_workspace before you plan:`,
+            ...bound.run.candidates.map(one => `  - ${one.root} (${one.about})`),
+            `  If the work lies outside all of them, say so with ${TOOL_POST} and propose no plan.`,
+          ]
+        : []),
       `- The mod writes the ledger. Never edit ledger.json: change it with ${TOOL_ADD}, ${TOOL_UPDATE}, ${TOOL_REPORT} and ${TOOL_RESOLVE}.`,
       `- A run starts with a plan. Until you have proposed it with ${TOOL_PLAN} and the owner has approved it with /approve, no worker starts. Once they have, start the tasks that can start. ${PLANNING}`,
       `- Every worker is a task. Add it with ${TOOL_ADD}, tagged with a tier and why: opus for architecture and design, sonnet for challenging development, haiku for easy jobs. The owner may change a tier before the task starts; their choice stands.`,
@@ -3049,8 +3436,8 @@ export const register: Register = (on, options) => {
         ? loreBullets
         : isHere
         ? [
-            `- A task with a pull request becomes done through ${TOOL_MERGE} alone, for a task you judged green: its checks green on its head, its change reviewed. The mod reads GitHub, merges into ${config.base} pinned to that head with GitHub's ${config.method} method, never two at once (across runs too), marks the task done once GitHub has merged it and tells you. ${TOOL_CHECK} says what stands in the way and changes nothing. Before each merge tell the other sessions that may merge (ListAgents) and name them in told. Workers never merge, and a merge by hand (gh pr merge, GitHub's merge call, a push to ${config.base}) is refused in a bound session.`,
-            `- When the board tells you a task is done, go on at once: start what can start and merge the next green task. After each merge the board watches the checks on ${config.base}: when they fail, find the merge that broke them and repair it before anything else merges; the repair's own merge takes onRedMain: true.`,
+            `- A task with a pull request becomes done through ${TOOL_MERGE} alone, for a task you judged green: its checks green on its head, its change reviewed. The mod reads GitHub, merges into ${await runBase($)} pinned to that head with GitHub's ${config.method} method, never two at once (across runs too), marks the task done once GitHub has merged it and tells you. ${TOOL_CHECK} says what stands in the way and changes nothing. Before each merge tell the other sessions that may merge (ListAgents) and name them in told. Workers never merge, and a merge by hand (gh pr merge, GitHub's merge call, a push to ${await runBase($)}) is refused in a bound session.`,
+            `- When the board tells you a task is done, go on at once: start what can start and merge the next green task. After each merge the board watches the checks on ${await runBase($)}: when they fail, find the merge that broke them and repair it before anything else merges; the repair's own merge takes onRedMain: true.`,
           ]
         : [
             `- This repository's origin is not on GitHub, so the mod reads no pull request and merges nothing here, and ${TOOL_MERGE} and ${TOOL_CHECK} refuse. The pull request of a task you judged green (its checks green on its head, its change reviewed) is merged by this repository's own path and rules, one at a time. A task with a pull request then becomes done on the owner's word alone: once it is merged and what this repository checks after a merge is good, tell the owner in one line to type /merged <task>. Workers never merge.`,
@@ -3161,14 +3548,19 @@ export const register: Register = (on, options) => {
     const read = parseConfig(configText)
     if ('error' in read) return { text: `No run was started: ${read.error}` }
     const project = read.config
-    const tickets = asked.kind === 'linear' || (asked.kind === 'spec' && project.tickets === 'linear') ? ('linear' as const) : undefined
-    if (tickets === 'linear' && asked.kind === 'spec' && project.linear?.team === undefined) {
+    // A home that is not a repository: the run's workspace comes from its ticket or spec, and its settings from the place.
+    const placed = (await isFolderHome($)) ? await placeRun($, root, asked, project) : undefined
+    if (placed !== undefined && 'error' in placed) return { text: placed.error }
+    const own = placed === undefined ? homeConfigProblem(project, 'repository') : undefined
+    if (own !== undefined) return { text: `No run was started: ${own}` }
+    const tickets = placed !== undefined || asked.kind === 'linear' || (asked.kind === 'spec' && project.tickets === 'linear') ? ('linear' as const) : undefined
+    if (placed === undefined && tickets === 'linear' && asked.kind === 'spec' && project.linear?.team === undefined) {
       return {
         text: 'No run was started. A run from a spec with its tickets in Linear files them in one team: set linear.team in .claude/conductor/config.json, for example {"linear": {"team": "ABC"}}.',
       }
     }
-    let loreRun: Ledger['run']['lore']
-    if (here?.kind === 'lore' && here.info !== undefined) {
+    let loreRun: Ledger['run']['lore'] = placed?.lore
+    if (placed === undefined && here?.kind === 'lore' && here.info !== undefined) {
       if (!runsIgnored(await textAt($, `${root}/.loreignore`))) {
         return {
           text: 'No run was started. The run ledgers are rewritten every few seconds and stay out of Lore: add the line .claude/conductor/runs/ to the .loreignore at the root of this workspace.',
@@ -3193,7 +3585,10 @@ export const register: Register = (on, options) => {
       }
     }
     const now = await $.clock.now()
-    const more = { tickets, config: configText === undefined ? undefined : project, lore: loreRun }
+    const more =
+      placed !== undefined
+        ? { tickets, config: placed.config, lore: loreRun, workspace: placed.workspace, candidates: placed.candidates }
+        : { tickets, config: configText === undefined ? undefined : project, lore: loreRun }
     await $.fs.write(path, `${JSON.stringify(newRun(id, source, iso(now), title, more), null, 2)}\n`)
     await flush($)
     await bind($, id)
@@ -3204,7 +3599,9 @@ export const register: Register = (on, options) => {
     asks.push(planning(id, source, title))
 
     // The mod runs the project's check itself, without Claude Code's permission prompt: the owner sees the program now.
-    const checkLine = project.check === undefined ? '' : ` Its check command, which the mod runs on each judged revision: ${project.check.argv.join(' ')}.`
+    // The mod runs a check only in a Lore workspace: a git run's checks are its pull request's on GitHub.
+    const check = placed === undefined ? project.check : placed.workspace?.kind === 'lore' ? placed.config.check : undefined
+    const checkLine = check === undefined ? '' : ` Its check command, which the mod runs on each judged revision: ${check.argv.join(' ')}.`
 
     return {
       text: `Run ${id} is started from ${source}${title === undefined ? '' : `, called "${title}"`}. The plan comes next; nothing starts before you /approve it.${checkLine}`,

@@ -1,4 +1,5 @@
 import type { Ledger, Task } from '../types'
+import { shellSegments } from './lore'
 import { afterDone, lookLines } from './problems'
 import { changed, refused, tidy } from './signals'
 import type { Caller, Outcome, Raw } from './signals'
@@ -473,8 +474,15 @@ const escaped = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, '\
 export function byHand(command: string, base: string): string | undefined {
   if (/\/pulls\/\d+\/merge\b/.test(command) || /\bgh\s+pr\s+merge\b/.test(command)) return 'merges a pull request'
   const isBase = new RegExp(`^(?:[^:]*:)?(?:refs/heads/)?${escaped(base)}$`)
-  for (const segment of command.split(/&&|\|\||[;|\n]/)) {
-    const pushed = pushArguments(segment.trim().split(/\s+/).map(unquoted))
+  // Words as the shell makes them (a quoted path with spaces is one), and as blanks split them: either way finds a push.
+  let segments: string[][] = []
+  try {
+    segments = shellSegments(command)
+  } catch {
+    segments = []
+  }
+  for (const words of [...command.split(/&&|\|\||[;|\n]/).map(segment => segment.trim().split(/\s+/).map(unquoted)), ...segments]) {
+    const pushed = pushArguments(words)
     if (pushed === undefined) continue
     if (pushed.some(token => isBase.test(token.replace(/^\+/, '')))) return `pushes to ${base}`
   }
