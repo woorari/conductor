@@ -438,6 +438,7 @@ export function world(on: On, files: Files, repo: { root: string } | null = { ro
   }))
   on('session.cwd', () => ({ value: state.cwd }))
   on('classic.WorktreeCreate', () => ({ ...state.worktree }))
+  on('classic.SessionStart', () => ({}))
   on('command.register', (_$, e) => {
     if (state.builtins.has(e.name)) return { deny: `"/${e.name}" refused: it is the built-in /${e.name}` }
     state.registered.push(`/${e.name}`)

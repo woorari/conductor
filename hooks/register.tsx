@@ -378,6 +378,18 @@ async function homeOf($: EngineInterface): Promise<Home | null> {
   return home
 }
 
+/** Whether the mod switched on in this process: its commands, tools and timers are there. */
+let isOn = false
+
+/** Forgets where the session works, so the next look finds it again: for a session handed to another folder before the mod switched on. */
+function forgetHome(): void {
+  home = undefined
+  backend = undefined
+  backendRun = undefined
+  root = undefined
+  origin = undefined
+}
+
 /** Whether this session's home is a folder that is not a repository. */
 const isFolderHome = async ($: EngineInterface): Promise<boolean> => (await homeOf($))?.kind === 'folder'
 /** The `lore` binary that ran, once one did: kept for this module's life. */
@@ -2688,311 +2700,327 @@ async function isHome($: EngineInterface): Promise<boolean> {
   }
 }
 
+// The mod switches on at its start as before, or, once, later, when the session is handed to its own folder.
+async function switchOn($: EngineInterface): Promise<void> {
+  isOn = true
+  // The timers first: whatever a registration below runs into, the board stays live.
+  $.clock.every(POLL_MS, () => void tick($))
+  $.clock.every(FLUSH_MS, () => {
+    flushTicks += 1
+    wake($)
+    void flush($)
+    void rotation($)
+    if (flushTicks % WATCH_EVERY === 0) {
+      void watchChecks($)
+      void watchClaim($)
+      void watchMain($)
+      void lookAgain($)
+    }
+    if (isOrchestrating === true && flushTicks % GAUGE_EVERY === 0) void nudge($)
+  })
+  unlisted.length = 0
+  await listCommand($, {
+    name: 'board',
+    description: 'Show the run board: what is building, next, done, and the problems found',
+    argumentHint: '[run id]',
+  })
+  await listTool($, {
+    name: 'task_update',
+    description:
+      'Run board: say where a task of the run this session is bound to stands. The orchestrator may set any status, and may change the tier of a task that has not started (with tierReason). A task\'s own worker may set review (its pull request is open), blocked (it waits on a ruling) or failed, and may set note, pr and branch. The board is written only through these tools: never edit ledger.json.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        task: { type: 'string', description: 'The task\'s id, e.g. t391-1.' },
+        status: { type: 'string', enum: [...STATUSES] },
+        tier: { type: 'string', enum: [...TIERS], description: 'Only before the task starts, and only by the orchestrator.' },
+        tierReason: { type: 'string', description: 'One line: why this tier. Required with tier.' },
+        note: { type: 'string', description: 'One line: what it is doing now, or why it is blocked. An empty string clears it.' },
+        ticket: { anyOf: [{ type: 'integer', minimum: 1 }, { type: 'string', pattern: TICKET_PATTERN }], description: 'The issue it belongs to, a GitHub number or a Linear key like ABC-12; the orchestrator\'s to set.' },
+        pr: { type: 'integer', minimum: 1, description: 'The pull request\'s number.' },
+        branch: { type: 'string' },
+        revision: { type: 'string', pattern: '^[0-9a-f]{64}$', description: 'In Lore: the revision its branch was pushed at, which the merge is pinned to.' },
+      },
+      required: ['task'],
+      additionalProperties: false,
+    },
+    isDeferred: false,
+  })
+  await listTool($, {
+    name: 'task_add',
+    description:
+      'Run board: the orchestrator adds a task to the run, tagged with the model tier its worker runs on: opus for architecture and design, sonnet for challenging development, haiku for easy jobs. Its worker is then started with the task\'s id as the agent\'s name, and the mod sets the model from the tier. A task added to deal with open problems names them in addresses, so they have a task.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'A short name unique in the run, e.g. t391-2: letters, digits, _ and -.' },
+        title: { type: 'string', description: 'What the task delivers, in a few words.' },
+        tier: { type: 'string', enum: [...TIERS] },
+        tierReason: { type: 'string', description: 'One line: why this tier.' },
+        ticket: { anyOf: [{ type: 'integer', minimum: 1 }, { type: 'string', pattern: TICKET_PATTERN }], description: 'The issue it belongs to: a GitHub number or a Linear key like ABC-12.' },
+        dependsOn: { type: 'array', items: { type: 'string' }, description: 'Ids of tasks that must be done first.' },
+        files: { type: 'array', items: { type: 'string' }, description: 'The files or folders the task is expected to change, relative to the repository. Findings on them reach its worker, and a second task on the same file is flagged.' },
+        addresses: { type: 'array', items: { type: 'string' }, description: 'The ids of open problems this task is to deal with, e.g. ["P3"]: each then has this task, and is resolved once it is done and the fix holds.' },
+      },
+      required: ['id', 'title', 'tier', 'tierReason'],
+      additionalProperties: false,
+    },
+    isDeferred: false,
+  })
+  await listTool($, {
+    name: 'board_post',
+    description:
+      'Run board: tell the run something. kind finding is a fact other workers may need; name the files or folders it concerns and the workers on those files read it at their next step, and nobody else does. kind question is a worker\'s question to the orchestrator, who is woken to answer it.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        kind: { type: 'string', enum: ['finding', 'question'] },
+        text: { type: 'string', description: 'One to three sentences.' },
+        files: { type: 'array', items: { type: 'string' }, description: 'Files or folders it concerns, relative to the repository.' },
+      },
+      required: ['kind', 'text'],
+      additionalProperties: false,
+    },
+    isDeferred: false,
+  })
+  await listTool($, {
+    name: 'board_rule',
+    description:
+      'Run board: the orchestrator records a numbered ruling for the workers it binds. answers names the question it settles; tasks names the tasks it binds; a ruling that names nobody is for the workers building now. A running worker reads it at its next step. A stopped worker reads it when it runs again: the mod starts nobody, so send that worker a message yourself to start it.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        text: { type: 'string', description: 'What is decided, in one to three sentences.' },
+        answers: { type: 'string', description: 'The question it answers, e.g. Q2.' },
+        tasks: { type: 'array', items: { type: 'string' }, description: 'The ids of the tasks it binds.' },
+      },
+      required: ['text'],
+      additionalProperties: false,
+    },
+    isDeferred: false,
+  })
+  await listTool($, {
+    name: 'board_read',
+    description:
+      'Run board: what the board holds for you. A worker gets the rulings that bind it and the findings on its files. The orchestrator gets the whole run as a handover has it: every task with its worker, the open problems and questions, the rulings.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    isDeferred: false,
+  })
+  await listCommand($, {
+    name: 'conduct',
+    description: 'Start a run from an issue or a spec: its board, its ledger, and a plan the orchestrator drafts for your approval',
+    argumentHint: '<#issue or spec path> [title]',
+  })
+  await listCommand($, { name: 'approve', description: 'Approve the plan of the bound run, so its workers may start' })
+  await listTool($, {
+    name: 'run_plan',
+    description:
+      'Run board: the orchestrator says the plan of the run is ready for the owner, and names the run. After it, tell the owner the plan in a few lines and stop: they approve with /approve, and no worker starts before that.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        title: { type: 'string', description: 'What the run delivers, in a few words.' },
+      },
+      additionalProperties: false,
+    },
+    isDeferred: false,
+  })
+  if (await isFolderHome($)) {
+    await listTool($, {
+      name: 'run_workspace',
+      description:
+        "Run board: in a home that is not a repository, the orchestrator picks the workspace the run works in, from those the run lists, before it plans. It can pick again until the owner approves the plan; then the workspace is fixed.",
+      inputSchema: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'The workspace, by its full path as the run lists it.' },
+        },
+        required: ['path'],
+        additionalProperties: false,
+      },
+      isDeferred: false,
+    })
+  }
+  await listTool($, {
+    name: 'merge_check',
+    description:
+      'Run board: what stands in the way of merging a task\'s pull request right now, read from GitHub: its state and mergeability, its checks on its head, the checks on the base branch, and what its description would close. Changes nothing and merges nothing.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        task: { type: 'string', description: 'The task\'s id.' },
+        closes: { type: 'array', items: { type: 'integer', minimum: 1 }, description: 'The issues this merge is meant to close; leave out for none.' },
+        onRedMain: { type: 'boolean', description: 'Only for the pull request that repairs failed checks on the base branch.' },
+      },
+      required: ['task'],
+      additionalProperties: false,
+    },
+    isDeferred: false,
+  })
+  await listTool($, {
+    name: 'merge',
+    description:
+      'Run board: the orchestrator merges a green task\'s pull request into the base branch on GitHub. The mod checks everything merge_check checks and merges pinned to the head whose checks it read, never two at once; the task is done once GitHub has merged it, and the board then watches the checks on the base branch. A pull request already merged by hand is taken over. Tell the other sessions that may merge first, and name them in told.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        task: { type: 'string', description: 'The task\'s id.' },
+        told: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'The sessions you told just now that you are about to merge (ListAgents shows who may merge); an empty list says there is nobody else.',
+        },
+        closes: { type: 'array', items: { type: 'integer', minimum: 1 }, description: 'The issues this merge is meant to close; leave out for none.' },
+        onRedMain: { type: 'boolean', description: 'Only for the pull request that repairs failed checks on the base branch.' },
+      },
+      required: ['task', 'told'],
+      additionalProperties: false,
+    },
+    isDeferred: false,
+  })
+  await listCommand($, { name: 'pause', description: 'Hold the bound run: no worker starts and nothing is merged until /unpause; what is under way finishes' })
+  await listCommand($, { name: 'unpause', description: 'End the pause of the bound run: workers may start and pull requests may merge again' })
+  await listCommand($, {
+    name: 'merged',
+    description: 'Mark a task of the bound run done by your word: its pull request is merged',
+    argumentHint: '<task id>',
+  })
+  await listCommand($, {
+    name: 'rotate',
+    description: 'Write the bound run\'s handover and compact this session now, whatever its context reading',
+  })
+  await listCommand($, {
+    name: 'tier',
+    description: 'Set the model tier of a task of the bound run that has not started',
+    argumentHint: '<task id> <opus|sonnet|haiku>',
+  })
+  await listTool($, {
+    name: 'problem_report',
+    description:
+      'Run board: record a problem found during the run, so the person watching the board sees it. severity is blocker (it stops a task), warning (it may bite later) or note (for the record). A worker\'s report is filed under its own task, and the orchestrator is told of a blocker or a warning: it gives the problem a task and sees it through.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        text: { type: 'string', description: 'What is wrong, in one or two sentences.' },
+        severity: { type: 'string', enum: ['blocker', 'warning', 'note'] },
+        task: { type: 'string', description: 'The task it concerns, when it concerns one.' },
+      },
+      required: ['text', 'severity'],
+      additionalProperties: false,
+    },
+    isDeferred: false,
+  })
+  await listTool($, {
+    name: 'problem_resolve',
+    description:
+      'Run board: the orchestrator marks a recorded problem resolved and says how it was settled. A problem whose task is still going is refused: it is resolved once that task is done and you have checked that the fix holds.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        problem: { type: 'string', description: 'The problem\'s id, e.g. P3.' },
+        resolution: { type: 'string', description: 'How it was settled, in one line.' },
+        dismiss: {
+          type: 'boolean',
+          description: 'Only for a problem that turned out to be none while the task that was to deal with it is still going.',
+        },
+      },
+      required: ['problem', 'resolution'],
+      additionalProperties: false,
+    },
+    isDeferred: false,
+  })
+  await listTool($, {
+    name: 'problem_assign',
+    description:
+      'Run board: the orchestrator ties an open problem to the task of this run that deals with it, by the task\'s id or by the ticket it carries. Only a task that still goes on counts, and a ticket only while a task of this run carries it: a problem is not left with something nobody here conducts. For a problem that needs work of its own, add a task with task_add and addresses instead.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        problem: { type: 'string', description: 'The problem\'s id, e.g. P3.' },
+        task: { type: 'string', description: 'The id of a task of this run that is not done.' },
+        ticket: { anyOf: [{ type: 'integer', minimum: 1 }, { type: 'string', pattern: TICKET_PATTERN }], description: 'The issue\'s number or Linear key, when one task of this run still carries it.' },
+      },
+      required: ['problem'],
+      additionalProperties: false,
+    },
+    isDeferred: false,
+  })
+  if ((await backendOf($))?.kind === 'lore') {
+    await listCommand($, {
+      name: 'approve-main',
+      description: 'Approve the run branch for the base branch: the mod merges exactly its revision now, and protects the base again',
+    })
+    await listTool($, {
+      name: 'run_check',
+      description: "Run board: the orchestrator runs the project's check again, on a green task (task) or on the run branch's head (no task), after a failure that was not the change's. One check runs at a time.",
+      inputSchema: { type: 'object', properties: { task: { type: 'string', description: 'The green task whose check runs again; leave it out for the run branch.' } }, additionalProperties: false },
+      isDeferred: false,
+    })
+    await listTool($, {
+      name: 'run_sync_base',
+      description:
+        "Run board: the orchestrator has the mod bring the base branch into the run branch, when it moved since the run branch last took it in. A conflict is a blocker on the board. Afterwards the owner approves again with /approve-main.",
+      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+      isDeferred: false,
+    })
+  }
+  if (await wantsLinear($)) {
+    await listTool($, {
+      name: 'ticket_read',
+      description: 'Run board: read an issue in Linear by its key: its title, state, description, sub-issues and last comments.',
+      inputSchema: {
+        type: 'object',
+        properties: { key: { type: 'string', pattern: TICKET_PATTERN, description: 'The issue\'s key, e.g. ABC-12.' } },
+        required: ['key'],
+        additionalProperties: false,
+      },
+      isDeferred: false,
+    })
+    await listTool($, {
+      name: 'ticket_file',
+      description:
+        "Run board: the orchestrator files a drafted ticket in Linear as a sub-issue of the run's issue, once the owner approved the plan. With task, that task carries the new key.",
+      inputSchema: {
+        type: 'object',
+        properties: {
+          title: { type: 'string', description: 'The ticket\'s title.' },
+          description: { type: 'string', description: 'The ticket\'s description, in Markdown; link the spec it comes from.' },
+          task: { type: 'string', description: 'The id of the task the ticket is for.' },
+        },
+        required: ['title'],
+        additionalProperties: false,
+      },
+      isDeferred: false,
+    })
+  }
+  if (unlisted.length > 0) {
+    void Promise.resolve($.ui.toast(`Run board: the engine did not take ${unlisted.join('; ')}. Everything else of the mod works.`)).catch(() => undefined)
+  }
+  await rebind($)
+  const path = await boundLedger($).catch(() => undefined)
+  if (path !== undefined) await remember($, path)
+  // A reload forgets the last reading of the context: taken again here, so a compaction that was due stays due.
+  if (path !== undefined) void gaugeNow($)
+}
+
 export const register: Register = (on, options) => {
   config = configOf(options)
   const given = (options as Record<string, unknown> | undefined)?.loreBin
   loreOption = typeof given === 'string' && given.trim() !== '' ? given.trim() : undefined
   linearOption = apiKeyOf(options)
   on('session.start', async ($, e, next) => {
-    if (!(await isHome($))) return next(e)
-    // The timers first: whatever a registration below runs into, the board stays live.
-    $.clock.every(POLL_MS, () => void tick($))
-    $.clock.every(FLUSH_MS, () => {
-      flushTicks += 1
-      wake($)
-      void flush($)
-      void rotation($)
-      if (flushTicks % WATCH_EVERY === 0) {
-        void watchChecks($)
-        void watchClaim($)
-        void watchMain($)
-        void lookAgain($)
-      }
-      if (isOrchestrating === true && flushTicks % GAUGE_EVERY === 0) void nudge($)
-    })
-    unlisted.length = 0
-    await listCommand($, {
-      name: 'board',
-      description: 'Show the run board: what is building, next, done, and the problems found',
-      argumentHint: '[run id]',
-    })
-    await listTool($, {
-      name: 'task_update',
-      description:
-        'Run board: say where a task of the run this session is bound to stands. The orchestrator may set any status, and may change the tier of a task that has not started (with tierReason). A task\'s own worker may set review (its pull request is open), blocked (it waits on a ruling) or failed, and may set note, pr and branch. The board is written only through these tools: never edit ledger.json.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          task: { type: 'string', description: 'The task\'s id, e.g. t391-1.' },
-          status: { type: 'string', enum: [...STATUSES] },
-          tier: { type: 'string', enum: [...TIERS], description: 'Only before the task starts, and only by the orchestrator.' },
-          tierReason: { type: 'string', description: 'One line: why this tier. Required with tier.' },
-          note: { type: 'string', description: 'One line: what it is doing now, or why it is blocked. An empty string clears it.' },
-          ticket: { anyOf: [{ type: 'integer', minimum: 1 }, { type: 'string', pattern: TICKET_PATTERN }], description: 'The issue it belongs to, a GitHub number or a Linear key like ABC-12; the orchestrator\'s to set.' },
-          pr: { type: 'integer', minimum: 1, description: 'The pull request\'s number.' },
-          branch: { type: 'string' },
-          revision: { type: 'string', pattern: '^[0-9a-f]{64}$', description: 'In Lore: the revision its branch was pushed at, which the merge is pinned to.' },
-        },
-        required: ['task'],
-        additionalProperties: false,
-      },
-      isDeferred: false,
-    })
-    await listTool($, {
-      name: 'task_add',
-      description:
-        'Run board: the orchestrator adds a task to the run, tagged with the model tier its worker runs on: opus for architecture and design, sonnet for challenging development, haiku for easy jobs. Its worker is then started with the task\'s id as the agent\'s name, and the mod sets the model from the tier. A task added to deal with open problems names them in addresses, so they have a task.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          id: { type: 'string', description: 'A short name unique in the run, e.g. t391-2: letters, digits, _ and -.' },
-          title: { type: 'string', description: 'What the task delivers, in a few words.' },
-          tier: { type: 'string', enum: [...TIERS] },
-          tierReason: { type: 'string', description: 'One line: why this tier.' },
-          ticket: { anyOf: [{ type: 'integer', minimum: 1 }, { type: 'string', pattern: TICKET_PATTERN }], description: 'The issue it belongs to: a GitHub number or a Linear key like ABC-12.' },
-          dependsOn: { type: 'array', items: { type: 'string' }, description: 'Ids of tasks that must be done first.' },
-          files: { type: 'array', items: { type: 'string' }, description: 'The files or folders the task is expected to change, relative to the repository. Findings on them reach its worker, and a second task on the same file is flagged.' },
-          addresses: { type: 'array', items: { type: 'string' }, description: 'The ids of open problems this task is to deal with, e.g. ["P3"]: each then has this task, and is resolved once it is done and the fix holds.' },
-        },
-        required: ['id', 'title', 'tier', 'tierReason'],
-        additionalProperties: false,
-      },
-      isDeferred: false,
-    })
-    await listTool($, {
-      name: 'board_post',
-      description:
-        'Run board: tell the run something. kind finding is a fact other workers may need; name the files or folders it concerns and the workers on those files read it at their next step, and nobody else does. kind question is a worker\'s question to the orchestrator, who is woken to answer it.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          kind: { type: 'string', enum: ['finding', 'question'] },
-          text: { type: 'string', description: 'One to three sentences.' },
-          files: { type: 'array', items: { type: 'string' }, description: 'Files or folders it concerns, relative to the repository.' },
-        },
-        required: ['kind', 'text'],
-        additionalProperties: false,
-      },
-      isDeferred: false,
-    })
-    await listTool($, {
-      name: 'board_rule',
-      description:
-        'Run board: the orchestrator records a numbered ruling for the workers it binds. answers names the question it settles; tasks names the tasks it binds; a ruling that names nobody is for the workers building now. A running worker reads it at its next step. A stopped worker reads it when it runs again: the mod starts nobody, so send that worker a message yourself to start it.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          text: { type: 'string', description: 'What is decided, in one to three sentences.' },
-          answers: { type: 'string', description: 'The question it answers, e.g. Q2.' },
-          tasks: { type: 'array', items: { type: 'string' }, description: 'The ids of the tasks it binds.' },
-        },
-        required: ['text'],
-        additionalProperties: false,
-      },
-      isDeferred: false,
-    })
-    await listTool($, {
-      name: 'board_read',
-      description:
-        'Run board: what the board holds for you. A worker gets the rulings that bind it and the findings on its files. The orchestrator gets the whole run as a handover has it: every task with its worker, the open problems and questions, the rulings.',
-      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
-      isDeferred: false,
-    })
-    await listCommand($, {
-      name: 'conduct',
-      description: 'Start a run from an issue or a spec: its board, its ledger, and a plan the orchestrator drafts for your approval',
-      argumentHint: '<#issue or spec path> [title]',
-    })
-    await listCommand($, { name: 'approve', description: 'Approve the plan of the bound run, so its workers may start' })
-    await listTool($, {
-      name: 'run_plan',
-      description:
-        'Run board: the orchestrator says the plan of the run is ready for the owner, and names the run. After it, tell the owner the plan in a few lines and stop: they approve with /approve, and no worker starts before that.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          title: { type: 'string', description: 'What the run delivers, in a few words.' },
-        },
-        additionalProperties: false,
-      },
-      isDeferred: false,
-    })
-    if (await isFolderHome($)) {
-      await listTool($, {
-        name: 'run_workspace',
-        description:
-          "Run board: in a home that is not a repository, the orchestrator picks the workspace the run works in, from those the run lists, before it plans. It can pick again until the owner approves the plan; then the workspace is fixed.",
-        inputSchema: {
-          type: 'object',
-          properties: {
-            path: { type: 'string', description: 'The workspace, by its full path as the run lists it.' },
-          },
-          required: ['path'],
-          additionalProperties: false,
-        },
-        isDeferred: false,
-      })
+    if (await isHome($)) await switchOn($)
+
+    return next(e)
+  })
+  // The desktop app starts a session's process ahead of time in a spare folder of its own and hands it to the folder the
+  // session is for only when the person opens it: at the process's start there was no home to find. SessionStart comes in
+  // the session's own folder, before its first prompt, so the mod looks again there, once, if it is not on yet.
+  on('classic.SessionStart', async ($, e, next) => {
+    if (!isOn) {
+      forgetHome()
+      if (await isHome($)) await switchOn($)
     }
-    await listTool($, {
-      name: 'merge_check',
-      description:
-        'Run board: what stands in the way of merging a task\'s pull request right now, read from GitHub: its state and mergeability, its checks on its head, the checks on the base branch, and what its description would close. Changes nothing and merges nothing.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          task: { type: 'string', description: 'The task\'s id.' },
-          closes: { type: 'array', items: { type: 'integer', minimum: 1 }, description: 'The issues this merge is meant to close; leave out for none.' },
-          onRedMain: { type: 'boolean', description: 'Only for the pull request that repairs failed checks on the base branch.' },
-        },
-        required: ['task'],
-        additionalProperties: false,
-      },
-      isDeferred: false,
-    })
-    await listTool($, {
-      name: 'merge',
-      description:
-        'Run board: the orchestrator merges a green task\'s pull request into the base branch on GitHub. The mod checks everything merge_check checks and merges pinned to the head whose checks it read, never two at once; the task is done once GitHub has merged it, and the board then watches the checks on the base branch. A pull request already merged by hand is taken over. Tell the other sessions that may merge first, and name them in told.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          task: { type: 'string', description: 'The task\'s id.' },
-          told: {
-            type: 'array',
-            items: { type: 'string' },
-            description: 'The sessions you told just now that you are about to merge (ListAgents shows who may merge); an empty list says there is nobody else.',
-          },
-          closes: { type: 'array', items: { type: 'integer', minimum: 1 }, description: 'The issues this merge is meant to close; leave out for none.' },
-          onRedMain: { type: 'boolean', description: 'Only for the pull request that repairs failed checks on the base branch.' },
-        },
-        required: ['task', 'told'],
-        additionalProperties: false,
-      },
-      isDeferred: false,
-    })
-    await listCommand($, { name: 'pause', description: 'Hold the bound run: no worker starts and nothing is merged until /unpause; what is under way finishes' })
-    await listCommand($, { name: 'unpause', description: 'End the pause of the bound run: workers may start and pull requests may merge again' })
-    await listCommand($, {
-      name: 'merged',
-      description: 'Mark a task of the bound run done by your word: its pull request is merged',
-      argumentHint: '<task id>',
-    })
-    await listCommand($, {
-      name: 'rotate',
-      description: 'Write the bound run\'s handover and compact this session now, whatever its context reading',
-    })
-    await listCommand($, {
-      name: 'tier',
-      description: 'Set the model tier of a task of the bound run that has not started',
-      argumentHint: '<task id> <opus|sonnet|haiku>',
-    })
-    await listTool($, {
-      name: 'problem_report',
-      description:
-        'Run board: record a problem found during the run, so the person watching the board sees it. severity is blocker (it stops a task), warning (it may bite later) or note (for the record). A worker\'s report is filed under its own task, and the orchestrator is told of a blocker or a warning: it gives the problem a task and sees it through.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          text: { type: 'string', description: 'What is wrong, in one or two sentences.' },
-          severity: { type: 'string', enum: ['blocker', 'warning', 'note'] },
-          task: { type: 'string', description: 'The task it concerns, when it concerns one.' },
-        },
-        required: ['text', 'severity'],
-        additionalProperties: false,
-      },
-      isDeferred: false,
-    })
-    await listTool($, {
-      name: 'problem_resolve',
-      description:
-        'Run board: the orchestrator marks a recorded problem resolved and says how it was settled. A problem whose task is still going is refused: it is resolved once that task is done and you have checked that the fix holds.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          problem: { type: 'string', description: 'The problem\'s id, e.g. P3.' },
-          resolution: { type: 'string', description: 'How it was settled, in one line.' },
-          dismiss: {
-            type: 'boolean',
-            description: 'Only for a problem that turned out to be none while the task that was to deal with it is still going.',
-          },
-        },
-        required: ['problem', 'resolution'],
-        additionalProperties: false,
-      },
-      isDeferred: false,
-    })
-    await listTool($, {
-      name: 'problem_assign',
-      description:
-        'Run board: the orchestrator ties an open problem to the task of this run that deals with it, by the task\'s id or by the ticket it carries. Only a task that still goes on counts, and a ticket only while a task of this run carries it: a problem is not left with something nobody here conducts. For a problem that needs work of its own, add a task with task_add and addresses instead.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          problem: { type: 'string', description: 'The problem\'s id, e.g. P3.' },
-          task: { type: 'string', description: 'The id of a task of this run that is not done.' },
-          ticket: { anyOf: [{ type: 'integer', minimum: 1 }, { type: 'string', pattern: TICKET_PATTERN }], description: 'The issue\'s number or Linear key, when one task of this run still carries it.' },
-        },
-        required: ['problem'],
-        additionalProperties: false,
-      },
-      isDeferred: false,
-    })
-    if ((await backendOf($))?.kind === 'lore') {
-      await listCommand($, {
-        name: 'approve-main',
-        description: 'Approve the run branch for the base branch: the mod merges exactly its revision now, and protects the base again',
-      })
-      await listTool($, {
-        name: 'run_check',
-        description: "Run board: the orchestrator runs the project's check again, on a green task (task) or on the run branch's head (no task), after a failure that was not the change's. One check runs at a time.",
-        inputSchema: { type: 'object', properties: { task: { type: 'string', description: 'The green task whose check runs again; leave it out for the run branch.' } }, additionalProperties: false },
-        isDeferred: false,
-      })
-      await listTool($, {
-        name: 'run_sync_base',
-        description:
-          "Run board: the orchestrator has the mod bring the base branch into the run branch, when it moved since the run branch last took it in. A conflict is a blocker on the board. Afterwards the owner approves again with /approve-main.",
-        inputSchema: { type: 'object', properties: {}, additionalProperties: false },
-        isDeferred: false,
-      })
-    }
-    if (await wantsLinear($)) {
-      await listTool($, {
-        name: 'ticket_read',
-        description: 'Run board: read an issue in Linear by its key: its title, state, description, sub-issues and last comments.',
-        inputSchema: {
-          type: 'object',
-          properties: { key: { type: 'string', pattern: TICKET_PATTERN, description: 'The issue\'s key, e.g. ABC-12.' } },
-          required: ['key'],
-          additionalProperties: false,
-        },
-        isDeferred: false,
-      })
-      await listTool($, {
-        name: 'ticket_file',
-        description:
-          "Run board: the orchestrator files a drafted ticket in Linear as a sub-issue of the run's issue, once the owner approved the plan. With task, that task carries the new key.",
-        inputSchema: {
-          type: 'object',
-          properties: {
-            title: { type: 'string', description: 'The ticket\'s title.' },
-            description: { type: 'string', description: 'The ticket\'s description, in Markdown; link the spec it comes from.' },
-            task: { type: 'string', description: 'The id of the task the ticket is for.' },
-          },
-          required: ['title'],
-          additionalProperties: false,
-        },
-        isDeferred: false,
-      })
-    }
-    if (unlisted.length > 0) {
-      void Promise.resolve($.ui.toast(`Run board: the engine did not take ${unlisted.join('; ')}. Everything else of the mod works.`)).catch(() => undefined)
-    }
-    await rebind($)
-    const path = await boundLedger($).catch(() => undefined)
-    if (path !== undefined) await remember($, path)
-    // A reload forgets the last reading of the context: taken again here, so a compaction that was due stays due.
-    if (path !== undefined) void gaugeNow($)
 
     return next(e)
   })
