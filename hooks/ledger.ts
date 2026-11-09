@@ -11,6 +11,7 @@ import type {
   ProblemSeverity,
   Ruling,
   ProjectConfig,
+  Stall,
   Task,
   TaskStatus,
   Ticket,
@@ -307,6 +308,13 @@ function activity(value: unknown, where: string): Activity | undefined {
   return { at, text: text(from, 'text', where) }
 }
 
+function stall(value: unknown, where: string): Stall | undefined {
+  if (value === undefined) return undefined
+  const from = fields(value, where)
+
+  return { at: timeOf(from, 'at', where), problem: text(from, 'problem', where) }
+}
+
 function task(value: unknown, where: string): Task {
   const from = fields(value, where)
   const dependsOn = texts(from.dependsOn, `${where}.dependsOn`)
@@ -330,6 +338,8 @@ function task(value: unknown, where: string): Task {
     builtOn: optionalText(from, 'builtOn', where),
     slot: optionalNumber(from, 'slot', where),
     activity: activity(from.activity, `${where}.activity`),
+    stall: stall(from.stall, `${where}.stall`),
+    retired: texts(from.retired, `${where}.retired`),
     contextTokens: optionalCount(from, 'contextTokens', where),
     branch: optionalText(from, 'branch', where),
     pr: optionalNumber(from, 'pr', where),

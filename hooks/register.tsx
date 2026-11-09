@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { CatchHandler, Elements, EngineInterface, Hook, Register } from 'claude-code'
 
-import type { BoardState, Candidate, Ledger, ModelTier, Place, RunWorkspace } from '../types'
+import type { BoardState, Candidate, Ledger, ModelTier, Place, RunWorkspace, Task } from '../types'
 import {
   API,
   CLAIM_GRACE_MIN,
@@ -35,7 +35,7 @@ import { KEEP, ROTATE_AT, carried, handover } from './handover'
 import { LINEAR_KEY, RUN_ID, STATUSES, TIERS, parseLedger } from './ledger'
 import { approvedMain, baseBroughtIn, conflicted, letGo, loreReady, onBase, onRunBranch, readyForBase, rev7, startLoreMerge } from './lore-merge'
 import { LINEAR_API, M_CREATE, M_UPDATE, Q_ISSUE, Q_TEAM, apiKeyOf, createdOf, errorsOf, issueOf, issueText, stateFor, teamOf, updatedOf } from './linear'
-import { branchInfoOf, ignoreRules, loreByHand, mergeOf, pushOf, repositoryInfoOf, statusOf } from './lore'
+import { branchInfoOf, ignoreRules, loreByHand, mergeOf, notInLore, pushOf, repositoryInfoOf, someOf, statusOf } from './lore'
 import { candidatesFor, findHome, workspaceOfSpec } from './home'
 import type { Home, Io } from './home'
 import { CONFIG_PATH, LORE_DEFAULTS, PLACEHOLDER_SNIPPET, hasPlaceholder, homeConfigProblem, parseConfig, placeConfig, runsIgnored } from './project'
@@ -44,10 +44,10 @@ import { checkWorkspaceOf, isInside, removals, runBranchOf, runWorkspaceOf, task
 import type { RepositoryInfo } from './lore'
 import { pauseRun, unpauseRun } from './pause'
 import { LOOK_AGAIN_MIN, dueForLook, isUnderway, unsettled } from './problems'
-import { APPROVED, PLANNING, conducting, newRun, planning } from './plan'
+import { APPROVED, PLANNING, conducting, isApproval, newRun, planning } from './plan'
 import type { Conducting } from './plan'
 import { ORCHESTRATOR, briefing, digest, post, relative, rule, touch, waiting } from './posts'
-import { HELPER_TYPES, familyOf, route, unlocked } from './router'
+import { HELPER_TYPES, MAX_BUILDING, familyOf, route, unlocked } from './router'
 import type { Route, Spawn } from './router'
 import {
   acted,
@@ -68,6 +68,8 @@ import {
   resolveProblem,
   rotated,
   spawned,
+  sayStalls,
+  stallsDue,
   turnEnded,
   updateTask,
   weigh,
@@ -164,6 +166,10 @@ let isTicking = false
 const agents = new Map<string, string>()
 /** The workers themselves: the agents whose turn ending hands a task back. */
 const workers = new Set<string>()
+/** Workers the orchestrator took their task back from, by agent id, with that task: every tool call of theirs is refused. */
+const retired = new Map<string, string>()
+/** Who started each worker's own subagent: the subagent's agent id to its parent's, so a retired worker's helpers are retired with it. */
+const parents = new Map<string, string>()
 /** What each task's worker was last seen doing, not yet written. */
 const pending = new Map<string, string>()
 /** The files each task's worker changed since the last write, relative to the repository. */
@@ -224,6 +230,8 @@ let isWatching = false
 let isWatchingMain = false
 /** A look at the problems nobody deals with is under way. */
 let isLooking = false
+/** A look at the building workers' signs of life is under way. */
+let isWatchingStalls = false
 /** The commands and tools the engine would not take when the mod started, each with the engine's reason. */
 const unlisted: string[] = []
 
@@ -289,6 +297,8 @@ function learn(ledger: Ledger, path: string): void {
   if (learnedFrom !== path) {
     agents.clear()
     workers.clear()
+    retired.clear()
+    parents.clear()
     pending.clear()
     changedFiles.clear()
     inbox.clear()
@@ -305,10 +315,47 @@ function learn(ledger: Ledger, path: string): void {
       isolated.add(task.id)
       workspaces.set(task.id, task.workspace)
     }
+    fence(task)
     if (task.agentId === undefined) continue
     agents.set(task.agentId, task.id)
     workers.add(task.agentId)
   }
+}
+
+/** A task's retired workers are no longer its workers: nothing they do counts, and each call of theirs is refused. */
+function fence(task: Task): void {
+  const gone = new Set(task.retired ?? [])
+  if (gone.size === 0) return
+  // A retired worker's own subagents go with it, and theirs too.
+  for (let isGrown = true; isGrown; ) {
+    isGrown = false
+    for (const [child, parent] of parents) {
+      if (gone.has(parent) && !gone.has(child)) {
+        gone.add(child)
+        isGrown = true
+      }
+    }
+  }
+  for (const agentId of gone) {
+    retired.set(agentId, task.id)
+    agents.delete(agentId)
+    workers.delete(agentId)
+  }
+  pending.delete(task.id)
+}
+
+/** Puts the subagents retired with a task's worker on the board beside it, so the fence holds after a reload too. */
+async function keepFenced($: EngineInterface, path: string, taskId: string): Promise<void> {
+  const ids = [...retired].filter(([, task]) => task === taskId).map(([agentId]) => agentId)
+  await mutate($, path, raw => {
+    const task = raw.tasks.find(one => one.id === taskId)
+    const known = task !== undefined && Array.isArray(task.retired) ? (task.retired as string[]) : []
+    const more = ids.filter(id => !known.includes(id))
+    if (task === undefined || more.length === 0) return { value: undefined, isChanged: false }
+    task.retired = [...known, ...more]
+
+    return { value: undefined, isChanged: true }
+  })
 }
 
 /**
@@ -447,6 +494,120 @@ async function lore($: EngineInterface, args: readonly string[], cwd: string, ti
     const reason = because(cause)
 
     return { exitCode: 1, stdout: '', stderr: reason, out: reason }
+  }
+}
+
+/**
+ * The longest a Lore step that moves a workspace's content may run: a switch,
+ * a merge, its abort or a push of a large branch. It is past the engine's ten
+ * minutes for one program, so such a step is streamed, not run.
+ */
+const LORE_LONG_MS = 60 * 60_000
+/** How much of a long step's output is kept per stream: its start, where Lore says what it merges, and its end, where it says what came of it. */
+const KEPT_HEAD = 1 << 20
+const KEPT_TAIL = 3 << 20
+
+/** Keeps the start and the end of what a long step prints, with a mark where the middle was left out. */
+const keeper = () => {
+  let head = ''
+  let tail = ''
+  let isCut = false
+
+  return {
+    add(text: string) {
+      const room = Math.max(0, KEPT_HEAD - head.length)
+      head += text.slice(0, room)
+      tail += text.slice(room)
+      if (tail.length > 2 * KEPT_TAIL) {
+        tail = tail.slice(-KEPT_TAIL)
+        isCut = true
+      }
+    },
+    text: (): string => (isCut || tail.length > KEPT_TAIL ? `${head}\n…\n${tail.slice(-KEPT_TAIL)}` : `${head}${tail}`),
+  }
+}
+
+/** Waits for a promise, at most `ms`: undefined when it took longer or failed. */
+async function atMost<T>($: EngineInterface, promise: Promise<T>, ms: number): Promise<T | undefined> {
+  let timer: { cancel: () => void } | undefined
+  const late = new Promise<undefined>(resolve => {
+    timer = $.clock.after(ms, () => resolve(undefined))
+  })
+  try {
+    return await Promise.race([promise.catch(() => undefined), late])
+  } finally {
+    timer?.cancel()
+  }
+}
+
+/**
+ * Runs `lore --non-interactive <args>` for a step that may outlast the
+ * engine's ten minutes for one program: streamed, under the mod's own limit.
+ * A step still running past it is stopped, and a non-zero exit says so.
+ * Never throws. `out` keeps the start and the end of what it printed.
+ */
+async function loreLong($: EngineInterface, args: readonly string[], cwd: string, timeoutMs = LORE_LONG_MS): Promise<Ran> {
+  const bin = await loreBin($, cwd)
+  if (bin === undefined) return { exitCode: 127, stdout: '', stderr: LORE_MISSING, out: LORE_MISSING }
+  const [stdout, stderr] = [keeper(), keeper()]
+  const deadline = await deadlineIn($, timeoutMs).catch((cause: unknown) => because(cause))
+  if (typeof deadline === 'string') return { exitCode: 1, stdout: '', stderr: deadline, out: deadline }
+  const late = deadline.reached
+  try {
+    const stream = $.process.spawn({ argv: [bin, '--non-interactive', ...args], cwd })
+    for (;;) {
+      const pulling = stream.next()
+      pulling.catch(() => undefined)
+      const pulled = await Promise.race([pulling, late])
+      if (pulled === 'late') {
+        // Ending the stream ends the child; a child that does not end within a minute is left to the engine.
+        await atMost($, stream.return({ code: null, signal: 'SIGTERM' }), 60_000)
+        const reason = `lore ${args.slice(0, 2).join(' ')} was still running after ${Math.round(timeoutMs / 60_000)} minutes and was stopped`
+
+        return { exitCode: 1, stdout: stdout.text(), stderr: reason, out: reason }
+      }
+      if (pulled.done === true) {
+        const ended = pulled.value.code === null ? `lore ${args.slice(0, 2).join(' ')} was ended by ${pulled.value.signal ?? 'a signal'}` : ''
+        const [said, erred] = [stdout.text(), [stderr.text(), ended].filter(one => one !== '').join('\n')]
+
+        return { exitCode: pulled.value.code ?? 1, stdout: said, stderr: erred, out: `${said}${erred === '' ? '' : `\n${erred}`}` }
+      }
+      ;(pulled.value.stream === 'stdout' ? stdout : stderr).add(pulled.value.text)
+    }
+  } catch (cause) {
+    const reason = because(cause)
+
+    return { exitCode: 1, stdout: stdout.text(), stderr: reason, out: reason }
+  } finally {
+    deadline.cancel()
+  }
+}
+
+/**
+ * A deadline `ms` from now, waited for a minute at a time, so that no one
+ * timer holds a dispatch open for an hour. `reached` resolves once the clock
+ * is there; `cancel` stops the waiting.
+ */
+async function deadlineIn($: EngineInterface, ms: number): Promise<{ reached: Promise<'late'>; cancel: () => void }> {
+  const at = (await $.clock.now()) + ms
+  let timer: { cancel: () => void } | undefined
+  let isCancelled = false
+  const reached = new Promise<'late'>(resolve => {
+    const wait = async (): Promise<void> => {
+      const now = await $.clock.now().catch(() => at - 60_000)
+      if (isCancelled) return
+      if (now >= at) return resolve('late')
+      timer = $.clock.after(Math.min(60_000, at - now), () => void wait())
+    }
+    void wait()
+  })
+
+  return {
+    reached,
+    cancel: () => {
+      isCancelled = true
+      timer?.cancel()
+    },
   }
 }
 
@@ -679,7 +840,7 @@ async function pickWorkspace($: EngineInterface, call: ToolCall): Promise<{ resu
   return { result: text, text }
 }
 
-/** How long a copy, a merge, a push or a listing of a large workspace may take: the engine's ceiling for one program. */
+/** How long a copy, a status scan or a listing of a large workspace may take: the engine's ceiling for one program. Lore's merges, switches and pushes run under LORE_LONG_MS. */
 const LONG_MS = 600_000
 /** Lists a copy's folders (each ending in /) and files into a file; the paths are parameters, never part of the script. */
 const LIST_SCRIPT = 'find "$1" -mindepth 1 -type d -exec printf "%s/\\n" {} + > "$2" && find "$1" -mindepth 1 -type f >> "$2"'
@@ -736,10 +897,8 @@ async function prepareWorkspace($: EngineInterface, at: Making): Promise<{ path:
   if (rootDisk.exitCode !== 0 || pathDisk.exitCode !== 0 || rootDisk.stdout.trim() !== pathDisk.stdout.trim()) {
     return fail(`${at.path} lies on another disk than ${at.root} (or its disk could not be read), so a copy there would be a full copy, not a copy-on-write one. Put the workspaces on the same disk (lore.workspaces in .claude/conductor/config.json)`)
   }
-  const df = await runProgram($, ['df', '-Pk', at.path])
-  const freeKb = Number(df.stdout.trim().split(/\n/).at(-1)?.trim().split(/\s+/)[3])
-  if (df.exitCode !== 0 || !Number.isFinite(freeKb)) return fail(`df did not say how much disk is free: ${lastLine(df)}`)
-  const freeGb = Math.floor(freeKb / 1024 / 1024)
+  const freeGb = await freeGbAt($, at.path)
+  if (typeof freeGb === 'string') return fail(freeGb)
   if (freeGb < at.minFreeGB) {
     return fail(`only ${freeGb} GB are free on the disk that holds ${at.path}, and a worker's workspace needs at least ${at.minFreeGB} GB free (lore.minFreeGB in .claude/conductor/config.json)`)
   }
@@ -749,16 +908,25 @@ async function prepareWorkspace($: EngineInterface, at: Making): Promise<{ path:
     const copied = await runProgram($, ['cp', '-c', '-R', `${at.root}/${entry}`, `${at.path}/`], LONG_MS)
     if (copied.exitCode !== 0) return fail(`${entry} could not be copied: ${lastLine(copied)}`)
   }
+  // A listing of a large workspace runs to tens of megabytes: it is removed as soon as it is read, whatever happened.
   const listing = `${at.home}/${RUNS_DIR}/${at.runId}/listing-${at.taskId}.txt`
-  const listed = await runProgram($, ['/bin/sh', '-c', LIST_SCRIPT, 'sh', at.path, listing], LONG_MS)
+  let listed: Ran
+  let text: string | undefined
+  try {
+    listed = await runProgram($, ['/bin/sh', '-c', LIST_SCRIPT, 'sh', at.path, listing], LONG_MS)
+    text = listed.exitCode === 0 ? await textAt($, listing) : undefined
+  } finally {
+    await runProgram($, ['rm', '-f', '--', listing])
+  }
   if (listed.exitCode !== 0) return fail(`the copy's files could not be listed: ${lastLine(listed)}`)
-  const relativeListing = ((await textAt($, listing)) ?? '')
+  const relativeListing = (text ?? '')
     .split('\n')
     .map(line => (line.startsWith(`${at.path}/`) ? line.slice(at.path.length + 1) : line))
     .join('\n')
   const removedFailed = await onPaths($, ['rm', '-rf', '--'], removals(relativeListing, rules, at.carry).map(one => `${at.path}/${one}`).filter(one => isInside(at.path, one)))
   if (removedFailed !== undefined) return fail(`what the copy must not hold could not be removed: ${lastLine(removedFailed)}`)
   const step = async (args: readonly string[], timeoutMs = 30_000): Promise<Ran> => lore($, args, at.path, timeoutMs)
+  const longStep = async (args: readonly string[]): Promise<Ran> => loreLong($, args, at.path)
   const updated = await step(['repository', 'update-path'])
   if (updated.exitCode !== 0) return fail(`lore did not take the copy as a workspace of its own: ${lastLine(updated)}`)
   const scanned = await step(['status', '--scan'], LONG_MS)
@@ -766,17 +934,17 @@ async function prepareWorkspace($: EngineInterface, at: Making): Promise<{ path:
   if (scanned.exitCode !== 0 || status === undefined) return fail(`lore could not read the copy's status: ${lastLine(scanned)}`)
   const untrackedFailed = await onPaths($, ['rm', '-f', '--'], status.untracked.map(one => `${at.path}/${one}`).filter(one => isInside(at.path, one)))
   if (untrackedFailed !== undefined) return fail(`the copy's untracked files could not be removed: ${lastLine(untrackedFailed)}`)
-  const from = await step(['branch', 'switch', at.from, '--reset'], LONG_MS)
+  const from = await longStep(['branch', 'switch', at.from, '--reset'])
   if (from.exitCode !== 0) return fail(`lore could not switch the copy to ${at.from}: ${lastLine(from)}`)
   const info = branchInfoOf((await step(['branch', 'info', at.branch])).out)
   if (info?.remoteLatest !== undefined) {
     // A task started again goes on from what its branch holds.
-    const again = await step(['branch', 'switch', at.branch, '--reset'], LONG_MS)
+    const again = await longStep(['branch', 'switch', at.branch, '--reset'])
     if (again.exitCode !== 0) return fail(`lore could not switch the copy to ${at.branch}: ${lastLine(again)}`)
   } else {
     const created = await step(['branch', 'create', at.branch])
     if (created.exitCode !== 0) return fail(`lore could not make the branch ${at.branch}: ${lastLine(created)}`)
-    const pushed = await step(['push'], LONG_MS)
+    const pushed = await longStep(['push'])
     const outcome = pushOf(pushed.exitCode, pushed.out)
     if (outcome.kind === 'refused') return fail(`lore could not push the new branch ${at.branch}: ${outcome.text}`)
   }
@@ -861,7 +1029,7 @@ async function startCheckNow($: EngineInterface, path: string, ledger: Ledger, t
         })
         if (made.error !== undefined) return void (await failed(`the check workspace could not be made: ${made.error}`))
       }
-      const pinned = await lore($, ['branch', 'switch', branch, target.revision, '--reset'], cwd, LONG_MS)
+      const pinned = await loreLong($, ['branch', 'switch', branch, target.revision, '--reset'], cwd)
       const standing = statusOf((await lore($, ['status'], cwd)).out)
       if (pinned.exitCode !== 0 || standing?.revision !== target.revision) {
         return void (await failed(`the check workspace could not be put at ${rev7(target.revision)}: ${lastLine(pinned)}`))
@@ -991,6 +1159,29 @@ async function checkOnGreen($: EngineInterface, taskId: unknown): Promise<void> 
   }
 }
 
+/** How many whole GB are free on the disk that holds a path, as df says; or why df did not say. */
+async function freeGbAt($: EngineInterface, path: string): Promise<number | string> {
+  const df = await runProgram($, ['df', '-Pk', path])
+  const freeKb = Number(df.stdout.trim().split(/\n/).at(-1)?.trim().split(/\s+/)[3])
+  if (df.exitCode !== 0 || !Number.isFinite(freeKb)) return `df did not say how much disk is free: ${lastLine(df)}`
+
+  return Math.floor(freeKb / 1024 / 1024)
+}
+
+/**
+ * Whether the disk that holds the owner's workspace, and so the copies, has
+ * room for every worker the run may start at once, each with the room a
+ * workspace needs. Answers why not, or undefined.
+ */
+async function roomForWorkers($: EngineInterface, root: string, workers: number, minFreeGB: number): Promise<string | undefined> {
+  const free = await freeGbAt($, root)
+  if (typeof free === 'string') return `${free}.`
+  const needed = workers * minFreeGB
+  if (free >= needed) return undefined
+
+  return `only ${free} GB are free on the disk that holds ${root} and its workspaces, and ${workers} workers at once need ${needed} GB (${minFreeGB} GB each, lore.minFreeGB in .claude/conductor/config.json). Free ${needed - free} GB more, or lower lore.minFreeGB.`
+}
+
 /**
  * Before the owner's approval of a Lore run's plan takes effect: the run's
  * own workspace on its own branch, made from the base branch and pushed, the
@@ -1003,6 +1194,10 @@ async function loreApprove($: EngineInterface, path: string): Promise<string | u
   const runLore = ledger?.run.lore
   if (ledger === undefined || runLore === undefined || ledger.run.plan !== 'proposed' || here?.kind !== 'lore') return undefined
   const project = ledger.run.config
+  const minFreeGB = project?.lore?.minFreeGB ?? LORE_DEFAULTS.minFreeGB
+  // Each worker's copy grows as it builds: a disk with room for one fills under three.
+  const roomless = await roomForWorkers($, here.root, ledger.run.maxParallel ?? MAX_BUILDING, minFreeGB)
+  if (roomless !== undefined) return roomless
   const workspacesBase = workspacesOf(here.root, project?.lore?.workspaces)
   const workspace = runLore.workspace ?? runWorkspaceOf(workspacesBase, ledger.run.id)
   if (!(await $.fs.exists(readyMark(await runsRootOf($, here.root), ledger.run.id, '_run')).catch(() => false)) || !(await $.fs.exists(`${workspace}/.lore`).catch(() => false))) {
@@ -1015,7 +1210,7 @@ async function loreApprove($: EngineInterface, path: string): Promise<string | u
       branch: runLore.branch,
       from: runLore.base,
       carry: project?.lore?.carry ?? LORE_DEFAULTS.carry,
-      minFreeGB: project?.lore?.minFreeGB ?? LORE_DEFAULTS.minFreeGB,
+      minFreeGB,
       runId: ledger.run.id,
       taskId: '_run',
     })
@@ -1057,6 +1252,70 @@ function isRemovable(root: string, ledger: Ledger, folder: string): boolean {
   const isOwners = folder === root || folder.startsWith(`${root}/`) || root.startsWith(`${folder}/`)
 
   return base !== '' && base !== '/' && isInside(base, folder) && !isOwners
+}
+
+/** How many files of a copy are compared with the owner's workspace: past these, the copy is kept anyway. */
+const MOST_COMPARED = 50
+
+/** A file's bytes as the engine hands them, `{ base64 }`; anything else does not read. */
+async function bytesOf($: EngineInterface, path: string): Promise<string | undefined> {
+  const read: unknown = await $.fs.read(path, { as: 'bytes' }).catch(() => undefined)
+  const base64 = typeof read === 'object' && read !== null ? (read as { base64?: unknown }).base64 : undefined
+
+  return typeof base64 === 'string' ? base64 : undefined
+}
+
+/** Whether two files hold the same bytes; a file that does not read is not the same. */
+async function sameBytes($: EngineInterface, one: string, other: string): Promise<boolean> {
+  const [first, second] = await Promise.all([bytesOf($, one), bytesOf($, other)])
+
+  return first !== undefined && first === second
+}
+
+/**
+ * Whether a folder of the copy holds only what the owner's holds at the same
+ * path: every file in it, however deep, byte for byte. A link, or more files
+ * than `left` allows, is not compared, so the folder is not the owner's.
+ */
+async function sameFolder($: EngineInterface, root: string, folder: string, relative: string, left: { files: number }): Promise<boolean> {
+  if ((await $.fs.stat(`${root}/${relative}`).catch(() => undefined))?.kind !== 'dir') return false
+  const entries = await $.fs.list(`${folder}/${relative}`).catch(() => undefined)
+  if (entries === undefined) return false
+  for (const entry of entries) {
+    const path = `${relative}/${entry.name}`
+    if (entry.isLink || (entry.kind !== 'dir' && entry.kind !== 'file')) return false
+    if (entry.kind === 'dir') {
+      if (!(await sameFolder($, root, folder, path, left))) return false
+      continue
+    }
+    left.files -= 1
+    if (left.files < 0 || !(await sameBytes($, `${root}/${path}`, `${folder}/${path}`))) return false
+  }
+
+  return true
+}
+
+/**
+ * The untracked entries of a task's workspace that came with the copy, not
+ * from its worker: the owner's workspace holds the same at the same path, a
+ * file byte for byte and a folder file by file. Such as the owner's own
+ * `.claude/settings.local.json`, which Lore does not track.
+ */
+async function copiedIn($: EngineInterface, root: string, folder: string, untracked: readonly string[]): Promise<Set<string>> {
+  const copied = new Set<string>()
+  const left = { files: MOST_COMPARED }
+  for (const entry of untracked) {
+    const relative = entry.replace(/\/+$/, '')
+    if (relative === '' || relative.startsWith('/') || relative.split('/').includes('..')) continue
+    if (entry.endsWith('/')) {
+      if (await sameFolder($, root, folder, relative, left)) copied.add(entry)
+      continue
+    }
+    left.files -= 1
+    if (left.files >= 0 && (await sameBytes($, `${root}/${relative}`, `${folder}/${relative}`))) copied.add(entry)
+  }
+
+  return copied
 }
 
 /** The file that says a workspace was finished: only then is a folder there reused. */
@@ -1598,6 +1857,39 @@ async function lookAgain($: EngineInterface): Promise<void> {
 }
 
 /**
+ * Looks at the building workers' signs of life: one silent for `STALL_MIN`
+ * minutes is put on the board and the orchestrator is woken for it, and the
+ * warning is resolved once the worker is heard from again or its task leaves
+ * building (`sayStalls`). What the engine says of each loop goes with it, when
+ * it can be asked. Called from the timer; never throws, and a read that failed
+ * is tried again at the next look.
+ */
+async function watchStalls($: EngineInterface): Promise<void> {
+  if (isWatchingStalls) return
+  isWatchingStalls = true
+  try {
+    const path = await boundLedger($)
+    if (path === undefined) return
+    const ledger = parseLedger(await $.fs.read(path)).ledger
+    if (ledger === undefined) return
+    const at = iso(await $.clock.now())
+    if (!stallsDue(ledger, Date.parse(at))) return
+    let loops: Map<string, string> | undefined
+    try {
+      loops = new Map((await $.agent.list()).map(one => [one.id, one.status]))
+    } catch {
+      loops = undefined
+    }
+    // Asked of the file again inside the write queue, so a worker heard from meanwhile is not said to be silent.
+    await settle($, path, raw => sayStalls(raw, at, loops))
+  } catch {
+    // Tried again at the next look.
+  } finally {
+    isWatchingStalls = false
+  }
+}
+
+/**
  * After a merge: looks at the checks on the base branch for the run's sake. A
  * failure is said once, as a blocker, and holds every merge but its repair's;
  * a green head ends the watch, and so does a branch nothing checks, after a
@@ -2066,6 +2358,23 @@ async function settle($: EngineInterface, path: string, change: (raw: Raw) => Ou
 /** The origins of a command that are the owner's own hand: the terminal, the desktop app, the owner's Remote Control. */
 const OWNER_ORIGINS: ReadonlySet<string> = new Set(['composer', 'sdk', 'bridge'])
 
+/** Approves the bound run's plan, by /approve or the owner's approving reply: what is said, and whether it was approved. */
+async function approveRun($: EngineInterface, path: string): Promise<{ text: string; isApproved: boolean }> {
+  const notReady = await loreApprove($, path)
+  if (notReady !== undefined) return { text: `No plan was approved: ${notReady} Approve again once that is fixed.`, isApproved: false }
+  const written = await mutate($, path, raw => {
+    const outcome = approvePlan(raw)
+
+    return { value: outcome, isChanged: outcome.isChanged }
+  })
+  if (written.error !== undefined) return { text: written.error, isApproved: false }
+  if (!written.value.isError) await linearApproved($, path)
+  seen = undefined
+  await refresh($, false)
+
+  return { text: written.value.text, isApproved: written.value.isError !== true }
+}
+
 /** What a run's Lore side is, read for its base-branch commands; or why there is none. */
 async function loreRunOf($: EngineInterface): Promise<{ path: string; ledger: Ledger; runLore: NonNullable<Ledger['run']['lore']>; run: string } | { text: string }> {
   const path = await boundLedger($)
@@ -2111,7 +2420,7 @@ async function approveMain($: EngineInterface, origin: string): Promise<string> 
   if (claimed.error !== undefined) return `Nothing was merged: ${claimed.error}`
   if (claimed.value.isError) return `Nothing was merged: ${claimed.value.text}`
   const giveUp = async (why: string): Promise<string> => (await settle($, path, raw => letGo(raw, why)))?.text ?? `Nothing was merged: ${why}.`
-  const synced = await lore($, ['branch', 'switch', runLore.branch, '--reset'], run, LONG_MS)
+  const synced = await loreLong($, ['branch', 'switch', runLore.branch, '--reset'], run)
   const status = statusOf((await lore($, ['status'], run)).out)
   if (synced.exitCode !== 0 || status === undefined) return giveUp(`the run's workspace could not be brought to ${runLore.branch}`)
   if (status.revision !== head) return giveUp(`${runLore.branch} moved after the approval (it is at ${rev7(status.revision)}, ${rev7(head)} was approved): approve again`)
@@ -2126,7 +2435,7 @@ async function approveMain($: EngineInterface, origin: string): Promise<string> 
       const baseAgain = branchInfoOf((await lore($, ['branch', 'info', base], run)).out)?.remoteLatest
       if (baseAgain !== baseNow) outcome = { kind: 'failed', reason: `${base} moved during the approval (it is at ${baseAgain === undefined ? 'a revision lore did not say' : rev7(baseAgain)}): bring it in with run_sync_base and approve again` }
       else {
-        const merged = await lore($, ['branch', 'merge', 'into', base, `Run ${ledger.run.id}: ${ledger.run.title}`], run, LONG_MS)
+        const merged = await loreLong($, ['branch', 'merge', 'into', base, `Run ${ledger.run.id}: ${ledger.run.title}`], run)
         outcome = mergeOf(merged.exitCode, merged.out)
       }
     }
@@ -2163,7 +2472,9 @@ async function approveMain($: EngineInterface, origin: string): Promise<string> 
   for (const folder of [...derivedFolders, ...(ownBase === '' ? [] : [runWorkspaceOf(ownBase, ledger.run.id)])]) {
     const scanned = statusOf((await lore($, ['status', '--scan'], folder, LONG_MS)).out)
     const here = await backendOf($)
-    if (scanned?.isClean === true && scanned.isInSync && here !== null && isRemovable(here.root, ledger, folder)) await runProgram($, ['rm', '-rf', '--', folder], LONG_MS)
+    const isOwn = here !== null && isRemovable(here.root, ledger, folder)
+    const left = scanned === undefined || here === null || !isOwn ? undefined : notInLore(scanned, await copiedIn($, here.root, folder, scanned.untracked))
+    if (left !== undefined && left.length === 0) await runProgram($, ['rm', '-rf', '--', folder], LONG_MS)
     else kept.push(folder)
   }
   const tail = [
@@ -2172,6 +2483,112 @@ async function approveMain($: EngineInterface, origin: string): Promise<string> 
   ].join(' ')
 
   return `${done?.text ?? `Merged: run ${ledger.run.id} is on ${base} as ${rev7(landed)}.`} ${tail}${protectLine}`
+}
+
+/**
+ * The folder the mod made for a task of a Lore run, while it is the run's own
+ * to remove: derived, never a path read off the ledger alone.
+ */
+function ownFolder(root: string, ledger: Ledger, taskId: string): string | undefined {
+  try {
+    const derived = workspaceOf(workspacesOf(root, projectOf(ledger)?.lore?.workspaces), ledger.run.id, taskId)
+
+    return isRemovable(root, ledger, derived) ? derived : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** What keeps a done task's workspace, read as a merge reads it: lore's status, less what the copy took along. */
+async function whyKept($: EngineInterface, root: string, folder: string, isOwn: boolean): Promise<string> {
+  if (!isOwn) return 'it is not the folder the mod made for this task, so /cleanup leaves it alone'
+  if (!(await $.fs.exists(folder).catch(() => true))) return 'it is gone already'
+  const status = statusOf((await lore($, ['status', '--scan'], folder, LONG_MS)).out)
+  if (status === undefined) return 'lore could not read it'
+  const left = notInLore(status, await copiedIn($, root, folder, status.untracked))
+
+  return left.length === 0 ? 'it holds nothing of its own, only what the copy took along' : `it holds changes that are not pushed (${someOf(left)})`
+}
+
+const LISTED = '/cleanup <task id> removes one, /cleanup all every one listed; what is not pushed in it is lost. Nothing was removed.'
+
+/**
+ * `/cleanup`: the workspaces a Lore run kept for its done tasks, each with
+ * what keeps it. Named (or `all`), the owner's own hand removes them, changes
+ * not pushed and all, and the board forgets them. Only the folder the mod made
+ * for a done task is ever removed.
+ */
+async function cleanupRun($: EngineInterface, args: string, origin: string): Promise<string> {
+  const path = await boundLedger($)
+  if (path === undefined) return await unbound($)
+  const ledger = parseLedger((await textAt($, path)) ?? '').ledger
+  if (ledger === undefined) return 'The board does not read: nothing was removed.'
+  const id = ledger.run.id
+  if (ledger.run.lore === undefined) return `Run ${id} is no Lore run: /cleanup removes only the workspaces a Lore run copied. A git worktree is git's: git worktree list shows them.`
+  const here = await backendOf($)
+  if (here === null || here.kind !== 'lore') return `The Lore workspace of run ${id} is not found from here: nothing was removed.`
+  const none = `Run ${id} keeps no workspace of a done task.`
+  const named = args.split(/[\s,]+/).filter(one => one !== '')
+  if (named.length === 0) {
+    const kept = ledger.tasks.filter(one => one.status === 'done' && one.workspace !== undefined)
+    if (kept.length === 0) return none
+    const lines: string[] = []
+    for (const one of kept) {
+      const folder = one.workspace!
+      lines.push(`- ${one.id} at ${folder}: ${await whyKept($, here.root, folder, ownFolder(here.root, ledger, one.id) === folder)}`)
+    }
+
+    return [`Run ${id} keeps the workspaces of ${kept.length} done task${kept.length === 1 ? '' : 's'}:`, ...lines, LISTED].join('\n')
+  }
+  if (!OWNER_ORIGINS.has(origin)) return 'Not done. Only the owner removes workspaces, typing /cleanup in the terminal, the desktop app or Remote Control. Nothing was removed.'
+  const wanted = named.includes('all') ? ledger.tasks.filter(one => one.status === 'done' && one.workspace !== undefined).map(one => one.id) : [...new Set(named)]
+  if (wanted.length === 0) return none
+  const removed = new Map<string, string>()
+  const refused: string[] = []
+  let isTried = false
+  for (const taskId of wanted) {
+    const one = ledger.tasks.find(task => task.id === taskId)
+    if (one === undefined) refused.push(`${taskId} (there is no such task in this run)`)
+    else if (one.status !== 'done') refused.push(`${taskId} (it is ${one.status}, not done)`)
+    else if (one.workspace === undefined) refused.push(`${taskId} (it keeps no workspace)`)
+    else if (ownFolder(here.root, ledger, taskId) !== one.workspace) refused.push(`${taskId} (it is not the folder the mod made for this task)`)
+    else {
+      isTried = true
+      const folder = one.workspace
+      // A folder gone already is only forgotten.
+      const isThere = await $.fs.exists(folder).catch(() => true)
+      const failed = isThere ? await runProgram($, ['rm', '-rf', '--', folder], LONG_MS).then(ran => (ran.exitCode === 0 ? undefined : lastLine(ran))) : undefined
+      if (failed === undefined) removed.set(taskId, folder)
+      else refused.push(`${taskId} (rm did not remove it: ${failed})`)
+    }
+  }
+  if (removed.size > 0) {
+    await mutate($, path, raw => {
+      let isChanged = false
+      for (const task of raw.tasks) {
+        if (task.status === 'done' && task.workspace !== undefined && removed.get(task.id) === task.workspace) {
+          delete task.workspace
+          isChanged = true
+        }
+      }
+
+      return { value: undefined, isChanged }
+    })
+    for (const taskId of removed.keys()) {
+      isolated.delete(taskId)
+      workspaces.delete(taskId)
+    }
+  }
+  const free = isTried ? await freeGbAt($, here.root) : undefined
+  const ids = [...removed.keys()]
+
+  return [
+    ids.length === 0 ? '' : `Removed the workspace${ids.length === 1 ? '' : 's'} of ${ids.join(', ')}.`,
+    refused.length === 0 ? '' : `Not removed: ${refused.join(', ')}.`,
+    typeof free === 'number' ? `${free} GB are free now on the disk that holds ${here.root}.` : '',
+  ]
+    .filter(part => part !== '')
+    .join(' ')
 }
 
 /** `run_sync_base`: the orchestrator has the mod bring the base branch into the run branch, so the run can be approved again. */
@@ -2186,17 +2603,17 @@ async function runSyncBase($: EngineInterface, call: ToolCall): Promise<{ result
   if (ledger.merge !== undefined) return fail(`${ledger.merge.task} is still merging: one merge at a time.`)
   const baseNow = branchInfoOf((await lore($, ['branch', 'info', base], run)).out)?.remoteLatest
   if (baseNow === undefined) return fail(`lore did not say where ${base} stands on the server.`)
-  const synced = await lore($, ['branch', 'switch', runLore.branch, '--reset'], run, LONG_MS)
+  const synced = await loreLong($, ['branch', 'switch', runLore.branch, '--reset'], run)
   if (synced.exitCode !== 0) return fail(`the run's workspace could not be brought to ${runLore.branch}: ${lastLine(synced)}.`)
   const runHead = branchInfoOf((await lore($, ['branch', 'info', runLore.branch], run)).out)?.remoteLatest
   if (runHead === undefined || (runLore.head !== undefined && runHead !== runLore.head)) {
     return fail(`${runLore.branch} is at ${runHead === undefined ? 'a revision lore did not say' : rev7(runHead)}, but the board left it at ${runLore.head === undefined ? 'no revision it knows of' : rev7(runLore.head)}: something nobody judged is on it. Nothing was merged; look at lore history --branch ${runLore.branch}.`)
   }
-  const merged = await lore($, ['branch', 'merge', base, `--message=Bring ${base} into ${runLore.branch}`], run, LONG_MS)
+  const merged = await loreLong($, ['branch', 'merge', base, `--message=Bring ${base} into ${runLore.branch}`], run)
   const outcome = mergeOf(merged.exitCode, merged.out)
   const at = iso(await $.clock.now())
   if (outcome.kind === 'conflict') {
-    await lore($, ['branch', 'merge', 'abort'], run, LONG_MS)
+    await loreLong($, ['branch', 'merge', 'abort'], run)
     const files = outcome.files.join(', ') || 'files lore did not name'
     await mutate($, path, raw => {
       const reported = reportProblem(raw, at, { kind: 'orchestrator' }, { text: `Bringing ${base} into ${runLore.branch} conflicts in: ${files}. Give it a task that resolves it on the run branch, then call run_sync_base again.`, severity: 'blocker' })
@@ -2207,17 +2624,17 @@ async function runSyncBase($: EngineInterface, call: ToolCall): Promise<{ result
     return fail(`${base} conflicts with ${runLore.branch} in: ${files}. Nothing was merged; it is a blocker on the board.`)
   }
   if (outcome.kind === 'failed') {
-    await lore($, ['branch', 'merge', 'abort'], run, LONG_MS)
+    await loreLong($, ['branch', 'merge', 'abort'], run)
 
     return fail(`lore did not bring ${base} in: ${outcome.reason}.`)
   }
   if (outcome.source !== undefined && outcome.source !== baseNow) {
     if (runHead !== undefined) await lore($, ['branch', 'reset', runHead, '--branch', runLore.branch], run)
-    await lore($, ['branch', 'switch', runLore.branch, '--reset'], run, LONG_MS)
+    await loreLong($, ['branch', 'switch', runLore.branch, '--reset'], run)
 
     return fail(`${base} moved while it was brought in. Nothing was pushed: call run_sync_base again.`)
   }
-  const sent = await lore($, ['push'], run, LONG_MS)
+  const sent = await loreLong($, ['push'], run)
   const result = pushOf(sent.exitCode, sent.out)
   if (result.kind === 'refused') return fail(`the run branch could not be pushed: ${result.text}.`)
   const broughtHead = result.kind === 'pushed' ? result.revision : outcome.revision
@@ -2275,34 +2692,34 @@ async function loreMergeTool($: EngineInterface, call: ToolCall, isCheckOnly: bo
 
     return fail(outcome?.text ?? `${id} was not merged: ${why}.`)
   }
-  const synced = await lore($, ['branch', 'switch', runLore.branch, '--reset'], run, LONG_MS)
+  const synced = await loreLong($, ['branch', 'switch', runLore.branch, '--reset'], run)
   if (synced.exitCode !== 0) return giveUp(`the run's workspace could not be brought to ${runLore.branch}: ${lastLine(synced)}`)
   const runHead = branchInfoOf((await lore($, ['branch', 'info', runLore.branch], run)).out)?.remoteLatest
   if (runHead === undefined) return giveUp(`lore did not say where ${runLore.branch} stands on the server`)
   // A task is merged only onto what the board itself left on the run branch: anything else would be carried along unjudged.
   if (runLore.head !== undefined && runHead !== runLore.head) return giveUp(`${runLore.branch} is at ${rev7(runHead)}, but the board left it at ${rev7(runLore.head)}: something nobody judged is on it. Nothing was merged; look at lore history --branch ${runLore.branch}`)
-  const merged = await lore($, ['branch', 'merge', branch, `--message=${id}: ${task.title}`], run, LONG_MS)
+  const merged = await loreLong($, ['branch', 'merge', branch, `--message=${id}: ${task.title}`], run)
   const outcome = mergeOf(merged.exitCode, merged.out)
   // Lore merges a branch's latest: one pushed between the look above and the merge is not the judged revision.
   if (outcome.kind === 'merged' && outcome.source !== revision) {
     await lore($, ['branch', 'reset', runHead, '--branch', runLore.branch], run)
-    await lore($, ['branch', 'switch', runLore.branch, '--reset'], run, LONG_MS)
+    await loreLong($, ['branch', 'switch', runLore.branch, '--reset'], run)
     const took = outcome.source === undefined ? 'a revision lore did not name' : rev7(outcome.source)
 
     return giveUp(`lore took in ${took}, not the judged ${rev7(revision)}: the branch moved meanwhile. Nothing was pushed; judge it again`)
   }
   if (outcome.kind === 'conflict') {
-    await lore($, ['branch', 'merge', 'abort'], run, LONG_MS)
+    await loreLong($, ['branch', 'merge', 'abort'], run)
     const said = await settle($, path, raw => conflicted(raw, at, id, outcome.files))
 
     return fail(said?.text ?? `${id} conflicts with the run branch; nothing was merged.`)
   }
   if (outcome.kind === 'failed') {
-    await lore($, ['branch', 'merge', 'abort'], run, LONG_MS)
+    await loreLong($, ['branch', 'merge', 'abort'], run)
 
     return giveUp(`lore did not merge it: ${outcome.reason}`)
   }
-  const pushed = await lore($, ['push'], run, LONG_MS)
+  const pushed = await loreLong($, ['push'], run)
   const sent = pushOf(pushed.exitCode, pushed.out)
   if (sent.kind !== 'pushed') return giveUp(`the merge could not be pushed: ${sent.kind === 'refused' ? sent.text : 'lore pushed nothing'}`)
   // Its locks are let go, and its workspace removed when everything in it is in Lore.
@@ -2312,12 +2729,16 @@ async function loreMergeTool($: EngineInterface, call: ToolCall, isCheckOnly: bo
     const scanned = await lore($, ['status', '--scan'], task.workspace, LONG_MS)
     const status = statusOf(scanned.out)
     const hereNow = await backendOf($)
-    const derived = hereNow === null || projectOf(ledger) === undefined ? undefined : workspaceOf(workspacesOf(hereNow.root, projectOf(ledger)?.lore?.workspaces), ledger.run.id, id)
-    if (status?.isClean === true && status.isInSync && hereNow !== null && derived === task.workspace && isRemovable(hereNow.root, ledger, derived)) {
-      await runProgram($, ['rm', '-rf', '--', task.workspace], LONG_MS)
+    const derived = hereNow === null ? undefined : ownFolder(hereNow.root, ledger, id)
+    // Only the folder the mod made for this task is compared with the owner's workspace, and only it is removed.
+    const own = hereNow !== null && derived !== undefined && derived === task.workspace ? { root: hereNow.root, folder: derived } : undefined
+    const left = status === undefined ? undefined : notInLore(status, own === undefined ? new Set() : await copiedIn($, own.root, own.folder, status.untracked))
+    if (left !== undefined && left.length === 0 && own !== undefined) {
+      await runProgram($, ['rm', '-rf', '--', own.folder], LONG_MS)
       workspaceLine = 'Its workspace is removed: everything in it is in Lore.'
     } else {
-      workspaceLine = `Its workspace is kept at ${task.workspace}: ${status === undefined ? 'lore could not read it' : 'it holds changes that are not pushed'}. Look at it before you remove it.`
+      const why = left === undefined ? 'lore could not read it' : left.length > 0 ? `it holds changes that are not pushed (${someOf(left)})` : 'it is not the folder the mod made for this task'
+      workspaceLine = `Its workspace is kept at ${task.workspace}: ${why}. Look at it before you remove it.`
     }
   }
   const removed = workspaceLine.startsWith('Its workspace is removed')
@@ -2460,8 +2881,12 @@ async function underWay<T>(merging: () => Promise<T>): Promise<T> {
   }
 }
 
-/** A Lore claim older than this was not heard of again: longer than three of the engine's longest program runs. */
-const LORE_CLAIM_STALE_MIN = 35
+/**
+ * A Lore claim older than this was not heard of again: longer than the
+ * longest a live merge holds its claim (a switch, a merge and a push of up
+ * to LORE_LONG_MS each, then a scan and a removal of up to LONG_MS each).
+ */
+const LORE_CLAIM_STALE_MIN = (3 * LORE_LONG_MS + 3 * LONG_MS) / 60_000
 
 /**
  * A Lore merge claim nobody heard back from (the session stopped mid-merge,
@@ -2715,6 +3140,7 @@ async function switchOn($: EngineInterface): Promise<void> {
       void watchClaim($)
       void watchMain($)
       void lookAgain($)
+      void watchStalls($)
     }
     if (isOrchestrating === true && flushTicks % GAUGE_EVERY === 0) void nudge($)
   })
@@ -2886,6 +3312,11 @@ async function switchOn($: EngineInterface): Promise<void> {
     argumentHint: '<task id>',
   })
   await listCommand($, {
+    name: 'cleanup',
+    description: 'List the workspaces the bound Lore run kept for its done tasks and what keeps each; with task ids or all, remove them, changes not pushed and all',
+    argumentHint: '[<task id>… | all]',
+  })
+  await listCommand($, {
     name: 'rotate',
     description: 'Write the bound run\'s handover and compact this session now, whatever its context reading',
   })
@@ -3041,6 +3472,13 @@ export const register: Register = (on, options) => {
 
     routing.add(e.tool_use_id)
     await remember($, path)
+    // A worker the orchestrator took its task back from starts nothing more.
+    const takenFrom = e.parentAgentId === undefined ? undefined : retired.get(e.parentAgentId)
+    if (takenFrom !== undefined) {
+      routing.delete(e.tool_use_id)
+
+      return { deny: `conductor: ${takenFrom} was taken back from you by the orchestrator, and another worker may have it now. Stop: change nothing more, and end your turn.` }
+    }
     const parentTaskId = e.parentAgentId === undefined ? undefined : agents.get(e.parentAgentId)
     if (e.parentAgentId !== undefined && parentTaskId === undefined) {
       // Started by a helper or an agent the board does not know: not the router's.
@@ -3157,7 +3595,17 @@ export const register: Register = (on, options) => {
       }
       // The engine started nothing after all: the task stands again as it stood.
       if ((started as { agentId?: string }).agentId === undefined) await release()
-      else await heard($, path, e.name ?? decided.taskId, decided, started)
+      else {
+        const child = (started as { agentId?: string }).agentId
+        const parent = e.parentAgentId
+        if (decided.kind === 'child' && child !== undefined && parent !== undefined) parents.set(child, parent)
+        // Its parent was taken back while the engine started it: the subagent goes with its parent.
+        const takenFrom = parent === undefined ? undefined : retired.get(parent)
+        if (decided.kind === 'child' && child !== undefined && takenFrom !== undefined) {
+          retired.set(child, takenFrom)
+          await keepFenced($, path, takenFrom)
+        } else await heard($, path, e.name ?? decided.taskId, decided, started)
+      }
 
       return started
     } catch (cause) {
@@ -3217,6 +3665,11 @@ export const register: Register = (on, options) => {
   // And the way board news reaches its reader: with the result of the reader's own call.
   on('tool.call', async ($, e, next) => {
     const call = e as unknown as ToolCall
+    // A worker the orchestrator took its task back from may still run: it changes nothing more, the board included.
+    const takenFrom = call.agentId === undefined ? undefined : retired.get(call.agentId)
+    if (takenFrom !== undefined) {
+      return { deny: `conductor: ${takenFrom} was taken back from you by the orchestrator, and another worker may have it now. Stop: change nothing more, and end your turn.` }
+    }
     // In a run nothing reaches the base branch by hand: not a worker's command, and not the orchestrator's either.
     if (call.tool === 'Bash' && typeof call.command === 'string') {
       const base = await runBase($)
@@ -3384,6 +3837,19 @@ export const register: Register = (on, options) => {
       return { ...outcome, text: `${outcome.text} Can start now, before this one is merged: ${names}. Merge ${input.task} all the same as soon as nothing else is merging.` }
     })
     if (said.isError === undefined && (e as unknown as ToolCall).status === 'green') await checkOnGreen($, (e as unknown as ToolCall).task)
+    // A worker just taken back is fenced now, not at the next reload.
+    if (said.isError === undefined && (e as unknown as ToolCall).status === 'returned') {
+      try {
+        const path = await boundLedger($)
+        const taken = path === undefined ? undefined : parseLedger(await $.fs.read(path)).ledger?.tasks.find(one => one.id === (e as unknown as ToolCall).task)
+        if (path !== undefined && taken !== undefined) {
+          fence(taken)
+          await keepFenced($, path, taken.id)
+        }
+      } catch {
+        // The ledger holds it: the next reload fences it.
+      }
+    }
 
     return said
   }).catch(broke)
@@ -3455,8 +3921,8 @@ export const register: Register = (on, options) => {
       `- A start is refused for an agent that is no task's worker, for a task that is done, already building or waiting on tasks that are not green yet, and when the run's limit of workers building at once is reached. Read-only helpers of type ${HELPER_TYPES.join(', ')} start without a task. A worker's own subagents never run on a dearer tier than the worker.`,
       '- The owner holds a run with /pause and lets it go on with /unpause. While it is paused the mod starts no worker and merges nothing; workers that are building finish and hand back, you judge their hand-backs and answer their questions, and a merge in flight is still settled with GitHub. When nothing is building any more, tell the owner in a line or two where the run stands, and stop. When the pause ends, read the board and go on: judge what was handed back, start what can start, and merge what is green, in order.',
       runLore === undefined
-        ? '- A task that is building while its worker is not running (the session was restarted meanwhile; ListAgents shows who runs) gets its worker started again with a message to the agent id the board lists: tell it first to run git status and git diff, and to commit and push what is its own.'
-        : '- A task that is building while its worker is not running (the session was restarted meanwhile; ListAgents shows who runs) gets its worker started again with a message to the agent id the board lists: tell it first to run lore status --scan and lore diff in its workspace, and to commit and push what is its own.',
+        ? "- A task that is building while its worker is not running (the session was restarted meanwhile, or its wait ran out; ListAgents shows who runs) gets its worker started again with a message to the agent id the board lists: tell it first to run git status and git diff, and to commit and push what is its own. When the engine declines that message, take the task back: set it to returned with mcp__conductor__task_update, which retires that worker (the mod refuses its tool calls from then on), and start a worker again with the task's id as its name."
+        : "- A task that is building while its worker is not running (the session was restarted meanwhile, or its wait ran out; ListAgents shows who runs) gets its worker started again with a message to the agent id the board lists: tell it first to run lore status --scan and lore diff in its workspace, and to commit and push what is its own. When the engine declines that message, take the task back: set it to returned with mcp__conductor__task_update, which retires that worker (the mod refuses its tool calls from then on), and start a worker again with the task's id as its name. The new worker works in the same workspace.",
       runLore === undefined
         ? '- After a hand-back the orchestrator judges it and sets the task to review, green, blocked or failed, or to done when it has no pull request.'
         : '- After a hand-back the orchestrator judges it and sets the task to review, green, blocked or failed, or to done when it changed no code.',
@@ -3639,22 +4105,23 @@ export const register: Register = (on, options) => {
   on('command.run', { command: 'approve' }, async $ => {
     const path = await boundLedger($)
     if (path === undefined) return { text: await unbound($) }
-    const notReady = await loreApprove($, path)
-    if (notReady !== undefined) return { text: `No plan was approved: ${notReady} Approve again once that is fixed.` }
-    const written = await mutate($, path, raw => {
-      const outcome = approvePlan(raw)
+    const { text, isApproved } = await approveRun($, path)
+    if (isApproved) asks.push(APPROVED)
 
-      return { value: outcome, isChanged: outcome.isChanged }
-    })
-    if (written.error !== undefined) return { text: written.error }
-    if (!written.value.isError) {
-      asks.push(APPROVED)
-      await linearApproved($, path)
-    }
-    seen = undefined
-    await refresh($, false)
+    return { text }
+  })
 
-    return { text: written.value.text }
+  // The owner's reply that only approves, such as a button "Approve, start now", is /approve while the plan is proposed.
+  // Only the owner's own hand counts: a peer session, a channel, a plugin or anything scheduled approves nothing.
+  on('prompt.submit', async ($, e, next) => {
+    if (e.command !== undefined || e.isMeta === true || !OWNER_ORIGINS.has(e.origin.kind) || !isApproval(e.text)) return next(e)
+    const path = await boundLedger($).catch(() => undefined)
+    const plan = path === undefined ? undefined : parseLedger((await textAt($, path)) ?? '').ledger?.run.plan
+    if (path === undefined || plan !== 'proposed') return next(e)
+    const { text, isApproved } = await approveRun($, path)
+    const said = isApproved ? `${APPROVED} The owner's reply "${e.text.trim()}" counts as /approve. ${text}` : `Run board: the owner's reply "${e.text.trim()}" asks to approve the plan, and it is not approved: ${text}`
+
+    return next({ ...e, context: [...(e.context ?? []), said] })
   })
 
   on('command.run', { command: 'approve-main' }, async ($, e) => {
@@ -3692,6 +4159,14 @@ export const register: Register = (on, options) => {
     if (written.error === undefined && !written.value.isError) carry(written.value)
 
     return { text: written.error ?? written.value.text }
+  })
+
+  on('command.run', { command: 'cleanup' }, async ($, e) => {
+    const text = await cleanupRun($, e.args, e.origin.kind)
+    seen = undefined
+    await refresh($, false)
+
+    return { text }
   })
 
   on('command.run', { command: 'rotate' }, async $ => {

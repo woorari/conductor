@@ -2,8 +2,8 @@ import { expect, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
 import type { Ledger } from '../types'
-import { MERGE_ABORT, MERGE_CLEAN, MERGE_CONFLICT, MERGE_INTO_DONE, MERGE_INTO_PROTECTED, PUSH_RUN, REV_MAIN, REV_ON_MAIN, REV_RUN, REV_T1, STATUS_CLEAN } from './lore-output'
-import { BASE, RUN, RUN_BRANCH, answers, lored, ok, ranIn, stored, task } from './lore-world'
+import { MERGE_ABORT, MERGE_CLEAN, MERGE_CONFLICT, MERGE_INTO_DONE, MERGE_INTO_PROTECTED, PUSH_RUN, REV_MAIN, REV_ON_MAIN, REV_RUN, REV_T1, STATUS_CLEAN, STATUS_COPIED } from './lore-output'
+import { BASE, LORE_ROOT, RUN, RUN_BRANCH, answers, lored, ok, ranIn, stored, task } from './lore-world'
 import { LINEAR_TOKEN } from './world'
 
 type Ran = { text?: string; isError?: true }
@@ -151,6 +151,19 @@ test('a Lore session registers /approve-main and run_sync_base', async ($, on) =
   expect(engine.registered).toContain('run_sync_base')
 })
 
+test("at the end of the run, what the copies took along from the owner's workspace keeps none of them", async ($, on) => {
+  const t1 = `${BASE}/ABC-12/t1`
+  const { files, engine } = await finished($, on, { ...DONE, tasks: [task('t1', { status: 'done', branch: `${RUN_BRANCH}/t1`, mergeCommit: REV_RUN, workspace: t1 })] })
+  const settings = '{ "hooks": { "WorktreeCreate": [] } }\n'
+  for (const at of [LORE_ROOT, t1, RUN_WS]) files[`${at}/.claude/settings.local.json`] = { text: settings, mtimeMs: 1 }
+  engine.dirs.push(`${LORE_ROOT}/.claude`, `${t1}/.claude`, `${RUN_WS}/.claude`)
+  engine.lore.unshift(answers(['status', '--scan'], ok(STATUS_COPIED), t1), answers(['status', '--scan'], ok(STATUS_COPIED), RUN_WS))
+
+  expect((await approveMain($)).text).toContain('Its workspaces are removed.')
+  const removed = engine.calls.map(one => one.argv).filter(argv => argv[0] === 'rm')
+  expect(removed).toEqual([['rm', '-rf', '--', t1], ['rm', '-rf', '--', RUN_WS]])
+})
+
 test('across a whole run, no Lore write ran in the owner\'s workspace', async ($, on) => {
   const { engine } = await finished($, on)
   engine.lore.unshift(answers(['status', '--scan'], ok(STATUS_CLEAN)))
@@ -223,7 +236,7 @@ test('run_sync_base never builds on a run branch head the board did not leave', 
 })
 
 test('a base merge nobody heard back from is let go after a while, with the base protected again and a blocker on the board', async ($, on) => {
-  const stuck: Ledger = { ...DONE, merge: { task: 'ABC-12', revision: REV_RUN, target: 'base', state: 'merging', startedAt: '2026-10-09T09:50:00.000Z' } }
+  const stuck: Ledger = { ...DONE, merge: { task: 'ABC-12', revision: REV_RUN, target: 'base', state: 'merging', startedAt: '2026-10-09T06:30:00.000Z' } }
   const { files, engine, clock } = await finished($, on, stuck)
 
   await clock.advance(30_000)
@@ -235,6 +248,14 @@ test('a base merge nobody heard back from is let go after a while, with the base
 test('a fresh Lore claim is left alone', async ($, on) => {
   const fresh: Ledger = { ...DONE, merge: { task: 'ABC-12', revision: REV_RUN, target: 'base', state: 'merging', startedAt: '2026-10-09T10:29:00.000Z' } }
   const { files, clock } = await finished($, on, fresh)
+
+  await clock.advance(30_000)
+  expect(stored(files).merge).toBeDefined()
+})
+
+test('a Lore claim two hours old is left alone: a merge of a large branch may still be running in another session', async ($, on) => {
+  const long: Ledger = { ...DONE, merge: { task: 'ABC-12', revision: REV_RUN, target: 'base', state: 'merging', startedAt: '2026-10-09T08:30:00.000Z' } }
+  const { files, clock } = await finished($, on, long)
 
   await clock.advance(30_000)
   expect(stored(files).merge).toBeDefined()

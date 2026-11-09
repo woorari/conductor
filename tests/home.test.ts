@@ -10,6 +10,7 @@ test('in a repository with a .claude/conductor folder the mod registers its comm
   expect([...engine.registered].sort()).toEqual([
     '/approve',
     '/board',
+    '/cleanup',
     '/conduct',
     '/merged',
     '/pause',
@@ -38,7 +39,7 @@ test('a name the engine keeps for itself is said once and holds up nothing else 
   await start($)
 
   expect(engine.registered, 'the refused one is missing, and only that one').not.toContain('/approve')
-  expect(engine.registered).toHaveLength(18)
+  expect(engine.registered).toHaveLength(19)
   expect(engine.registered, 'what comes after it is registered all the same').toContain('problem_resolve')
   expect(engine.toasts).toEqual(['Run board: the engine did not take /approve (conductor: $.command.register: "/approve" refused: it is the built-in /approve). Everything else of the mod works.'])
 

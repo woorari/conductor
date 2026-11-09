@@ -3,7 +3,7 @@ import type { Engine } from 'claude-code/testing'
 
 import type { Ledger } from '../types'
 import { BRANCH_INFO_MAIN_UNSYNCED, BRANCH_INFO_PUSHED, REV_ON_MAIN } from './lore-output'
-import { BASE, RUN, RUN_BRANCH, answers, lored, ok, program, ranIn, stored } from './lore-world'
+import { BASE, DF, RUN, RUN_BRANCH, answers, lored, ok, program, ranIn, stored } from './lore-world'
 
 const command = ($: Engine, name: string, args = '') =>
   $.command.run({ command: name, args, origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } })
@@ -16,8 +16,8 @@ const inOrder = (ran: readonly string[], wanted: readonly string[]): boolean => 
   return at === wanted.length
 }
 
-test('approve makes the run branch from the base, protects the base, and keeps where the base stood', async ($, on) => {
-  const { files, engine } = await lored($, on, PROPOSED)
+/** Lore answers the base branch, and the run branch once it is pushed. */
+function approvable(engine: Awaited<ReturnType<typeof lored>>['engine']): void {
   let isPushed = false
   engine.lore.unshift(
     answers(['branch', 'info', 'main'], ok(BRANCH_INFO_MAIN_UNSYNCED)),
@@ -27,6 +27,11 @@ test('approve makes the run branch from the base, protects the base, and keeps w
       answer: () => ({ exitCode: 0, stdout: `Branch ${RUN_BRANCH}\n  ID: 01a1b056f6bb701783e7a1beb2aa49a0\n  Latest: ${REV_ON_MAIN}\n  Remote Latest: ${isPushed ? REV_ON_MAIN : '0'.repeat(64)}\n` }),
     },
   )
+}
+
+test('approve makes the run branch from the base, protects the base, and keeps where the base stood', async ($, on) => {
+  const { files, engine } = await lored($, on, PROPOSED)
+  approvable(engine)
 
   const said = await command($, 'approve')
   expect(said.text).toContain('Plan approved')
@@ -36,6 +41,37 @@ test('approve makes the run branch from the base, protects the base, and keeps w
   expect(run.plan).toBe('approved')
   expect(run.lore).toMatchObject({ workspace: RUN_WS, baseAt: REV_ON_MAIN })
   expect(engine.toasts).toContain('Run board: making the run\'s Lore workspace. A large workspace takes a minute or two.')
+})
+
+/** The disk answers with this many GB free. */
+const freeGb = (gb: number) => program('df', ok(DF.replace('92000000', String(gb * 1024 * 1024))))
+
+test('a disk without room for every worker the run may start at once keeps the plan proposed, before anything is copied', async ($, on) => {
+  const { files, engine } = await lored($, on, PROPOSED)
+  approvable(engine)
+  engine.programs.unshift(freeGb(40))
+
+  const said = await command($, 'approve')
+  expect(said.text).toContain('No plan was approved')
+  expect(said.text).toContain('40 GB')
+  expect(said.text).toContain('3 workers at once need 60 GB (20 GB each, lore.minFreeGB in .claude/conductor/config.json)')
+  expect(engine.calls.some(one => one.argv[0] === 'cp'), 'no workspace made').toBe(false)
+  expect(stored(files).run.plan).toBe('proposed')
+})
+
+test('fewer workers at once fit the same disk', async ($, on) => {
+  const { engine } = await lored($, on, { ...PROPOSED, run: { ...PROPOSED.run, maxParallel: 2 } })
+  approvable(engine)
+  engine.programs.unshift(freeGb(40))
+  expect((await command($, 'approve')).text).toContain('Plan approved')
+})
+
+test('less disk each fits the same disk', async ($, on) => {
+  const config = { ...PROPOSED.run.config, lore: { ...PROPOSED.run.config?.lore, minFreeGB: 10 } }
+  const { engine } = await lored($, on, { ...PROPOSED, run: { ...PROPOSED.run, config } as Ledger['run'] })
+  approvable(engine)
+  engine.programs.unshift(freeGb(40))
+  expect((await command($, 'approve')).text).toContain('Plan approved')
 })
 
 test('a failed run workspace keeps the plan proposed', async ($, on) => {

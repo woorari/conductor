@@ -124,3 +124,22 @@ export const PLANNING = [
 ].join('\n')
 
 export const APPROVED = 'Run board: the owner approved the plan.'
+
+/** Words an approving reply may lead with, and the words it may add after approving: to start, and nothing else. */
+const YES = new Set(['yes', 'ok', 'okay'])
+const GO = new Set(['it', 'the', 'plan', 'and', 'start', 'now', 'go', 'ahead', 'please'])
+
+/**
+ * Whether a reply of the owner's is an explicit approval of the plan, as
+ * /approve: a button such as "Approve, start now". It says only to approve,
+ * and maybe to start; a question, a condition, a negation or anything else
+ * named is not one.
+ */
+export function isApproval(text: string): boolean {
+  if (text.includes('?')) return false
+  const words = text.toLowerCase().replace(/[.,!;:]/g, ' ').trim().split(/\s+/)
+  const first = words.findIndex(word => !YES.has(word))
+  if (first < 0 || (words[first] !== 'approve' && words[first] !== 'approved')) return false
+
+  return words.slice(first + 1).every(word => GO.has(word))
+}

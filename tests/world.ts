@@ -155,6 +155,8 @@ export type World = {
   agentIds: string[]
   /** When set, the engine starts no agent and says this instead. */
   noStart: string | undefined
+  /** While set, the engine holds every agent start until it settles: a start under way. */
+  holdStart: Promise<void> | undefined
   /** No file can be written: the disk is full, or the folder is not the session's to write. */
   isReadOnly: boolean
   /** Every tool call that reached the engine: the mod's own tools never do. */
@@ -207,12 +209,24 @@ export type World = {
   loreCalls: { argv: string[]; cwd?: string }[]
   /** How any other program answers (cp, df, rm, sh...): the first entry that matches; none matching is a program that is not there. */
   programs: LoreAnswer[]
-  /** Every program run, with the folder it ran in. */
-  calls: { argv: string[]; cwd?: string; timeoutMs?: number; env?: Record<string, string> }[]
+  /** Every program run, with the folder it ran in; one streamed by `$.process.spawn` is marked so. */
+  calls: { argv: string[]; cwd?: string; timeoutMs?: number; env?: Record<string, string>; isStreamed?: true }[]
+  /**
+   * Programs that take a while, by the mocked clock (`sleep` is the test's
+   * `clock.sleep`): the first entry that matches holds the answer back `ms`.
+   * Run by `$.process.run`, one slower than its time limit (the engine's ten
+   * minutes at most) is aborted as the engine aborts it; streamed by
+   * `$.process.spawn`, it is stopped when the stream is let go.
+   */
+  slow: { match: (argv: readonly string[], cwd?: string) => boolean; ms: number; sleep: (ms: number) => Promise<void> }[]
+  /** Every streamed program that was stopped before it ended, as its argument vector. */
+  stopped: string[][]
   /** What `fs.list` answers for a folder, where a test says; other folders are derived from the files. */
   listings: Record<string, { name: string; kind: 'dir' | 'file' }[]>
   /** Folders that exist, for `fs.exists`: a Lore workspace's `.lore`, say. */
   dirs: string[]
+  /** An engine whose reads of bytes answer without the `base64` they carry: nothing read so is the same as anything. */
+  isBytesWithoutBase64: boolean
   /** The session's working directory, as `$.session.cwd()` answers it. */
   cwd: string
   /** What the person's own WorktreeCreate settings hook answers, beneath the mod; none answers nothing. */
@@ -250,6 +264,7 @@ export function world(on: On, files: Files, repo: { root: string } | null = { ro
   const state: World = {
     agentIds: [],
     noStart: undefined,
+    holdStart: undefined,
     isReadOnly: false,
     ran: [],
     bash: [],
@@ -274,9 +289,12 @@ export function world(on: On, files: Files, repo: { root: string } | null = { ro
     loreCalls: [],
     programs: [],
     calls: [],
+    slow: [],
+    stopped: [],
     listings: {},
     worktree: {},
     dirs: [],
+    isBytesWithoutBase64: false,
     cwd: repo?.root ?? ROOT,
     registered: [],
     schemas: {},
@@ -303,29 +321,73 @@ export function world(on: On, files: Files, repo: { root: string } | null = { ro
   on('env.get', (_$, e) => ({
     value: e.name === 'HOME' ? HOME : e.name === 'GH_TOKEN' || e.name === 'GITHUB_TOKEN' || e.name === 'LINEAR_API_KEY' || e.name === 'LORE_BIN' ? state.env[e.name] : undefined,
   }))
-  on('process.run', (_$, e) => {
-    state.processes.push([...e.argv])
-    const isTokenAsked = e.argv.join(' ') === 'gh auth token'
-    const cwd = e.init?.cwd
-    state.calls.push({ argv: [...e.argv], ...(cwd === undefined ? {} : { cwd }), ...(e.init?.timeoutMs === undefined ? {} : { timeoutMs: e.init.timeoutMs }), ...(e.init?.env === undefined ? {} : { env: { ...e.init.env } }) })
-    const found = state.programs.find(one => one.match(e.argv, cwd))?.answer
-    const program = typeof found === 'function' ? found(e.argv, cwd) : found
-    if (program !== undefined) {
-      return { value: { exitCode: program.exitCode, stdout: program.stdout, stderr: program.stderr ?? '', isStdoutTruncated: false, isStderrTruncated: false } }
+  /** How a program answers, from the tables above; a program none of them knows is not there. */
+  const answerOf = (argv: readonly string[], cwd: string | undefined): { exitCode: number; stdout: string; stderr: string; isMissing?: true } => {
+    const found = state.programs.find(one => one.match(argv, cwd))?.answer
+    const program = typeof found === 'function' ? found(argv, cwd) : found
+    if (program !== undefined) return { exitCode: program.exitCode, stdout: program.stdout, stderr: program.stderr ?? '' }
+    if (/(^|\/)lore$/.test(argv[0] ?? '')) {
+      const given = state.lore.find(one => one.match(argv, cwd))?.answer
+      const scripted = typeof given === 'function' ? given(argv, cwd) : given
+      if (scripted !== undefined) return { exitCode: scripted.exitCode, stdout: scripted.stdout, stderr: scripted.stderr ?? '' }
     }
-    if (/(^|\/)lore$/.test(e.argv[0] ?? '')) {
-      state.loreCalls.push({ argv: [...e.argv], ...(cwd === undefined ? {} : { cwd }) })
-      const given = state.lore.find(one => one.match(e.argv, cwd))?.answer
-      const scripted = typeof given === 'function' ? given(e.argv, cwd) : given
-      if (scripted !== undefined) {
-        return { value: { exitCode: scripted.exitCode, stdout: scripted.stdout, stderr: scripted.stderr ?? '', isStdoutTruncated: false, isStderrTruncated: false } }
-      }
-    }
+    if (argv.join(' ') === 'gh auth token') return { exitCode: state.gh.exitCode, stdout: state.gh.stdout, stderr: '' }
 
-    return {
-      value: isTokenAsked
-        ? { exitCode: state.gh.exitCode, stdout: state.gh.stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false }
-        : { exitCode: 127, stdout: '', stderr: `${e.argv[0] ?? ''}: not found`, isStdoutTruncated: false, isStderrTruncated: false },
+    return { exitCode: 127, stdout: '', stderr: `${argv[0] ?? ''}: not found`, isMissing: true }
+  }
+  /** A lore call is noted as it starts, so one stopped before it answered is among them. */
+  const noteLore = (argv: readonly string[], cwd: string | undefined): void => {
+    if (/(^|\/)lore$/.test(argv[0] ?? '') && !state.programs.some(one => one.match(argv, cwd))) state.loreCalls.push({ argv: [...argv], ...(cwd === undefined ? {} : { cwd }) })
+  }
+  on('process.run', async (_$, e) => {
+    state.processes.push([...e.argv])
+    const cwd = e.init?.cwd
+    noteLore(e.argv, cwd)
+    state.calls.push({ argv: [...e.argv], ...(cwd === undefined ? {} : { cwd }), ...(e.init?.timeoutMs === undefined ? {} : { timeoutMs: e.init.timeoutMs }), ...(e.init?.env === undefined ? {} : { env: { ...e.init.env } }) })
+    const slow = state.slow.find(one => one.match(e.argv, cwd))
+    if (slow !== undefined) {
+      // As the engine runs a program: thirty seconds unless asked, ten minutes at most.
+      const limit = Math.min(e.init?.timeoutMs ?? 30_000, 600_000)
+      await slow.sleep(Math.min(slow.ms, limit))
+      if (slow.ms > limit) return { deny: `$.process.run(${(e.argv[0] ?? '').split('/').pop() ?? ''}) aborted: still running after ${limit}ms` }
+    }
+    const answer = answerOf(e.argv, cwd)
+
+    return { value: { exitCode: answer.exitCode, stdout: answer.stdout, stderr: answer.stderr, isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  on('process.spawn', async function* (_$, e, next) {
+    state.processes.push([...e.argv])
+    const cwd = e.cwd
+    noteLore(e.argv, cwd)
+    state.calls.push({ argv: [...e.argv], ...(cwd === undefined ? {} : { cwd }), ...(e.env === undefined ? {} : { env: { ...e.env } }), isStreamed: true })
+    const slow = state.slow.find(one => one.match(e.argv, cwd))
+    let isOver = false
+    try {
+      if (slow !== undefined) {
+        const stop = new Promise<'stopped'>(resolve => {
+          if (next.signal.aborted) resolve('stopped')
+          next.signal.addEventListener('abort', () => resolve('stopped'), { once: true })
+        })
+        // A long step says something every minute, as Lore does while it works; each piece starts the stand-in's budget afresh.
+        for (let left = slow.ms; left > 0; left -= 60_000) {
+          if ((await Promise.race([slow.sleep(Math.min(left, 60_000)).then(() => 'done' as const), stop])) === 'stopped') return { value: { code: null, signal: 'SIGTERM' } }
+          if (left > 60_000) yield { stream: 'stdout' as const, text: 'working\n' }
+        }
+      }
+      const answer = answerOf(e.argv, cwd)
+      // A program that is not there never starts: the stream rejects its first pull.
+      if (answer.isMissing === true) {
+        isOver = true
+
+        return { deny: `${e.argv[0] ?? ''}: not found` }
+      }
+      if (answer.stdout !== '') yield { stream: 'stdout' as const, text: answer.stdout }
+      if (answer.stderr !== '') yield { stream: 'stderr' as const, text: answer.stderr }
+      isOver = true
+
+      return { value: { code: answer.exitCode, signal: null } }
+    } finally {
+      if (!isOver) state.stopped.push([...e.argv])
     }
   })
   on('session.id', () => ({ value: state.sessionId }))
@@ -411,19 +473,23 @@ export function world(on: On, files: Files, repo: { root: string } | null = { ro
       .map(path => path.slice(e.path.length + 1).split('/')[0] ?? '')
 
     return {
-      value: [...new Set(runs)].map(name => ({ name, kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false })),
+      value: [...new Set(runs)].map(name => ({ name, kind: files[`${e.path}/${name}`] === undefined ? ('dir' as const) : ('file' as const), size: 0, mtimeMs: 0, isLink: false })),
     }
   })
   on('fs.stat', (_$, e) => {
     const found = files[e.path]
+    if (found === undefined && state.dirs.includes(e.path)) return { value: { kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false } }
     if (found === undefined) return { deny: `ENOENT: ${e.path}` }
 
     return { value: { kind: 'file' as const, size: found.text.length, mtimeMs: found.mtimeMs, isLink: false } }
   })
   on('fs.read', (_$, e) => {
     const found = files[e.path]
+    if (found === undefined) return { deny: `ENOENT: ${e.path}` }
+    // Bytes come back as the engine hands them: `{ base64 }`.
+    if (e.as === 'bytes') return { value: state.isBytesWithoutBase64 ? ({} as { base64: string }) : { base64: btoa(String.fromCharCode(...new TextEncoder().encode(found.text))) } }
 
-    return found === undefined ? { deny: `ENOENT: ${e.path}` } : { value: found.text }
+    return { value: found.text }
   })
   on('fs.write', (_$, e) => {
     if (state.isReadOnly) return { deny: `EROFS: ${e.path}` }
@@ -455,7 +521,8 @@ export function world(on: On, files: Files, repo: { root: string } | null = { ro
   on('ui.panes', () => ({
     value: [{ id: PANE.requestId, title: PANE.props.title, isShown: true, isFocused: false, isPlaced: true }],
   }))
-  on('agent.spawn', (_$, e) => {
+  on('agent.spawn', async (_$, e) => {
+    if (state.holdStart !== undefined) await state.holdStart
     if (state.noStart !== undefined) return { deny: state.noStart }
     state.spawns.push({ name: e.name, model: e.model, subagentType: e.subagentType })
     state.briefs.push(e.prompt)
@@ -465,7 +532,7 @@ export function world(on: On, files: Files, repo: { root: string } | null = { ro
   on('prompt.submit', (_$, e) => {
     state.woke.push(e.text)
 
-    return { text: e.text }
+    return e.context === undefined ? { text: e.text } : { text: e.text, context: e.context }
   })
   // A built-in command a mod runs for the person. /compact is a compaction as a turn of its own.
   on('command.run', (_$, e) => {
