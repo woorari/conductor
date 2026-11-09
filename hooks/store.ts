@@ -11,13 +11,18 @@ export const boundKey = (sessionId: string): string => `bound:${sessionId}`
 /** After this many days a kept binding is dropped the next time any session binds. */
 export const BOUND_KEPT_DAYS = 30
 
-/** A kept binding as the store hands it back: the run, and when it was bound. Undefined for anything else found there. */
-export function kept(value: unknown): { run: string; at?: string } | undefined {
+/**
+ * A kept binding as the store hands it back: the run, when it was bound, and
+ * the root of the home it was bound in (absent in a binding kept before roots
+ * were). Undefined for anything else found there; a root that is no absolute
+ * path is left out.
+ */
+export function kept(value: unknown): { run: string; at?: string; root?: string } | undefined {
   if (typeof value !== 'object' || value === null) return undefined
-  const { run, at } = value as Record<string, unknown>
+  const { run, at, root } = value as Record<string, unknown>
   if (typeof run !== 'string' || !RUN_ID.test(run)) return undefined
 
-  return { run, ...(typeof at === 'string' ? { at } : {}) }
+  return { run, ...(typeof at === 'string' ? { at } : {}), ...(typeof root === 'string' && root.startsWith('/') && !root.includes('\n') ? { root } : {}) }
 }
 
 /** True for a kept binding old enough to drop: one with no readable time counts as old. */

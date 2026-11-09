@@ -68,7 +68,8 @@ test("the worker's brief comes from the home", async ($, on) => {
 test('the orchestrator is told where the run works', async ($, on) => {
   await bound($, on)
   const text = (await composePrompt($)).sections.map(one => one.text).join('\n')
-  expect(text).toContain(`- This run works in game/code/Big Game 5.8, a Lore workspace inside this home. Run its commands there: cd -- '${LORE_WS}' first.`)
+  expect(text).toContain(`- This run works in game/code/Big Game 5.8, a Lore workspace inside this home. Run its commands there in a subshell, so this session's working directory never moves: (cd -- '${LORE_WS}' && <command>).`)
+  expect(text, 'never a bare cd, which moves the session').not.toContain('first.')
 })
 
 test('binding another run moves the backend', async ($, on) => {

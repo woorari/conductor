@@ -377,6 +377,13 @@ declare module 'claude-code' {
        * signals and its tools write. Null only views the newest ledger.
        */
       pinnedRun: string | null
+      /**
+       * The folder that holds the bound run's folder, as it was when the
+       * session bound: the home's root. The run's ledger is read there
+       * wherever the session's working directory went since. Null while
+       * bound to no run.
+       */
+      pinnedRoot: string | null
     }
   }
 }
