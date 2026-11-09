@@ -419,6 +419,7 @@ export function world(on: On, files: Files, repo: { root: string } | null = { ro
   })
   on('fs.stat', (_$, e) => {
     const found = files[e.path]
+    if (found === undefined && state.dirs.includes(e.path)) return { value: { kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false } }
     if (found === undefined) return { deny: `ENOENT: ${e.path}` }
 
     return { value: { kind: 'file' as const, size: found.text.length, mtimeMs: found.mtimeMs, isLink: false } }

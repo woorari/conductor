@@ -97,6 +97,17 @@ A untracked.txt
 Tracked changes: 1 added
 `
 
+/** A task's workspace whose only stray entries came with the copy from the owner's workspace: lore counts them as added. */
+export const STATUS_COPIED = `Repository 01a1b056c981721b88ecc4b6b66d6f45
+On branch conductor/S-1-spike/t1 revision 2 -> ${REV_T1}
+Remote revision 2 -> ${REV_T1}
+Local branch in sync with remote
+Untracked files:
+A .claude/
+A .claude/settings.local.json
+Tracked changes: 2 added
+`
+
 export const STATUS_MERGING = `Repository 01a1b056c981721b88ecc4b6b66d6f45
 On branch conductor/S-1-spike revision 3 -> ${REV_RUN}
 Remote revision 3 -> ${REV_RUN}

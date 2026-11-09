@@ -37,6 +37,8 @@ export type LoreStatus = {
   changed: string[]
   conflicts: string[]
   pendingMerge?: string
+  /** What lore's summary line counts, as it says it: `2 added`. */
+  summary?: string
   isClean: boolean
 }
 
@@ -119,6 +121,7 @@ export function statusOf(out: string): LoreStatus | undefined {
   let isInSync = false
   let pendingMerge: string | undefined
   let hasSummary = false
+  let summary: string | undefined
   const untracked: string[] = []
   const changed: string[] = []
   const conflicts: string[] = []
@@ -134,7 +137,11 @@ export function statusOf(out: string): LoreStatus | undefined {
     if (/^Local branch in sync with remote/.test(line)) isInSync = true
     const pending = /^Pending merge, incoming revision ([0-9a-f]{64})/.exec(line)
     if (pending !== null) pendingMerge = pending[1]
-    if (/^Tracked changes:/.test(line)) hasSummary = true
+    const counted = /^Tracked changes:\s*(.*?)\s*$/.exec(line)
+    if (counted !== null) {
+      hasSummary = true
+      summary = counted[1]
+    }
     if (/^[A-Z][^:]*:\s*$/.test(line)) {
       section = /^Untracked/.test(line) ? 'untracked' : /conflict/i.test(line) ? 'conflicts' : 'changed'
       continue
@@ -150,8 +157,27 @@ export function statusOf(out: string): LoreStatus | undefined {
   }
   if (branch === undefined || current === undefined) return undefined
   const isClean = untracked.length === 0 && changed.length === 0 && conflicts.length === 0 && pendingMerge === undefined && !hasSummary
-  return { branch, revision: current, isInSync, untracked, changed, conflicts, ...(pendingMerge === undefined ? {} : { pendingMerge }), isClean }
+  return { branch, revision: current, isInSync, untracked, changed, conflicts, ...(pendingMerge === undefined ? {} : { pendingMerge }), ...(summary === undefined ? {} : { summary }), isClean }
 }
+
+/**
+ * What in a workspace is not in Lore, besides the untracked entries `copied`
+ * names (they came with the copy, not from its worker): the paths, and a
+ * reason for what is no path. Nothing: the workspace holds nothing of its own.
+ */
+export function notInLore(status: LoreStatus, copied: ReadonlySet<string>): string[] {
+  const left = [...status.conflicts, ...status.changed, ...status.untracked.filter(path => !copied.has(path))]
+  if (status.pendingMerge !== undefined) left.push('a merge not finished')
+  if (!status.isInSync) left.push('a branch not in sync with the server')
+  // Lore's count is to be the copied entries alone; anything else is something the lists above did not name.
+  if (left.length === 0 && status.summary !== undefined && status.summary !== `${status.untracked.length} added`) left.push(`what lore counts as ${status.summary}`)
+
+  return left
+}
+
+/** A few of a list's items, and how many more there are. */
+export const someOf = (items: readonly string[], most = 5): string =>
+  items.length <= most ? items.join(', ') : `${items.slice(0, most).join(', ')} and ${items.length - most} more`
 
 /** The line that says why a command failed: Lore's `[Error]` line, else the last line it printed. */
 const failure = (exitCode: number, out: string): string => {

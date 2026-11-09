@@ -2,8 +2,8 @@ import { expect, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
 import type { Ledger } from '../types'
-import { BRANCH_INFO_PUSHED, MERGE_ABORT, MERGE_CLEAN, MERGE_CONFLICT, PUSH_PROTECTED, PUSH_RUN, REV_MAIN, REV_RUN, REV_T1, STATUS_CLEAN, STATUS_UNTRACKED } from './lore-output'
-import { BASE, LORE_RUNS, RUN, RUN_BRANCH, answers, lored, ok, pinnable, ranIn, stored, task } from './lore-world'
+import { BRANCH_INFO_PUSHED, MERGE_ABORT, MERGE_CLEAN, MERGE_CONFLICT, PUSH_PROTECTED, PUSH_RUN, REV_MAIN, REV_RUN, REV_T1, STATUS_CLEAN, STATUS_COPIED, STATUS_UNTRACKED } from './lore-output'
+import { BASE, LORE_ROOT, LORE_RUNS, RUN, RUN_BRANCH, answers, lored, ok, pinnable, ranIn, stored, task } from './lore-world'
 import { LINEAR_TOKEN } from './world'
 
 type Ran = { text?: string; isError?: true; deny?: string }
@@ -138,6 +138,51 @@ test('a dirty workspace is kept after the merge, and the orchestrator is told wh
   expect(said.text).toContain('Its workspace is kept')
   expect(engine.calls.map(one => one.argv)).not.toContainEqual(['rm', '-rf', '--', T1_WS])
   expect(stored(files).tasks[0]?.workspace).toBe(T1_WS)
+})
+
+test('a kept workspace names what keeps it', async ($, on) => {
+  const { engine } = await green($, on)
+  engine.lore.unshift(answers(['status', '--scan'], ok(STATUS_UNTRACKED), T1_WS))
+
+  expect((await call($, 'merge', MERGE)).text).toContain(`Its workspace is kept at ${T1_WS}: it holds changes that are not pushed (untracked.txt). Look at it before you remove it.`)
+})
+
+const SETTINGS = '{ "hooks": { "WorktreeCreate": [] } }\n'
+/** The owner's workspace holds a settings file Lore does not track, and the copy took it along; `text` is the copy's. */
+function copiedAlong(world: Awaited<ReturnType<typeof green>>, text = SETTINGS): void {
+  world.files[`${LORE_ROOT}/.claude/settings.local.json`] = { text: SETTINGS, mtimeMs: 1 }
+  world.files[`${T1_WS}/.claude/settings.local.json`] = { text, mtimeMs: 1 }
+  world.engine.dirs.push(`${LORE_ROOT}/.claude`, `${T1_WS}/.claude`)
+  world.engine.lore.unshift(answers(['status', '--scan'], ok(STATUS_COPIED), T1_WS))
+}
+
+test("what the copy took along from the owner's workspace is not the worker's: the workspace is removed after the merge", async ($, on) => {
+  const world = await green($, on)
+  copiedAlong(world)
+
+  const said = await call($, 'merge', MERGE)
+  expect(said.text).toContain('Its workspace is removed: everything in it is in Lore.')
+  expect(world.engine.calls.map(one => one.argv)).toContainEqual(['rm', '-rf', '--', T1_WS])
+  expect(stored(world.files).tasks[0]?.workspace).toBeUndefined()
+})
+
+test('a file the worker changed after the copy is its own, and keeps the workspace', async ($, on) => {
+  const world = await green($, on)
+  copiedAlong(world, '{ "hooks": {} }\n')
+
+  const said = await call($, 'merge', MERGE)
+  expect(said.text).toContain('it holds changes that are not pushed (.claude/settings.local.json)')
+  expect(world.engine.calls.map(one => one.argv)).not.toContainEqual(['rm', '-rf', '--', T1_WS])
+  expect(stored(world.files).tasks[0]?.workspace).toBe(T1_WS)
+})
+
+test("a file the owner's workspace does not hold is the worker's, and keeps the workspace", async ($, on) => {
+  const world = await green($, on)
+  copiedAlong(world)
+  delete world.files[`${LORE_ROOT}/.claude/settings.local.json`]
+
+  expect((await call($, 'merge', MERGE)).text).toContain('it holds changes that are not pushed (.claude/settings.local.json)')
+  expect(world.engine.calls.map(one => one.argv)).not.toContainEqual(['rm', '-rf', '--', T1_WS])
 })
 
 test('a Lore task is handed back with its revision; with one it is done only by merging', async ($, on) => {

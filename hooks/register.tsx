@@ -35,7 +35,7 @@ import { KEEP, ROTATE_AT, carried, handover } from './handover'
 import { LINEAR_KEY, RUN_ID, STATUSES, TIERS, parseLedger } from './ledger'
 import { approvedMain, baseBroughtIn, conflicted, letGo, loreReady, onBase, onRunBranch, readyForBase, rev7, startLoreMerge } from './lore-merge'
 import { LINEAR_API, M_CREATE, M_UPDATE, Q_ISSUE, Q_TEAM, apiKeyOf, createdOf, errorsOf, issueOf, issueText, stateFor, teamOf, updatedOf } from './linear'
-import { branchInfoOf, ignoreRules, loreByHand, mergeOf, pushOf, repositoryInfoOf, statusOf } from './lore'
+import { branchInfoOf, ignoreRules, loreByHand, mergeOf, notInLore, pushOf, repositoryInfoOf, someOf, statusOf } from './lore'
 import { candidatesFor, findHome, workspaceOfSpec } from './home'
 import type { Home, Io } from './home'
 import { CONFIG_PATH, LORE_DEFAULTS, PLACEHOLDER_SNIPPET, hasPlaceholder, homeConfigProblem, parseConfig, placeConfig, runsIgnored } from './project'
@@ -1112,6 +1112,37 @@ function isRemovable(root: string, ledger: Ledger, folder: string): boolean {
   const isOwners = folder === root || folder.startsWith(`${root}/`) || root.startsWith(`${folder}/`)
 
   return base !== '' && base !== '/' && isInside(base, folder) && !isOwners
+}
+
+/** How many untracked entries of a copy are compared with the owner's workspace: past these, the copy is kept anyway. */
+const MOST_COMPARED = 50
+
+/** Whether two files hold the same bytes; a file that does not read is not the same. */
+async function sameBytes($: EngineInterface, one: string, other: string): Promise<boolean> {
+  const [first, second] = await Promise.all([one, other].map(path => $.fs.read(path, { as: 'bytes' }).then(read => JSON.stringify(read)).catch(() => undefined)))
+
+  return first !== undefined && first === second
+}
+
+/**
+ * The untracked entries of a task's workspace that came with the copy, not
+ * from its worker: the owner's workspace holds the same at the same path, a
+ * folder as a folder and a file byte for byte. Such as the owner's own
+ * `.claude/settings.local.json`, which Lore does not track.
+ */
+async function copiedIn($: EngineInterface, root: string, folder: string, untracked: readonly string[]): Promise<Set<string>> {
+  const copied = new Set<string>()
+  const kindOf = async (path: string) => (await $.fs.stat(path).catch(() => undefined))?.kind
+  for (const entry of untracked.slice(0, MOST_COMPARED)) {
+    const relative = entry.replace(/\/+$/, '')
+    if (relative === '' || relative.startsWith('/') || relative.split('/').includes('..')) continue
+    const isSame = entry.endsWith('/')
+      ? (await kindOf(`${root}/${relative}`)) === 'dir' && (await kindOf(`${folder}/${relative}`)) === 'dir'
+      : await sameBytes($, `${root}/${relative}`, `${folder}/${relative}`)
+    if (isSame) copied.add(entry)
+  }
+
+  return copied
 }
 
 /** The file that says a workspace was finished: only then is a folder there reused. */
@@ -2268,7 +2299,9 @@ async function approveMain($: EngineInterface, origin: string): Promise<string> 
   for (const folder of [...derivedFolders, ...(ownBase === '' ? [] : [runWorkspaceOf(ownBase, ledger.run.id)])]) {
     const scanned = statusOf((await lore($, ['status', '--scan'], folder, LONG_MS)).out)
     const here = await backendOf($)
-    if (scanned?.isClean === true && scanned.isInSync && here !== null && isRemovable(here.root, ledger, folder)) await runProgram($, ['rm', '-rf', '--', folder], LONG_MS)
+    const isOwn = here !== null && isRemovable(here.root, ledger, folder)
+    const left = scanned === undefined || here === null || !isOwn ? undefined : notInLore(scanned, await copiedIn($, here.root, folder, scanned.untracked))
+    if (left !== undefined && left.length === 0) await runProgram($, ['rm', '-rf', '--', folder], LONG_MS)
     else kept.push(folder)
   }
   const tail = [
@@ -2418,11 +2451,15 @@ async function loreMergeTool($: EngineInterface, call: ToolCall, isCheckOnly: bo
     const status = statusOf(scanned.out)
     const hereNow = await backendOf($)
     const derived = hereNow === null || projectOf(ledger) === undefined ? undefined : workspaceOf(workspacesOf(hereNow.root, projectOf(ledger)?.lore?.workspaces), ledger.run.id, id)
-    if (status?.isClean === true && status.isInSync && hereNow !== null && derived === task.workspace && isRemovable(hereNow.root, ledger, derived)) {
-      await runProgram($, ['rm', '-rf', '--', task.workspace], LONG_MS)
+    // Only the folder the mod made for this task is compared with the owner's workspace, and only it is removed.
+    const own = hereNow !== null && derived !== undefined && derived === task.workspace && isRemovable(hereNow.root, ledger, derived) ? { root: hereNow.root, folder: derived } : undefined
+    const left = status === undefined ? undefined : notInLore(status, own === undefined ? new Set() : await copiedIn($, own.root, own.folder, status.untracked))
+    if (left !== undefined && left.length === 0 && own !== undefined) {
+      await runProgram($, ['rm', '-rf', '--', own.folder], LONG_MS)
       workspaceLine = 'Its workspace is removed: everything in it is in Lore.'
     } else {
-      workspaceLine = `Its workspace is kept at ${task.workspace}: ${status === undefined ? 'lore could not read it' : 'it holds changes that are not pushed'}. Look at it before you remove it.`
+      const why = left === undefined ? 'lore could not read it' : left.length > 0 ? `it holds changes that are not pushed (${someOf(left)})` : 'it is not the folder the mod made for this task'
+      workspaceLine = `Its workspace is kept at ${task.workspace}: ${why}. Look at it before you remove it.`
     }
   }
   const removed = workspaceLine.startsWith('Its workspace is removed')

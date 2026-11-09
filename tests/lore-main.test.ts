@@ -2,8 +2,8 @@ import { expect, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
 import type { Ledger } from '../types'
-import { MERGE_ABORT, MERGE_CLEAN, MERGE_CONFLICT, MERGE_INTO_DONE, MERGE_INTO_PROTECTED, PUSH_RUN, REV_MAIN, REV_ON_MAIN, REV_RUN, REV_T1, STATUS_CLEAN } from './lore-output'
-import { BASE, RUN, RUN_BRANCH, answers, lored, ok, ranIn, stored, task } from './lore-world'
+import { MERGE_ABORT, MERGE_CLEAN, MERGE_CONFLICT, MERGE_INTO_DONE, MERGE_INTO_PROTECTED, PUSH_RUN, REV_MAIN, REV_ON_MAIN, REV_RUN, REV_T1, STATUS_CLEAN, STATUS_COPIED } from './lore-output'
+import { BASE, LORE_ROOT, RUN, RUN_BRANCH, answers, lored, ok, ranIn, stored, task } from './lore-world'
 import { LINEAR_TOKEN } from './world'
 
 type Ran = { text?: string; isError?: true }
@@ -149,6 +149,19 @@ test('a Lore session registers /approve-main and run_sync_base', async ($, on) =
   const { engine } = await finished($, on)
   expect(engine.registered).toContain('/approve-main')
   expect(engine.registered).toContain('run_sync_base')
+})
+
+test("at the end of the run, what the copies took along from the owner's workspace keeps none of them", async ($, on) => {
+  const t1 = `${BASE}/ABC-12/t1`
+  const { files, engine } = await finished($, on, { ...DONE, tasks: [task('t1', { status: 'done', branch: `${RUN_BRANCH}/t1`, mergeCommit: REV_RUN, workspace: t1 })] })
+  const settings = '{ "hooks": { "WorktreeCreate": [] } }\n'
+  for (const at of [LORE_ROOT, t1, RUN_WS]) files[`${at}/.claude/settings.local.json`] = { text: settings, mtimeMs: 1 }
+  engine.dirs.push(`${LORE_ROOT}/.claude`, `${t1}/.claude`, `${RUN_WS}/.claude`)
+  engine.lore.unshift(answers(['status', '--scan'], ok(STATUS_COPIED), t1), answers(['status', '--scan'], ok(STATUS_COPIED), RUN_WS))
+
+  expect((await approveMain($)).text).toContain('Its workspaces are removed.')
+  const removed = engine.calls.map(one => one.argv).filter(argv => argv[0] === 'rm')
+  expect(removed).toEqual([['rm', '-rf', '--', t1], ['rm', '-rf', '--', RUN_WS]])
 })
 
 test('across a whole run, no Lore write ran in the owner\'s workspace', async ($, on) => {

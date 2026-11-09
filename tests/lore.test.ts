@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { branchInfoOf, ignoreRules, isIgnored, mergeOf, pushOf, repositoryInfoOf, REVISION, statusOf } from '../hooks/lore'
+import { branchInfoOf, ignoreRules, isIgnored, mergeOf, notInLore, pushOf, repositoryInfoOf, REVISION, someOf, statusOf } from '../hooks/lore'
 import {
   BRANCH_INFO_MAIN_UNSYNCED,
   BRANCH_INFO_NEW,
@@ -21,6 +21,7 @@ import {
   REV_T1,
   REV_T2,
   STATUS_CLEAN,
+  STATUS_COPIED,
   STATUS_MERGING,
   STATUS_UNTRACKED,
 } from './lore-output'
@@ -75,6 +76,18 @@ describe('Lore output', () => {
     expect(statusOf(STATUS_UNTRACKED)).toMatchObject({ revision: REV_RUN, untracked: ['untracked.txt'], isClean: false })
     expect(statusOf(STATUS_MERGING)).toMatchObject({ pendingMerge: REV_T2, changed: ['dir/c.txt'], conflicts: ['a.txt'], isClean: false })
     expect(statusOf('nothing here')).toBeUndefined()
+  })
+
+  test('what is not in Lore: all a status names, less what came with the copy, and whatever its count says beyond that', () => {
+    const copied = statusOf(STATUS_COPIED)!
+    const both = new Set(['.claude/', '.claude/settings.local.json'])
+    expect(copied.summary).toBe('2 added')
+    expect(notInLore(copied, both)).toEqual([])
+    expect(notInLore(copied, new Set(['.claude/']))).toEqual(['.claude/settings.local.json'])
+    expect(notInLore(statusOf(STATUS_MERGING)!, new Set())).toEqual(['a.txt', 'dir/c.txt', 'a merge not finished'])
+    expect(notInLore({ ...copied, isInSync: false }, both)).toEqual(['a branch not in sync with the server'])
+    expect(notInLore({ ...copied, summary: '2 added, 1 modified' }, both), 'a count beyond what it named').toEqual(['what lore counts as 2 added, 1 modified'])
+    expect(someOf(['a', 'b', 'c', 'd', 'e', 'f', 'g'])).toBe('a, b, c, d, e and 2 more')
   })
 
   test('repository info gives name, remote and default branch', () => {
