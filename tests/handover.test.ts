@@ -33,7 +33,29 @@ describe('the handover', () => {
     ])
     expect(text).toContain('- t391-1 [building, sonnet] Pool exhaustion answers 503 · worker w391 (agent a391) · branch fix/391-pool · ticket 391 · after t390-1 · note: writing the middleware test')
     expect(text).toContain('- t392-2 [queued, sonnet] Clients retry a busy read · ticket 392 · after t391-1, t392-1')
-    expect(text.match(/^- t\d/gm)).toHaveLength(LEDGER.tasks.length)
+    expect(text.match(/^- t\d/gm)).toHaveLength(LEDGER.tasks.filter(one => one.status !== 'done').length)
+  })
+
+  test('names the done tasks on one line: what they held is merged and needs no rereading', () => {
+    const text = handover(busy(), { at: AT })
+    expect(text).toContain('\n- Done: t390-1, t390-2\n')
+    expect(text).not.toContain('Settings module')
+    expect(text).not.toContain('PR 541')
+  })
+
+  test('names on one line the rulings that bind only done tasks, and keeps the rest whole', () => {
+    const ledger = raw()
+    rule(ledger, AT, { kind: 'orchestrator' }, { text: 'Keep the settings flat.', tasks: ['t390-1', 't390-2'] })
+    rule(ledger, AT, { kind: 'orchestrator' }, { text: 'Rebase on main before the merge.', tasks: ['t390-1', 't393-1'] })
+    rule(ledger, AT, { kind: 'orchestrator' }, { text: 'No new dependencies.' })
+    const text = handover(parsed(ledger), { at: AT })
+    expect(text).toContain('## Rulings\n- R2: Rebase on main before the merge.\n- R3: No new dependencies.\n- R1 binds only done tasks.')
+    expect(text).not.toContain('Keep the settings flat.')
+  })
+
+  test('says nothing of resolved problems', () => {
+    const text = handover(busy(), { at: AT })
+    for (const one of LEDGER.problems.filter(problem => problem.status === 'resolved')) expect(text, one.id).not.toContain(one.text)
   })
 
   test('carries the open problems, the open questions, the rulings and what nobody has read yet', () => {

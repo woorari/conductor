@@ -6,8 +6,9 @@ import { preflight } from './router'
 /**
  * The orchestrator's fresh start. When its context is this full, the session
  * is compacted, and what the run needs afterwards comes from the ledger and
- * not from the summary: every task, its worker, the open problems and
- * questions, the rulings. The same text is written to disk as the handover.
+ * not from the summary: every task still going and its worker, the done ones
+ * by name, the open problems and questions, the rulings that bind anyone at
+ * work. The same text is written to disk as the handover.
  */
 
 /** Percent of the orchestrator's context window at which the session is compacted. */
@@ -64,6 +65,11 @@ export function handover(ledger: Ledger, moment: Moment): string {
       .map(taskId => `${one.id} for ${taskId}`),
   )
   const section = (title: string, lines: readonly string[]): string[] => (lines.length === 0 ? [] : ['', `## ${title}`, ...lines])
+  // A done task is finished, and its name is enough; a ruling that binds only done tasks binds nobody at work. Each is a name on one line.
+  const doneLine = finished.size === 0 ? [] : [`- Done: ${[...finished].join(', ')}`]
+  const isSettled = (one: Ledger['rulings'][number]): boolean => (one.tasks ?? []).length > 0 && (one.tasks ?? []).every(taskId => finished.has(taskId))
+  const settled = ledger.rulings.filter(isSettled).map(one => one.id)
+  const settledLine = settled.length === 0 ? [] : [`- ${settled.join(', ')} ${settled.length === 1 ? 'binds' : 'bind'} only done tasks.`]
 
   return [
     `# Run ${ledger.run.id}: ${ledger.run.title}`,
@@ -82,11 +88,14 @@ export function handover(ledger: Ledger, moment: Moment): string {
       : [
           `This session is due for a compaction that has not gone through since ${ledger.orchestrator.held.since}. The engine's reason: ${ledger.orchestrator.held.reason}. The mod tries again, and the owner can type /compact; until it is through, put what matters on the board.`,
         ]),
-    ...section('Tasks', ledger.tasks.map(taskLine)),
+    ...section('Tasks', [...ledger.tasks.filter(one => one.status !== 'done').map(taskLine), ...doneLine]),
     ...section('Plan check', ledger.run.plan === 'approved' || ledger.run.plan === undefined ? [] : preflight(ledger).map(one => `- ${one}`)),
     ...section('Open problems', open.map(one => problemLine(ledger, one))),
     ...section('Open questions', questions.map(one => `- ${one.id} from ${one.from}: ${one.text}`)),
-    ...section('Rulings', ledger.rulings.map(one => `- ${one.id}${one.answers === undefined ? '' : ` (answers ${one.answers})`}: ${one.text}`)),
+    ...section('Rulings', [
+      ...ledger.rulings.filter(one => !isSettled(one)).map(one => `- ${one.id}${one.answers === undefined ? '' : ` (answers ${one.answers})`}: ${one.text}`),
+      ...settledLine,
+    ]),
     ...section('Not read yet', unread.length === 0 ? [] : [`- ${unread.join('; ')}`]),
     '',
     '## How to go on',
