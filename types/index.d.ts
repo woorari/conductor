@@ -90,6 +90,14 @@ export type Activity = {
   text: string
 }
 
+/** A stall the mod said: when, and the problem it filed for it. */
+export type Stall = {
+  /** ISO 8601. */
+  at: string
+  /** The warning's id, e.g. `P4`. */
+  problem: string
+}
+
 export type Task = {
   /** Unique in the run, e.g. `t515-2`. */
   id: string
@@ -123,6 +131,12 @@ export type Task = {
   /** The worker's number among those building at once, from 1: what its private database and scratch folder are named by. */
   slot?: number
   activity?: Activity
+  /**
+   * The mod's word that this building task's worker has shown no sign of life
+   * for a while: when it said so, and the warning it filed. Gone once the
+   * worker is heard from again or the task leaves building.
+   */
+  stall?: Stall
   /** How many tokens the worker's last model request held: its context, as the engine reported it. */
   contextTokens?: number
   branch?: string

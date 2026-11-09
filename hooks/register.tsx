@@ -68,6 +68,8 @@ import {
   resolveProblem,
   rotated,
   spawned,
+  sayStalls,
+  stallsDue,
   turnEnded,
   updateTask,
   weigh,
@@ -224,6 +226,8 @@ let isWatching = false
 let isWatchingMain = false
 /** A look at the problems nobody deals with is under way. */
 let isLooking = false
+/** A look at the building workers' signs of life is under way. */
+let isWatchingStalls = false
 /** The commands and tools the engine would not take when the mod started, each with the engine's reason. */
 const unlisted: string[] = []
 
@@ -1606,6 +1610,39 @@ async function lookAgain($: EngineInterface): Promise<void> {
 }
 
 /**
+ * Looks at the building workers' signs of life: one silent for `STALL_MIN`
+ * minutes is put on the board and the orchestrator is woken for it, and the
+ * warning is resolved once the worker is heard from again or its task leaves
+ * building (`sayStalls`). What the engine says of each loop goes with it, when
+ * it can be asked. Called from the timer; never throws, and a read that failed
+ * is tried again at the next look.
+ */
+async function watchStalls($: EngineInterface): Promise<void> {
+  if (isWatchingStalls) return
+  isWatchingStalls = true
+  try {
+    const path = await boundLedger($)
+    if (path === undefined) return
+    const ledger = parseLedger(await $.fs.read(path)).ledger
+    if (ledger === undefined) return
+    const at = iso(await $.clock.now())
+    if (!stallsDue(ledger, Date.parse(at))) return
+    let loops: Map<string, string> | undefined
+    try {
+      loops = new Map((await $.agent.list()).map(one => [one.id, one.status]))
+    } catch {
+      loops = undefined
+    }
+    // Asked of the file again inside the write queue, so a worker heard from meanwhile is not said to be silent.
+    await settle($, path, raw => sayStalls(raw, at, loops))
+  } catch {
+    // Tried again at the next look.
+  } finally {
+    isWatchingStalls = false
+  }
+}
+
+/**
  * After a merge: looks at the checks on the base branch for the run's sake. A
  * failure is said once, as a blocker, and holds every merge but its repair's;
  * a green head ends the watch, and so does a branch nothing checks, after a
@@ -2723,6 +2760,7 @@ async function switchOn($: EngineInterface): Promise<void> {
       void watchClaim($)
       void watchMain($)
       void lookAgain($)
+      void watchStalls($)
     }
     if (isOrchestrating === true && flushTicks % GAUGE_EVERY === 0) void nudge($)
   })

@@ -628,6 +628,126 @@ export function askAgain(raw: Raw, at: string): Outcome {
 }
 
 /**
+ * Minutes a building worker may show no sign of life before the orchestrator
+ * is told: proposed, not measured. A worker's own command may run ten minutes
+ * in the foreground, and a wait on its background work longer.
+ */
+export const STALL_MIN = 30
+
+type TaskLike = Record<string, unknown> & { id: string; status: TaskStatus }
+
+/** A building worker's last sign of life: its last tool call, or its start. */
+function lastSign(task: TaskLike): { at: string; text?: string } | undefined {
+  const activity = task.activity as { at?: unknown; text?: unknown } | undefined
+  if (typeof activity?.at === 'string') return { at: activity.at, text: typeof activity.text === 'string' ? activity.text : undefined }
+
+  return typeof task.startedAt === 'string' ? { at: task.startedAt } : undefined
+}
+
+function stallOf(task: TaskLike): { at: string; problem: string } | undefined {
+  const mark = task.stall as { at?: unknown; problem?: unknown } | undefined
+
+  return typeof mark?.at === 'string' && typeof mark.problem === 'string' ? { at: mark.at, problem: mark.problem } : undefined
+}
+
+/** How a stall the mod said is over, or undefined while it lasts. */
+function stallOver(task: TaskLike, said: { at: string }): string | undefined {
+  if (task.status !== 'building') return `${task.id} is ${task.status} now.`
+  const last = lastSign(task)
+  if (last !== undefined && Date.parse(last.at) > Date.parse(said.at)) {
+    return `${task.id}'s worker showed life again at ${last.at}${last.text === undefined ? '' : ` (${last.text})`}.`
+  }
+
+  return undefined
+}
+
+/**
+ * Minutes a building task's worker has been silent at `nowMs`; undefined for a
+ * task nobody builds, a worker the mod did not see start (no agent id: nothing
+ * it does is heard, so its silence says nothing) or a time that does not read.
+ */
+function silence(task: TaskLike, nowMs: number): number | undefined {
+  if (task.status !== 'building' || typeof task.agentId !== 'string') return undefined
+  const last = lastSign(task)
+  const sinceMs = last === undefined ? Number.NaN : Date.parse(last.at)
+
+  return Number.isNaN(sinceMs) ? undefined : Math.floor((nowMs - sinceMs) / 60_000)
+}
+
+/** Whether a watch on the building workers has anything to say or settle now: the timer asks before it writes. */
+export function stallsDue(book: { tasks: readonly object[] }, nowMs: number): boolean {
+  return (book.tasks as readonly TaskLike[]).some(task => {
+    const said = stallOf(task)
+    if (said !== undefined) return stallOver(task, said) !== undefined
+    const minutes = silence(task, nowMs)
+
+    return minutes !== undefined && minutes >= STALL_MIN
+  })
+}
+
+/**
+ * The watch on building workers. A worker's sign of life is its last tool
+ * call, or its start. One that has shown none for `STALL_MIN` minutes is said
+ * once for that silence: a warning on the board under its task, and a prompt
+ * that wakes the orchestrator, or rides on its next tool result while it
+ * works. A worker on a long command and one whose wait ran out with nothing to
+ * wake it look the same from here; the orchestrator can tell. `loops` is what
+ * the engine said of each agent's loop, by agent id, when it could be asked.
+ *
+ * The mod resolves the warning once the worker is heard from again or its
+ * task leaves building, and tells the orchestrator so; until then the
+ * periodic look at problems nobody deals with asks about it again.
+ */
+export function sayStalls(raw: Raw, at: string, loops?: ReadonlyMap<string, string>): Outcome {
+  const nowMs = Date.parse(at)
+  const said: { taskId: string; line: string }[] = []
+  const over: { taskId: string; line: string }[] = []
+  let isChanged = false
+  for (const task of raw.tasks) {
+    const mark = stallOf(task)
+    if (mark !== undefined) {
+      const how = stallOver(task, mark)
+      if (how === undefined) continue
+      delete task.stall
+      isChanged = true
+      const warning = (raw.problems ?? []).find(one => one.id === mark.problem)
+      if (warning !== undefined && warning.status === 'open') {
+        warning.status = 'resolved'
+        warning.resolution = how
+        over.push({ taskId: task.id, line: `${warning.id} resolved: ${how}` })
+      }
+      continue
+    }
+    const minutes = silence(task, nowMs)
+    if (minutes === undefined || minutes < STALL_MIN) continue
+    const last = lastSign(task)
+    const since =
+      last?.text === undefined ? `it started at ${String(task.startedAt)} and made no tool call since` : `its last tool call was ${last.text}, at ${last.at}`
+    const loop = loops === undefined ? undefined : typeof task.agentId === 'string' ? loops.get(task.agentId) : undefined
+    const engine = loops === undefined ? '' : loop === undefined ? ' The engine no longer lists it.' : ` The engine lists its loop as ${loop}.`
+    const text = `${task.id}'s worker has shown no sign of life for ${minutes} minutes: ${since}.${engine} It may be on a long command, or its wait ran out and nothing woke it.`
+    const problems = (raw.problems ??= [])
+    const id = `P${Math.max(0, ...problems.map(one => Number(/^P(\d+)$/.exec(one.id)?.[1] ?? 0))) + 1}`
+    problems.push({ id, text, severity: 'warning', status: 'open', taskId: task.id, foundAt: at })
+    task.stall = { at, problem: id }
+    isChanged = true
+    said.push({ taskId: task.id, line: `${id}, a warning: ${text}` })
+  }
+  if (!isChanged) return { isChanged: false, isError: false, text: '' }
+  const wake =
+    said.length === 0
+      ? undefined
+      : `Run board: ${said.map(one => one.line).join(' ')} Look at it (ListAgents shows who runs). Leave a busy worker alone. One that is gone: set the task to returned with mcp__conductor__task_update, then start a worker again with the task's id as its name.`
+  const tell = over.length === 0 ? undefined : `Run board: ${over.map(one => one.line).join(' ')}`
+
+  return {
+    ...changed([wake, tell].filter(one => one !== undefined).join('\n') || 'Stalls settled.'),
+    ...(wake === undefined ? {} : { wake, asks: `stall ${said.map(one => one.taskId).join(', ')}` }),
+    ...(tell === undefined ? {} : { tell, answered: `stall ${over.map(one => one.taskId).join(', ')}` }),
+  }
+}
+
+/**
  * `problem_assign`: the orchestrator ties a problem to the task of the run
  * that deals with it, by the task's id or by the ticket it carries. A task
  * that is done or given up deals with nothing, and a ticket counts only while
