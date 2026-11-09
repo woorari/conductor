@@ -339,6 +339,7 @@ function task(value: unknown, where: string): Task {
     slot: optionalNumber(from, 'slot', where),
     activity: activity(from.activity, `${where}.activity`),
     stall: stall(from.stall, `${where}.stall`),
+    retired: texts(from.retired, `${where}.retired`),
     contextTokens: optionalCount(from, 'contextTokens', where),
     branch: optionalText(from, 'branch', where),
     pr: optionalNumber(from, 'pr', where),

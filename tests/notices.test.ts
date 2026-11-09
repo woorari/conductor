@@ -83,6 +83,7 @@ test('what the notices no longer say, the orchestrator is told once, out of the 
     'what follows the approval': 'Once they have, start the tasks that can start.',
     'how a pause ends': 'When the pause ends, read the board and go on: judge what was handed back, start what can start, and merge what is green, in order.',
     'a worker that stopped with the session': 'gets its worker started again with a message to the agent id the board lists: tell it first to run git status and git diff, and to commit and push what is its own.',
+    'a worker the engine will not resume': "When the engine declines that message, take the task back: set it to returned with mcp__conductor__task_update, which retires that worker (the mod refuses its tool calls from then on), and start a worker again with the task's id as its name.",
     'what follows a done task': 'When the board tells you a task is done, go on at once: start what can start and merge the next green task.',
     'a red base branch': "After each merge the board watches the checks on main: when they fail, find the merge that broke them and repair it before anything else merges; the repair's own merge takes onRedMain: true.",
     'how a question is answered': "A worker's question wakes you: answer it with mcp__conductor__board_rule, naming the question in answers.",

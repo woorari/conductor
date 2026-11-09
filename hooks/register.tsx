@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { CatchHandler, Elements, EngineInterface, Hook, Register } from 'claude-code'
 
-import type { BoardState, Candidate, Ledger, ModelTier, Place, RunWorkspace } from '../types'
+import type { BoardState, Candidate, Ledger, ModelTier, Place, RunWorkspace, Task } from '../types'
 import {
   API,
   CLAIM_GRACE_MIN,
@@ -166,6 +166,8 @@ let isTicking = false
 const agents = new Map<string, string>()
 /** The workers themselves: the agents whose turn ending hands a task back. */
 const workers = new Set<string>()
+/** Workers the orchestrator took their task back from, by agent id, with that task: every tool call of theirs is refused. */
+const retired = new Map<string, string>()
 /** What each task's worker was last seen doing, not yet written. */
 const pending = new Map<string, string>()
 /** The files each task's worker changed since the last write, relative to the repository. */
@@ -293,6 +295,7 @@ function learn(ledger: Ledger, path: string): void {
   if (learnedFrom !== path) {
     agents.clear()
     workers.clear()
+    retired.clear()
     pending.clear()
     changedFiles.clear()
     inbox.clear()
@@ -309,9 +312,20 @@ function learn(ledger: Ledger, path: string): void {
       isolated.add(task.id)
       workspaces.set(task.id, task.workspace)
     }
+    fence(task)
     if (task.agentId === undefined) continue
     agents.set(task.agentId, task.id)
     workers.add(task.agentId)
+  }
+}
+
+/** A task's retired workers are no longer its workers: nothing they do counts, and each call of theirs is refused. */
+function fence(task: Task): void {
+  for (const agentId of task.retired ?? []) {
+    retired.set(agentId, task.id)
+    agents.delete(agentId)
+    workers.delete(agentId)
+    pending.delete(task.id)
   }
 }
 
@@ -3263,6 +3277,11 @@ export const register: Register = (on, options) => {
   // And the way board news reaches its reader: with the result of the reader's own call.
   on('tool.call', async ($, e, next) => {
     const call = e as unknown as ToolCall
+    // A worker the orchestrator took its task back from may still run: it changes nothing more, the board included.
+    const takenFrom = call.agentId === undefined ? undefined : retired.get(call.agentId)
+    if (takenFrom !== undefined) {
+      return { deny: `conductor: ${takenFrom} was taken back from you by the orchestrator, and another worker may have it now. Stop: change nothing more, and end your turn.` }
+    }
     // In a run nothing reaches the base branch by hand: not a worker's command, and not the orchestrator's either.
     if (call.tool === 'Bash' && typeof call.command === 'string') {
       const base = await runBase($)
@@ -3430,6 +3449,16 @@ export const register: Register = (on, options) => {
       return { ...outcome, text: `${outcome.text} Can start now, before this one is merged: ${names}. Merge ${input.task} all the same as soon as nothing else is merging.` }
     })
     if (said.isError === undefined && (e as unknown as ToolCall).status === 'green') await checkOnGreen($, (e as unknown as ToolCall).task)
+    // A worker just taken back is fenced now, not at the next reload.
+    if (said.isError === undefined && (e as unknown as ToolCall).status === 'returned') {
+      try {
+        const path = await boundLedger($)
+        const taken = path === undefined ? undefined : parseLedger(await $.fs.read(path)).ledger?.tasks.find(one => one.id === (e as unknown as ToolCall).task)
+        if (taken !== undefined) fence(taken)
+      } catch {
+        // The ledger holds it: the next reload fences it.
+      }
+    }
 
     return said
   }).catch(broke)
@@ -3501,8 +3530,8 @@ export const register: Register = (on, options) => {
       `- A start is refused for an agent that is no task's worker, for a task that is done, already building or waiting on tasks that are not green yet, and when the run's limit of workers building at once is reached. Read-only helpers of type ${HELPER_TYPES.join(', ')} start without a task. A worker's own subagents never run on a dearer tier than the worker.`,
       '- The owner holds a run with /pause and lets it go on with /unpause. While it is paused the mod starts no worker and merges nothing; workers that are building finish and hand back, you judge their hand-backs and answer their questions, and a merge in flight is still settled with GitHub. When nothing is building any more, tell the owner in a line or two where the run stands, and stop. When the pause ends, read the board and go on: judge what was handed back, start what can start, and merge what is green, in order.',
       runLore === undefined
-        ? '- A task that is building while its worker is not running (the session was restarted meanwhile; ListAgents shows who runs) gets its worker started again with a message to the agent id the board lists: tell it first to run git status and git diff, and to commit and push what is its own.'
-        : '- A task that is building while its worker is not running (the session was restarted meanwhile; ListAgents shows who runs) gets its worker started again with a message to the agent id the board lists: tell it first to run lore status --scan and lore diff in its workspace, and to commit and push what is its own.',
+        ? "- A task that is building while its worker is not running (the session was restarted meanwhile, or its wait ran out; ListAgents shows who runs) gets its worker started again with a message to the agent id the board lists: tell it first to run git status and git diff, and to commit and push what is its own. When the engine declines that message, take the task back: set it to returned with mcp__conductor__task_update, which retires that worker (the mod refuses its tool calls from then on), and start a worker again with the task's id as its name."
+        : "- A task that is building while its worker is not running (the session was restarted meanwhile, or its wait ran out; ListAgents shows who runs) gets its worker started again with a message to the agent id the board lists: tell it first to run lore status --scan and lore diff in its workspace, and to commit and push what is its own. When the engine declines that message, take the task back: set it to returned with mcp__conductor__task_update, which retires that worker (the mod refuses its tool calls from then on), and start a worker again with the task's id as its name. The new worker works in the same workspace.",
       runLore === undefined
         ? '- After a hand-back the orchestrator judges it and sets the task to review, green, blocked or failed, or to done when it has no pull request.'
         : '- After a hand-back the orchestrator judges it and sets the task to review, green, blocked or failed, or to done when it changed no code.',

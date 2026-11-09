@@ -330,6 +330,12 @@ export function briefing(ledger: Ledger, task: Task, project?: { brief: string; 
       : [
           `- A worker was on this task before you${task.branch === undefined ? '' : `, on the branch ${task.branch}`}${task.note === undefined ? '' : `; its last note: ${task.note}`}. Go on from where it stopped: read the branch and its commits first, and do not start over.`,
         ]),
+    // A worker the orchestrator took back may have left work that nobody committed.
+    ...((task.retired ?? []).length === 0
+      ? []
+      : [
+          `- The worker before you was stopped before it handed back, so what it did may not be committed or pushed: start with ${own === undefined ? 'git status and git diff' : 'lore status --scan and lore diff in your workspace'}, keep what serves the task, and commit and push it.`,
+        ]),
     ...(known.length > 0 ? ['- From the board, for you:', ...known.map(line => `  ${line}`)] : []),
     ...rules,
   ].join('\n')

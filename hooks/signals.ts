@@ -209,6 +209,8 @@ export function released(raw: Raw, before: RawTask): boolean {
 export function acted(raw: Raw, taskId: string, activity: Activity): boolean {
   const task = raw.tasks.find(one => one.id === taskId)
   if (task === undefined || task.status === 'done') return false
+  // Taken back and not started again: what was seen came from the retired worker, and does not count.
+  if (task.agentId === undefined && Array.isArray(task.retired) && task.retired.length > 0) return false
   if (task.finishedAt !== undefined) {
     delete task.finishedAt
     if (task.status === 'returned' || task.status === 'blocked' || task.status === 'failed') task.status = 'building'
@@ -441,6 +443,8 @@ export function updateTask(raw: Raw, at: string, caller: Caller, input: Record<s
   // What the status change does to the problems that hang on this task: said once the change is made.
   let isNowDone = false
   let isNowFailed = false
+  // Said when the orchestrator took the task back from a worker that was building.
+  let retiredNote = ''
 
   if (input.status !== undefined) {
     const status = STATUSES.find(one => one === input.status)
@@ -462,6 +466,8 @@ export function updateTask(raw: Raw, at: string, caller: Caller, input: Record<s
     }
     isNowDone = status === 'done' && task.status !== 'done'
     isNowFailed = status === 'failed' && task.status !== 'failed'
+    // The orchestrator takes a building task back from its worker: that worker is retired, alive or not.
+    const takenFrom = caller.kind === 'orchestrator' && status === 'returned' && task.status === 'building' && typeof task.agentId === 'string' ? task.agentId : undefined
     task.status = status
     if (status === 'building') {
       task.startedAt ??= at
@@ -469,6 +475,13 @@ export function updateTask(raw: Raw, at: string, caller: Caller, input: Record<s
     }
     if (status === 'done') task.finishedAt ??= at
     said.push(`status ${status}`)
+    if (takenFrom !== undefined) {
+      task.retired = [...(Array.isArray(task.retired) ? (task.retired as string[]) : []), takenFrom]
+      delete task.agentId
+      task.finishedAt = at
+      task.activity = { at, text: 'taken back by the orchestrator' } satisfies Activity
+      retiredNote = ` Its worker ${takenFrom} is retired: the mod refuses its tool calls from now on, so an attempt that still runs cannot change the workspace or the board. Start a worker again with ${id} as its name: it works in the same workspace and is told to look at what is there first.`
+    }
   }
   if (input.tier !== undefined) {
     const no = retier(task, caller, input.tier, input.tierReason)
@@ -521,7 +534,7 @@ export function updateTask(raw: Raw, at: string, caller: Caller, input: Record<s
   }
   if (said.length === 0) return refused('Nothing to change: give status, tier, note, ticket, pr, branch or revision.')
 
-  const base = `${id}: ${said.join(', ')}.`
+  const base = `${id}: ${said.join(', ')}.${retiredNote}`
   const lost = isNowFailed ? lostWith(raw, id) : []
   const lostText = lost.length === 0 ? '' : `${named(lost)} ${lost.length === 1 ? 'has' : 'have'} no task now.`
   // A worker that gives its task up is told no more than it did; the orchestrator hears what that leaves loose.

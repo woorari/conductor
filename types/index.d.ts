@@ -137,6 +137,12 @@ export type Task = {
    * worker is heard from again or the task leaves building.
    */
   stall?: Stall
+  /**
+   * The agent ids of earlier workers the orchestrator took this task back
+   * from while they were building. The mod refuses their tool calls, so an
+   * attempt that still runs cannot change the workspace or the board.
+   */
+  retired?: string[]
   /** How many tokens the worker's last model request held: its context, as the engine reported it. */
   contextTokens?: number
   branch?: string
