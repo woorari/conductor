@@ -6,6 +6,7 @@ import { NOW } from './fixture'
 import { BRANCH_INFO_PUSHED, STATUS_UNTRACKED } from './lore-output'
 import { BASE, DF, LORE_ROOT, LORE_RUNS, PATH, RUN, RUN_BRANCH, answers, lored, ok, program, ranIn, stored, task } from './lore-world'
 import { spawn, start, world } from './world'
+import type { Files, World } from './world'
 
 type Ran = { text?: string; isError?: true; deny?: string }
 const raise = ($: Engine, input: Record<string, unknown>) => ($.tool.call as unknown as (input: Record<string, unknown>) => Promise<Ran>)(input)
@@ -197,4 +198,69 @@ test("in git, the person's own WorktreeCreate hook still answers", async ($, on)
   await start($)
 
   expect(await worktree($, 'agent-a1')).toEqual({ worktreePath: '/custom/worktrees/agent-a1' })
+})
+
+/** A pretend shell that writes the listing it is asked for, and a pretend rm that takes files away: what is left on disk is what the mod left. */
+function realListing(engine: World, files: Files): void {
+  engine.programs.unshift(
+    {
+      match: argv => argv[0] === '/bin/sh',
+      answer: argv => {
+        files[argv[5] ?? ''] = { text: `${argv[4]}/Source/\n${argv[4]}/Source/a.cpp\n`, mtimeMs: 1 }
+
+        return { exitCode: 0, stdout: '' }
+      },
+    },
+    {
+      match: argv => argv[0] === 'rm',
+      answer: argv => {
+        for (const gone of argv.slice(argv.indexOf('--') + 1)) delete files[gone]
+
+        return { exitCode: 0, stdout: '' }
+      },
+    },
+  )
+}
+
+test('the listing of a copy is removed once it is read: a run folder keeps no listings', async ($, on) => {
+  const { files, engine } = await lored($, on)
+  for (const id of ['t1', 't2', '_run', '_check']) delete files[`${LORE_RUNS}/ABC-12/listing-${id}.txt`]
+  realListing(engine, files)
+  engine.agentIds.push('a1')
+
+  await spawn($, 't1')
+  expect(engine.calls.some(one => one.argv[0] === '/bin/sh'), 'the copy was listed').toBe(true)
+  expect(Object.keys(files).filter(path => path.includes('/listing-'))).toEqual([])
+  expect(stored(files).tasks[0]?.status).toBe('building')
+})
+
+test('a workspace that fails after its listing leaves no listing behind', async ($, on) => {
+  const { files, engine } = await lored($, on)
+  for (const id of ['t1', 't2', '_run', '_check']) delete files[`${LORE_RUNS}/ABC-12/listing-${id}.txt`]
+  realListing(engine, files)
+  engine.lore.unshift(answers(['repository', 'update-path'], { exitCode: 1, stdout: '', stderr: 'error: not a workspace' }))
+  engine.agentIds.push('a1')
+
+  const said = await spawn($, 't1')
+  expect((said as { deny?: string }).deny).toContain('not a workspace')
+  expect(Object.keys(files).filter(path => path.includes('/listing-'))).toEqual([])
+})
+
+test('a listing that fails half written is removed too', async ($, on) => {
+  const { files, engine } = await lored($, on)
+  for (const id of ['t1', 't2', '_run', '_check']) delete files[`${LORE_RUNS}/ABC-12/listing-${id}.txt`]
+  realListing(engine, files)
+  engine.programs.unshift({
+    match: argv => argv[0] === '/bin/sh',
+    answer: argv => {
+      files[argv[5] ?? ''] = { text: `${argv[4]}/Source/\n`, mtimeMs: 1 }
+
+      return { exitCode: 1, stdout: '', stderr: 'find: Permission denied' }
+    },
+  })
+  engine.agentIds.push('a1')
+
+  const said = await spawn($, 't1')
+  expect((said as { deny?: string }).deny).toContain('Permission denied')
+  expect(Object.keys(files).filter(path => path.includes('/listing-'))).toEqual([])
 })

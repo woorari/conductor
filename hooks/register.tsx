@@ -749,10 +749,18 @@ async function prepareWorkspace($: EngineInterface, at: Making): Promise<{ path:
     const copied = await runProgram($, ['cp', '-c', '-R', `${at.root}/${entry}`, `${at.path}/`], LONG_MS)
     if (copied.exitCode !== 0) return fail(`${entry} could not be copied: ${lastLine(copied)}`)
   }
+  // A listing of a large workspace runs to tens of megabytes: it is removed as soon as it is read, whatever happened.
   const listing = `${at.home}/${RUNS_DIR}/${at.runId}/listing-${at.taskId}.txt`
-  const listed = await runProgram($, ['/bin/sh', '-c', LIST_SCRIPT, 'sh', at.path, listing], LONG_MS)
+  let listed: Ran
+  let text: string | undefined
+  try {
+    listed = await runProgram($, ['/bin/sh', '-c', LIST_SCRIPT, 'sh', at.path, listing], LONG_MS)
+    text = listed.exitCode === 0 ? await textAt($, listing) : undefined
+  } finally {
+    await runProgram($, ['rm', '-f', '--', listing])
+  }
   if (listed.exitCode !== 0) return fail(`the copy's files could not be listed: ${lastLine(listed)}`)
-  const relativeListing = ((await textAt($, listing)) ?? '')
+  const relativeListing = (text ?? '')
     .split('\n')
     .map(line => (line.startsWith(`${at.path}/`) ? line.slice(at.path.length + 1) : line))
     .join('\n')
