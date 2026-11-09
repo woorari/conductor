@@ -260,3 +260,104 @@ test('a Lore claim two hours old is left alone: a merge of a large branch may st
   await clock.advance(30_000)
   expect(stored(files).merge).toBeDefined()
 })
+
+/** The lore call that starts with these words, whatever follows. */
+const loreOf = (...words: string[]) => (argv: readonly string[]): boolean => {
+  const args = argv.slice(1).filter(one => one !== '--non-interactive')
+
+  return words.every((word, at) => args[at] === word)
+}
+const MINUTE = 60_000
+const AWHILE = 5000
+const SYNC_BACKGROUND = `main is being brought into ${RUN_BRANCH}, and it goes on in the background: a large Lore merge can take up to an hour. The board tells you when it is in or why it is not. Merge nothing until then; anything else may go on.`
+const APPROVE_BACKGROUND = 'Run ABC-12 is merging into main, and it goes on in the background: a large Lore merge can take up to an hour. The board tells the orchestrator when it has landed or why it did not, and main is protected again either way.'
+/** A bound, finished run whose base moved to REV_ON_MAIN, and lore bringing it in cleanly. */
+async function moved($: Engine, on: Parameters<typeof lored>[1], ledger: Ledger = DONE) {
+  const world = await finished($, on, ledger)
+  world.engine.lore.unshift(answers(['branch', 'info', 'main'], ok(info('main', REV_ON_MAIN))), answers(['branch', 'merge', 'main'], ok(MERGE_CLEAN.replace(REV_T1, REV_ON_MAIN))), answers(['push'], ok(PUSH_RUN), RUN_WS))
+
+  return world
+}
+
+test('run_sync_base that outlasts what one call waits goes on without the call, holds the one merge, and wakes the orchestrator when the base is in', { timeoutMs: 30_000 }, async ($, on) => {
+  const { files, engine, clock } = await moved($, on)
+  engine.slow.push({ match: loreOf('branch', 'merge', 'main'), ms: 11 * MINUTE, sleep: clock.sleep })
+
+  const syncing = call($, 'run_sync_base', {})
+  await clock.settle()
+  await clock.advance(AWHILE)
+  const said = await syncing
+  expect(said.isError).toBeUndefined()
+  expect(said.text).toBe(SYNC_BACKGROUND)
+  expect(stored(files).merge, 'bringing the base in holds the one merge').toMatchObject({ task: 'main', target: 'sync', state: 'merging' })
+  expect((await call($, 'run_sync_base', {})).text).toContain('main is still merging')
+  expect((await approveMain($)).text).toContain('main is still merging')
+
+  await clock.advance(11 * MINUTE)
+  await clock.settle()
+  expect(stored(files).run.lore?.baseAt).toBe(REV_ON_MAIN)
+  expect(stored(files).merge).toBeUndefined()
+  await clock.advance(AWHILE)
+  expect(engine.woke.at(-1)).toContain(`Run board: Brought main into ${RUN_BRANCH}`)
+  expect(engine.stopped).toEqual([])
+})
+
+test('run_sync_base still running after an hour is stopped and aborted; its claim is let go, nothing is pushed, and the orchestrator is told', { timeoutMs: 90_000 }, async ($, on) => {
+  const { files, engine, clock } = await moved($, on)
+  engine.slow.push({ match: loreOf('branch', 'merge', 'main'), ms: 3 * 60 * MINUTE, sleep: clock.sleep })
+
+  const syncing = call($, 'run_sync_base', {})
+  await clock.settle()
+  await clock.advance(AWHILE)
+  expect((await syncing).text).toBe(SYNC_BACKGROUND)
+  await clock.advance(61 * MINUTE)
+  await clock.settle()
+  expect(engine.stopped.map(one => one.slice(2).join(' '))).toEqual([`branch merge main --message=Bring main into ${RUN_BRANCH}`])
+  const ran = ranIn(engine, RUN_WS)
+  expect(ran.indexOf('branch merge abort')).toBeGreaterThan(ran.indexOf(`branch merge main --message=Bring main into ${RUN_BRANCH}`))
+  expect(ran).not.toContain('push')
+  expect(stored(files).merge).toBeUndefined()
+  expect(stored(files).run.lore?.baseAt).toBe(REV_MAIN)
+  await clock.advance(AWHILE)
+  expect(engine.woke.at(-1)).toContain('lore did not bring main in: lore branch merge was still running after 60 minutes')
+})
+
+test('/approve-main that outlasts what one command waits goes on without it, protects the base again, and wakes the orchestrator when the run is on the base', { timeoutMs: 30_000 }, async ($, on) => {
+  const { files, engine, clock } = await finished($, on)
+  engine.slow.push({ match: loreOf('branch', 'merge', 'into'), ms: 11 * MINUTE, sleep: clock.sleep })
+
+  const approving = approveMain($)
+  await clock.settle()
+  await clock.advance(AWHILE)
+  expect((await approving).text).toBe(APPROVE_BACKGROUND)
+  expect(stored(files).merge).toMatchObject({ task: 'ABC-12', target: 'base', state: 'merging' })
+
+  await clock.advance(11 * MINUTE)
+  await clock.settle()
+  const ran = ranIn(engine, RUN_WS)
+  expect(ran.indexOf('branch protect main')).toBeGreaterThan(ran.indexOf('branch merge into main Run ABC-12: Retry'))
+  expect(stored(files).run.merged).toMatchObject({ revision: REV_ON_MAIN })
+  expect(stored(files).merge).toBeUndefined()
+  await clock.advance(AWHILE)
+  expect(engine.woke.at(-1)).toContain(`Run board: Merged: run ABC-12 is on main as ${REV_ON_MAIN.slice(0, 7)}`)
+  expect(engine.stopped).toEqual([])
+})
+
+test('a base brought in or approved within the call is said by the call alone: nobody is woken for it', async ($, on) => {
+  const { engine, clock } = await moved($, on)
+
+  expect((await call($, 'run_sync_base', {})).text).toContain(`Brought main into ${RUN_BRANCH}`)
+  expect((await approveMain($)).text).toContain('Merged: run ABC-12 is on main')
+  await clock.advance(AWHILE)
+  expect(engine.woke).toEqual([])
+})
+
+test('bringing the base in that nobody heard back from is let go after a while, with a blocker on the board and the base left alone', async ($, on) => {
+  const stuck: Ledger = { ...DONE, merge: { task: 'main', revision: REV_ON_MAIN, target: 'sync', state: 'merging', startedAt: '2026-10-09T06:30:00.000Z' } }
+  const { files, engine, clock } = await finished($, on, stuck)
+
+  await clock.advance(30_000)
+  expect(ranIn(engine, RUN_WS)).not.toContain('branch protect main')
+  expect(stored(files).merge).toBeUndefined()
+  expect(stored(files).problems.some(one => one.severity === 'blocker' && one.text.includes(`lore history --branch ${RUN_BRANCH}`))).toBe(true)
+})

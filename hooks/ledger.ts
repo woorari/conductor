@@ -387,7 +387,7 @@ function merge(value: unknown): Merge | undefined {
   if (pr !== undefined) return { ...common, pr, head: text(from, 'head', where) }
 
   // A Lore merge: the revision it is pinned to, and where it goes.
-  return { ...common, revision: revision as string, target: oneOf(from, 'target', where, ['run', 'base'] as const) }
+  return { ...common, revision: revision as string, target: oneOf(from, 'target', where, ['run', 'base', 'sync'] as const) }
 }
 
 function problem(value: unknown, where: string): Problem {
@@ -475,8 +475,8 @@ function check(ledger: Ledger): void {
       throw new Refused(`post ${one.id}: from names ${show(one.from)}, which is neither a task of this run nor the orchestrator`)
     }
   }
-  // A Lore merge into the base branch is the run's own: its task names the run.
-  if (ledger.merge !== undefined && ledger.merge.target !== 'base' && !known.has(ledger.merge.task)) {
+  // A merge names a task of the run, but a Lore merge into the base names the run, and bringing the base in names the base.
+  if (ledger.merge !== undefined && ledger.merge.target !== 'base' && ledger.merge.target !== 'sync' && !known.has(ledger.merge.task)) {
     throw new Refused(`merge: task names ${show(ledger.merge.task)}, which is no task of this run`)
   }
   const loop = cycle(ledger.tasks)

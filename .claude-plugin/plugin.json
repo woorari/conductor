@@ -1,6 +1,6 @@
 {
   "name": "conductor",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Conducts a larger piece of work in Claude Code: a live run board, a model router for worker agents, board messaging, context rotation, and a merge loop: GitHub pull requests pinned to the checked head, or Lore branches merged into the base only on your approval. Tickets from GitHub or Linear.",
   "author": {
     "name": "René Rieck"
