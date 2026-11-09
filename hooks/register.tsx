@@ -168,6 +168,8 @@ const agents = new Map<string, string>()
 const workers = new Set<string>()
 /** Workers the orchestrator took their task back from, by agent id, with that task: every tool call of theirs is refused. */
 const retired = new Map<string, string>()
+/** Who started each worker's own subagent: the subagent's agent id to its parent's, so a retired worker's helpers are retired with it. */
+const parents = new Map<string, string>()
 /** What each task's worker was last seen doing, not yet written. */
 const pending = new Map<string, string>()
 /** The files each task's worker changed since the last write, relative to the repository. */
@@ -296,6 +298,7 @@ function learn(ledger: Ledger, path: string): void {
     agents.clear()
     workers.clear()
     retired.clear()
+    parents.clear()
     pending.clear()
     changedFiles.clear()
     inbox.clear()
@@ -321,12 +324,24 @@ function learn(ledger: Ledger, path: string): void {
 
 /** A task's retired workers are no longer its workers: nothing they do counts, and each call of theirs is refused. */
 function fence(task: Task): void {
-  for (const agentId of task.retired ?? []) {
+  const gone = new Set(task.retired ?? [])
+  if (gone.size === 0) return
+  // A retired worker's own subagents go with it, and theirs too.
+  for (let isGrown = true; isGrown; ) {
+    isGrown = false
+    for (const [child, parent] of parents) {
+      if (gone.has(parent) && !gone.has(child)) {
+        gone.add(child)
+        isGrown = true
+      }
+    }
+  }
+  for (const agentId of gone) {
     retired.set(agentId, task.id)
     agents.delete(agentId)
     workers.delete(agentId)
-    pending.delete(task.id)
   }
+  pending.delete(task.id)
 }
 
 /**
@@ -3101,6 +3116,13 @@ export const register: Register = (on, options) => {
 
     routing.add(e.tool_use_id)
     await remember($, path)
+    // A worker the orchestrator took its task back from starts nothing more.
+    const takenFrom = e.parentAgentId === undefined ? undefined : retired.get(e.parentAgentId)
+    if (takenFrom !== undefined) {
+      routing.delete(e.tool_use_id)
+
+      return { deny: `conductor: ${takenFrom} was taken back from you by the orchestrator, and another worker may have it now. Stop: change nothing more, and end your turn.` }
+    }
     const parentTaskId = e.parentAgentId === undefined ? undefined : agents.get(e.parentAgentId)
     if (e.parentAgentId !== undefined && parentTaskId === undefined) {
       // Started by a helper or an agent the board does not know: not the router's.
@@ -3217,7 +3239,11 @@ export const register: Register = (on, options) => {
       }
       // The engine started nothing after all: the task stands again as it stood.
       if ((started as { agentId?: string }).agentId === undefined) await release()
-      else await heard($, path, e.name ?? decided.taskId, decided, started)
+      else {
+        const child = (started as { agentId?: string }).agentId
+        if (decided.kind === 'child' && child !== undefined && e.parentAgentId !== undefined) parents.set(child, e.parentAgentId)
+        await heard($, path, e.name ?? decided.taskId, decided, started)
+      }
 
       return started
     } catch (cause) {

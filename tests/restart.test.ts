@@ -155,3 +155,29 @@ test('a retired worker is still refused after the mod is loaded again', async ($
   await lored($, on, ledger)
   expect((await bash($, 'ls', 'a1')).deny).toBe(FENCED)
 })
+
+test("a worker taken back takes its own subagents with it, and starts no new ones", async ($, on) => {
+  const { files, engine } = await lored($, on)
+  engine.agentIds.push('a1', 'c1', 'g1', 'a2', 'c2')
+  const path = `${BASE}/ABC-12/t1`
+  await spawn($, 't1')
+  await worktree($, 'agent-a1')
+  engine.dirs.push(path, `${path}/.lore`)
+  await spawn($, undefined, 'a1')
+  await spawn($, undefined, 'c1')
+  expect((await bash($, 'ls', 'c1')).deny, "the worker's subagent works while the task is the worker's").toBeUndefined()
+
+  await raise($, { tool: 'mcp__conductor__task_update', tool_use_id: 'take-back', task: 't1', status: 'returned' })
+  expect((await bash($, 'ls', 'c1')).deny).toBe(FENCED)
+  expect((await bash($, 'ls', 'g1')).deny, "its subagent's subagent too").toBe(FENCED)
+  const late = (await spawn($, undefined, 'a1')) as { deny?: string }
+  expect(late.deny).toBe(FENCED)
+  expect(((await spawn($, undefined, 'c1')) as { deny?: string }).deny).toBe(FENCED)
+
+  // The new worker's own subagent works.
+  await spawn($, 't1')
+  await worktree($, 'agent-a2')
+  await spawn($, undefined, 'a2')
+  expect(stored(files).tasks[0]).toMatchObject({ status: 'building', agentId: 'a2' })
+  expect((await bash($, 'ls', 'c2')).deny).toBeUndefined()
+})
