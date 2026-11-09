@@ -33,7 +33,7 @@ import type { TaskRow } from './board'
 import { dashboardSvg } from './dashboard'
 import { KEEP, ROTATE_AT, carried, handover } from './handover'
 import { LINEAR_KEY, RUN_ID, STATUSES, TIERS, parseLedger } from './ledger'
-import { approvedMain, baseBroughtIn, conflicted, letGo, loreReady, onBase, onRunBranch, readyForBase, rev7, startLoreMerge } from './lore-merge'
+import { approvedMain, baseBroughtIn, conflicted, letGo, loreReady, onBase, onRunBranch, readyForBase, rev7, startLoreMerge, syncEnded } from './lore-merge'
 import { LINEAR_API, M_CREATE, M_UPDATE, Q_ISSUE, Q_TEAM, apiKeyOf, createdOf, errorsOf, issueOf, issueText, stateFor, teamOf, updatedOf } from './linear'
 import { branchInfoOf, ignoreRules, loreByHand, mergeOf, notInLore, pushOf, repositoryInfoOf, someOf, statusOf } from './lore'
 import { candidatesFor, findHome, workspaceOfSpec } from './home'
@@ -2394,7 +2394,7 @@ async function loreRunOf($: EngineInterface): Promise<{ path: string; ledger: Le
  * way, when the run branch moved, or when the base moved since the run branch
  * last took it in.
  */
-async function approveMain($: EngineInterface, origin: string): Promise<string> {
+async function approveMain($: EngineInterface, origin: string, signal?: AbortSignal): Promise<string> {
   if (!OWNER_ORIGINS.has(origin)) return 'Not done. /approve-main is the owner\'s: only the owner types it, in the terminal, the desktop app or Remote Control. Nothing was merged.'
   const found = await loreRunOf($)
   if ('text' in found) return found.text
@@ -2419,6 +2419,38 @@ async function approveMain($: EngineInterface, origin: string): Promise<string> 
   })
   if (claimed.error !== undefined) return `Nothing was merged: ${claimed.error}`
   if (claimed.value.isError) return `Nothing was merged: ${claimed.value.text}`
+  // The merge goes on in the session's own way, as a task's merge does: the owner may type or press Stop meanwhile.
+  const job: ApproveJob = { path, ledger, runLore, run, base, head, baseNow, at }
+  const said = await outlasting($, `approve ${ledger.run.id}`, { kind: 'approve', job }, signal, cause => {
+    const text = `Run ${ledger.run.id} broke off on its way into ${base} (${because(cause)}). The claim stays until the board lets it go, ${LORE_CLAIM_STALE_MIN} minutes after it was made, and ${base} is protected again then; look at lore history --branch ${base} before anything else merges.`
+
+    return { result: text, text }
+  })
+
+  return said?.text ?? `Run ${ledger.run.id} is merging into ${base}, and it goes on in the background: a large Lore merge can take up to an hour. The board tells the orchestrator when it has landed or why it did not, and ${base} is protected again either way.`
+}
+
+/** An approval, claimed: what merging the run branch into the base works from. */
+type ApproveJob = {
+  path: string
+  ledger: Ledger
+  runLore: NonNullable<Ledger['run']['lore']>
+  run: string
+  base: string
+  head: string
+  baseNow: string
+  at: string
+}
+
+/**
+ * An approved run, claimed, from the switch to the run branch to its
+ * workspaces removed: the run branch merged into the unprotected base, the
+ * base protected again whatever happens, the issue moved and the task
+ * branches archived. What it says is what /approve-main answers, or what the
+ * orchestrator is told when the merge outlasted the command.
+ */
+async function landOnBase($: EngineInterface, job: ApproveJob): Promise<string> {
+  const { path, ledger, runLore, run, base, head, baseNow, at } = job
   const giveUp = async (why: string): Promise<string> => (await settle($, path, raw => letGo(raw, why)))?.text ?? `Nothing was merged: ${why}.`
   const synced = await loreLong($, ['branch', 'switch', runLore.branch, '--reset'], run)
   const status = statusOf((await lore($, ['status'], run)).out)
@@ -2592,7 +2624,7 @@ async function cleanupRun($: EngineInterface, args: string, origin: string): Pro
 }
 
 /** `run_sync_base`: the orchestrator has the mod bring the base branch into the run branch, so the run can be approved again. */
-async function runSyncBase($: EngineInterface, call: ToolCall): Promise<{ result: string; text: string; isError?: true }> {
+async function runSyncBase($: EngineInterface, call: ToolCall, signal?: AbortSignal): Promise<Said> {
   const fail = (reason: string) => ({ isError: true as const, result: `${NOT_DONE} ${reason}`, text: `${NOT_DONE} ${reason}` })
   const say = (text: string) => ({ result: text, text })
   if (callerOf(call.agentId).kind !== 'orchestrator') return fail('Only the orchestrator brings the base branch in.')
@@ -2603,12 +2635,55 @@ async function runSyncBase($: EngineInterface, call: ToolCall): Promise<{ result
   if (ledger.merge !== undefined) return fail(`${ledger.merge.task} is still merging: one merge at a time.`)
   const baseNow = branchInfoOf((await lore($, ['branch', 'info', base], run)).out)?.remoteLatest
   if (baseNow === undefined) return fail(`lore did not say where ${base} stands on the server.`)
-  const synced = await loreLong($, ['branch', 'switch', runLore.branch, '--reset'], run)
-  if (synced.exitCode !== 0) return fail(`the run's workspace could not be brought to ${runLore.branch}: ${lastLine(synced)}.`)
   const runHead = branchInfoOf((await lore($, ['branch', 'info', runLore.branch], run)).out)?.remoteLatest
   if (runHead === undefined || (runLore.head !== undefined && runHead !== runLore.head)) {
     return fail(`${runLore.branch} is at ${runHead === undefined ? 'a revision lore did not say' : rev7(runHead)}, but the board left it at ${runLore.head === undefined ? 'no revision it knows of' : rev7(runLore.head)}: something nobody judged is on it. Nothing was merged; look at lore history --branch ${runLore.branch}.`)
   }
+  const at = iso(await $.clock.now())
+  const claimed = await mutate($, path, raw => {
+    const outcome = startLoreMerge(raw, at, { task: base, revision: baseNow, target: 'sync' })
+
+    return { value: outcome, isChanged: outcome.isChanged }
+  })
+  if (claimed.error !== undefined) return fail(claimed.error)
+  if (claimed.value.isError) return fail(claimed.value.text)
+  // Bringing the base in goes on in the session's own way, as a task's merge does; its claim keeps it the one merge.
+  const job: SyncJob = { path, base, baseNow, runHead, run, runLore }
+  const said = await outlasting($, `sync ${base}`, { kind: 'sync', job }, signal, cause =>
+    fail(`bringing ${base} in broke off (${because(cause)}). The claim stays until the board lets it go, ${LORE_CLAIM_STALE_MIN} minutes after it was made; look at lore history --branch ${runLore.branch} before anything merges.`),
+  )
+
+  return said ?? say(`${base} is being brought into ${runLore.branch}, and it goes on in the background: a large Lore merge can take up to an hour. The board tells you when it is in or why it is not. Merge nothing until then; anything else may go on.`)
+}
+
+/** Bringing the base branch in, claimed: what the merge after the claim works from. */
+type SyncJob = {
+  path: string
+  base: string
+  baseNow: string
+  runHead: string
+  run: string
+  runLore: NonNullable<Ledger['run']['lore']>
+}
+
+/**
+ * The base branch brought into the run branch, from the switch to the run
+ * branch to the push: a conflict is a blocker on the board, and whatever does
+ * not go through lets the claim go and leaves the run branch where it stood.
+ * What it says is what run_sync_base answers, or what the orchestrator is
+ * told when it outlasted the tool call.
+ */
+async function bringBaseIn($: EngineInterface, job: SyncJob): Promise<Said> {
+  const { path, base, baseNow, runHead, run, runLore } = job
+  const fail = (reason: string) => ({ isError: true as const, result: `${NOT_DONE} ${reason}`, text: `${NOT_DONE} ${reason}` })
+  const say = (text: string) => ({ result: text, text })
+  const giveUp = async (reason: string): Promise<Said> => {
+    await settle($, path, syncEnded)
+
+    return fail(reason)
+  }
+  const synced = await loreLong($, ['branch', 'switch', runLore.branch, '--reset'], run)
+  if (synced.exitCode !== 0) return giveUp(`the run's workspace could not be brought to ${runLore.branch}: ${lastLine(synced)}.`)
   const merged = await loreLong($, ['branch', 'merge', base, `--message=Bring ${base} into ${runLore.branch}`], run)
   const outcome = mergeOf(merged.exitCode, merged.out)
   const at = iso(await $.clock.now())
@@ -2616,9 +2691,10 @@ async function runSyncBase($: EngineInterface, call: ToolCall): Promise<{ result
     await loreLong($, ['branch', 'merge', 'abort'], run)
     const files = outcome.files.join(', ') || 'files lore did not name'
     await mutate($, path, raw => {
+      syncEnded(raw)
       const reported = reportProblem(raw, at, { kind: 'orchestrator' }, { text: `Bringing ${base} into ${runLore.branch} conflicts in: ${files}. Give it a task that resolves it on the run branch, then call run_sync_base again.`, severity: 'blocker' })
 
-      return { value: reported, isChanged: reported.isChanged }
+      return { value: reported, isChanged: true }
     })
 
     return fail(`${base} conflicts with ${runLore.branch} in: ${files}. Nothing was merged; it is a blocker on the board.`)
@@ -2626,26 +2702,24 @@ async function runSyncBase($: EngineInterface, call: ToolCall): Promise<{ result
   if (outcome.kind === 'failed') {
     await loreLong($, ['branch', 'merge', 'abort'], run)
 
-    return fail(`lore did not bring ${base} in: ${outcome.reason}.`)
+    return giveUp(`lore did not bring ${base} in: ${outcome.reason}.`)
   }
   if (outcome.source !== undefined && outcome.source !== baseNow) {
-    if (runHead !== undefined) await lore($, ['branch', 'reset', runHead, '--branch', runLore.branch], run)
+    await lore($, ['branch', 'reset', runHead, '--branch', runLore.branch], run)
     await loreLong($, ['branch', 'switch', runLore.branch, '--reset'], run)
 
-    return fail(`${base} moved while it was brought in. Nothing was pushed: call run_sync_base again.`)
+    return giveUp(`${base} moved while it was brought in. Nothing was pushed: call run_sync_base again.`)
   }
   const sent = await loreLong($, ['push'], run)
   const result = pushOf(sent.exitCode, sent.out)
-  if (result.kind === 'refused') return fail(`the run branch could not be pushed: ${result.text}.`)
+  if (result.kind === 'refused') return giveUp(`the run branch could not be pushed: ${result.text}.`)
   const broughtHead = result.kind === 'pushed' ? result.revision : outcome.revision
   const written = await settle($, path, raw => baseBroughtIn(raw, baseNow, broughtHead))
   if (written === undefined) return fail('the board could not be written.')
-  const head2 = result.kind === 'pushed' ? result.revision : outcome.revision
   const now2 = parseLedger((await textAt($, path)) ?? '').ledger
-  if (now2 !== undefined) await startCheck($, path, now2, { cwd: run, revision: head2 })
-  const landed = result.kind === 'pushed' ? rev7(result.revision) : rev7(outcome.revision)
+  if (now2 !== undefined) await startCheck($, path, now2, { cwd: run, revision: broughtHead })
 
-  return say(`Brought ${base} into ${runLore.branch} as ${landed}. A new approval is needed: tell the owner what changed and ask them to type /approve-main.`)
+  return say(`Brought ${base} into ${runLore.branch} as ${rev7(broughtHead)}. A new approval is needed: tell the owner what changed and ask them to type /approve-main.`)
 }
 
 /**
@@ -2690,12 +2764,10 @@ async function loreMergeTool($: EngineInterface, call: ToolCall, isCheckOnly: bo
   // The merge goes on in the session's own way: a process the tool call starts dies with the call,
   // and a person who types or presses Stop meanwhile ends the call. Its claim keeps it the one merge.
   const job: LoreLanding = { path, ledger, id, task, branch, revision, run, runLore, at, now }
-  const landing = underWay(() => (inSession === undefined ? landLore($, job) : inSession(job))).catch((cause: unknown) =>
+  const said = await outlasting($, `merge ${id}`, { kind: 'merge', job }, signal, cause =>
     fail(`the merge of ${id} broke off (${because(cause)}). The claim stays until the board lets it go, ${LORE_CLAIM_STALE_MIN} minutes after it was made; look at lore history --branch ${runLore.branch} before anything else merges`),
   )
-  const said = await awhile($, landing, MERGE_WAIT_MS, signal)
-  if (said !== undefined && signal?.aborted !== true) return said
-  void landing.then(ended => landed(id, ended))
+  if (said !== undefined) return said
 
   return say(`${id} is merging into ${runLore.branch}, and it goes on in the background: a large Lore merge can take up to an hour. The board tells you when it has landed or why it did not. Merge nothing else until then; anything else may go on.`)
 }
@@ -2906,14 +2978,40 @@ async function mergeTool(
 /** What a merge tool answers. */
 type Said = { result: string; text: string; isError?: true }
 
+/** Claimed Lore work the session's own way runs: a task's merge, the base brought in, or the run merged into the base. */
+type SessionWork = { kind: 'merge'; job: LoreLanding } | { kind: 'sync'; job: SyncJob } | { kind: 'approve'; job: ApproveJob }
+
 /**
  * Runs work on the session's own way to the engine, from the hook that
  * switched the board on: what it starts lives as long as the session, not as
- * long as one tool call. A reload sets it again.
+ * long as one tool call or command. A reload sets it again.
  */
-let inSession: ((job: LoreLanding) => Promise<Said>) | undefined
+let inSession: ((work: SessionWork) => Promise<Said>) | undefined
 
-/** How long the merge tool waits for a Lore merge before it says the merge goes on without it: well within a hook's budget. */
+/** One piece of claimed Lore work, on the `$` it is handed. */
+async function onSession($: EngineInterface, work: SessionWork): Promise<Said> {
+  if (work.kind === 'merge') return landLore($, work.job)
+  if (work.kind === 'sync') return bringBaseIn($, work.job)
+  const text = await landOnBase($, work.job)
+
+  return { result: text, text }
+}
+
+/**
+ * Claimed Lore work, run on the session's own way and waited for a while:
+ * what it said when it ended by then, else undefined, and the orchestrator is
+ * told under `key` once it ends.
+ */
+async function outlasting($: EngineInterface, key: string, work: SessionWork, signal: AbortSignal | undefined, broke: (cause: unknown) => Said): Promise<Said | undefined> {
+  const ending = underWay(() => (inSession === undefined ? onSession($, work) : inSession(work))).catch(broke)
+  const said = await awhile($, ending, MERGE_WAIT_MS, signal)
+  if (said !== undefined && signal?.aborted !== true) return said
+  void ending.then(ended => landed(key, ended))
+
+  return undefined
+}
+
+/** How long a tool or command waits for its Lore work before it says the work goes on without it: well within a hook's budget. */
 const MERGE_WAIT_MS = 4000
 
 /** Waits for a promise at most `ms`, and no longer than `signal` stays unaborted: undefined when it was not there by then. */
@@ -2931,12 +3029,12 @@ async function awhile<T>($: EngineInterface, promise: Promise<T>, ms: number, si
   }
 }
 
-/** A Lore merge that outlasted its tool call has ended: the orchestrator is told how, and woken if it is idle. */
-function landed(id: string, said: { text: string }): void {
+/** Lore work that outlasted its call has ended: the orchestrator is told how, and woken if it is idle. */
+function landed(key: string, said: { text: string }): void {
   const text = `Run board: ${said.text.replace(/^Not done\. /, '').replace(/^Run board: /, '')}`
   const waiting = inbox.get(ORCHESTRATOR) ?? []
   if (!waiting.some(one => one.text === text)) inbox.set(ORCHESTRATOR, [...waiting, { taskId: ORCHESTRATOR, text }])
-  wakes.set(`merge ${id}`, text)
+  wakes.set(key, text)
 }
 
 /**
@@ -3203,7 +3301,7 @@ async function isHome($: EngineInterface): Promise<boolean> {
 // The mod switches on at its start as before, or, once, later, when the session is handed to its own folder.
 async function switchOn($: EngineInterface): Promise<void> {
   isOn = true
-  inSession = job => landLore($, job)
+  inSession = work => onSession($, work)
   // The timers first: whatever a registration below runs into, the board stays live.
   $.clock.every(POLL_MS, () => void tick($))
   $.clock.every(FLUSH_MS, () => {
@@ -3937,7 +4035,7 @@ export const register: Register = (on, options) => {
   on('tool.call', { tool: /^mcp__conductor__problem_resolve$/ }, ($, e) =>
     answer($, e as unknown as ToolCall, (raw, _at, caller, input) => resolveProblem(raw, caller, input)),
   ).catch(broke)
-  on('tool.call', { tool: /^mcp__conductor__run_sync_base$/ }, ($, e) => underWay(() => runSyncBase($, e as unknown as ToolCall))).catch(broke)
+  on('tool.call', { tool: /^mcp__conductor__run_sync_base$/ }, ($, e, next) => runSyncBase($, e as unknown as ToolCall, next.signal)).catch(broke)
   on('tool.call', { tool: /^mcp__conductor__run_check$/ }, ($, e) => runCheckTool($, e as unknown as ToolCall)).catch(broke)
   on('tool.call', { tool: /^mcp__conductor__ticket_read$/ }, ($, e) => ticketRead($, e as unknown as ToolCall)).catch(broke)
   on('tool.call', { tool: /^mcp__conductor__ticket_file$/ }, ($, e) => ticketFile($, e as unknown as ToolCall)).catch(broke)
@@ -4200,8 +4298,8 @@ export const register: Register = (on, options) => {
     return next({ ...e, context: [...(e.context ?? []), said] })
   })
 
-  on('command.run', { command: 'approve-main' }, async ($, e) => {
-    const text = await underWay(() => approveMain($, e.origin.kind))
+  on('command.run', { command: 'approve-main' }, async ($, e, next) => {
+    const text = await approveMain($, e.origin.kind, next.signal)
     seen = undefined
     await refresh($, false)
 

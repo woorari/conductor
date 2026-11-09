@@ -61,7 +61,7 @@ export function loreReady(ledger: Ledger, caller: Caller, input: Record<string, 
 }
 
 /** Claims a Lore merge: one at a time, pinned to a revision. */
-export function startLoreMerge(raw: Raw, at: string, claim: { task: string; revision: string; target: 'run' | 'base' }): Outcome {
+export function startLoreMerge(raw: Raw, at: string, claim: { task: string; revision: string; target: 'run' | 'base' | 'sync' }): Outcome {
   const flight = flightOf(raw)
   if (flight !== undefined) return refused(`${String(flight.task)} is merging already: one merge at a time.`)
   if (claim.target === 'run') {
@@ -167,6 +167,15 @@ export function baseBroughtIn(raw: Raw, baseAt: string, head: string): Outcome {
   run.lore.baseAt = baseAt
   run.lore.head = head
   delete run.approval
+  if (flightOf(raw)?.target === 'sync') delete (raw as { merge?: Loose }).merge
 
   return changed(`The run branch took in the base branch at ${rev7(baseAt)}.`)
+}
+
+/** Bringing the base branch in ended without taking it in: its claim is let go, and the run branch stands where it stood. */
+export function syncEnded(raw: Raw): Outcome {
+  if (flightOf(raw)?.target !== 'sync') return refused('The base branch is not being brought in.')
+  delete (raw as { merge?: Loose }).merge
+
+  return changed('The base branch is no longer being brought in.')
 }

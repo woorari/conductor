@@ -192,8 +192,8 @@ export type Merge = {
       head?: undefined
       /** In Lore: the revision merged, pinned. */
       revision: string
-      /** In Lore: a task into the run branch, or the run branch into the base branch. */
-      target: 'run' | 'base'
+      /** In Lore: a task into the run branch, the run branch into the base branch, or the base branch brought into the run branch (its task names the base). */
+      target: 'run' | 'base' | 'sync'
     }
 )
 
