@@ -469,7 +469,7 @@ export function world(on: On, files: Files, repo: { root: string } | null = { ro
   on('prompt.submit', (_$, e) => {
     state.woke.push(e.text)
 
-    return { text: e.text }
+    return e.context === undefined ? { text: e.text } : { text: e.text, context: e.context }
   })
   // A built-in command a mod runs for the person. /compact is a compaction as a turn of its own.
   on('command.run', (_$, e) => {

@@ -44,7 +44,7 @@ import { checkWorkspaceOf, isInside, removals, runBranchOf, runWorkspaceOf, task
 import type { RepositoryInfo } from './lore'
 import { pauseRun, unpauseRun } from './pause'
 import { LOOK_AGAIN_MIN, dueForLook, isUnderway, unsettled } from './problems'
-import { APPROVED, PLANNING, conducting, newRun, planning } from './plan'
+import { APPROVED, PLANNING, conducting, isApproval, newRun, planning } from './plan'
 import type { Conducting } from './plan'
 import { ORCHESTRATOR, briefing, digest, post, relative, rule, touch, waiting } from './posts'
 import { HELPER_TYPES, familyOf, route, unlocked } from './router'
@@ -2154,6 +2154,23 @@ async function settle($: EngineInterface, path: string, change: (raw: Raw) => Ou
 /** The origins of a command that are the owner's own hand: the terminal, the desktop app, the owner's Remote Control. */
 const OWNER_ORIGINS: ReadonlySet<string> = new Set(['composer', 'sdk', 'bridge'])
 
+/** Approves the bound run's plan, by /approve or the owner's approving reply: what is said, and whether it was approved. */
+async function approveRun($: EngineInterface, path: string): Promise<{ text: string; isApproved: boolean }> {
+  const notReady = await loreApprove($, path)
+  if (notReady !== undefined) return { text: `No plan was approved: ${notReady} Approve again once that is fixed.`, isApproved: false }
+  const written = await mutate($, path, raw => {
+    const outcome = approvePlan(raw)
+
+    return { value: outcome, isChanged: outcome.isChanged }
+  })
+  if (written.error !== undefined) return { text: written.error, isApproved: false }
+  if (!written.value.isError) await linearApproved($, path)
+  seen = undefined
+  await refresh($, false)
+
+  return { text: written.value.text, isApproved: written.value.isError !== true }
+}
+
 /** What a run's Lore side is, read for its base-branch commands; or why there is none. */
 async function loreRunOf($: EngineInterface): Promise<{ path: string; ledger: Ledger; runLore: NonNullable<Ledger['run']['lore']>; run: string } | { text: string }> {
   const path = await boundLedger($)
@@ -3763,22 +3780,23 @@ export const register: Register = (on, options) => {
   on('command.run', { command: 'approve' }, async $ => {
     const path = await boundLedger($)
     if (path === undefined) return { text: await unbound($) }
-    const notReady = await loreApprove($, path)
-    if (notReady !== undefined) return { text: `No plan was approved: ${notReady} Approve again once that is fixed.` }
-    const written = await mutate($, path, raw => {
-      const outcome = approvePlan(raw)
+    const { text, isApproved } = await approveRun($, path)
+    if (isApproved) asks.push(APPROVED)
 
-      return { value: outcome, isChanged: outcome.isChanged }
-    })
-    if (written.error !== undefined) return { text: written.error }
-    if (!written.value.isError) {
-      asks.push(APPROVED)
-      await linearApproved($, path)
-    }
-    seen = undefined
-    await refresh($, false)
+    return { text }
+  })
 
-    return { text: written.value.text }
+  // The owner's reply that only approves, such as a button "Approve, start now", is /approve while the plan is proposed.
+  // Only the owner's own hand counts: a peer session, a channel, a plugin or anything scheduled approves nothing.
+  on('prompt.submit', async ($, e, next) => {
+    if (e.command !== undefined || e.isMeta === true || !OWNER_ORIGINS.has(e.origin.kind) || !isApproval(e.text)) return next(e)
+    const path = await boundLedger($).catch(() => undefined)
+    const plan = path === undefined ? undefined : parseLedger((await textAt($, path)) ?? '').ledger?.run.plan
+    if (path === undefined || plan !== 'proposed') return next(e)
+    const { text, isApproved } = await approveRun($, path)
+    const said = isApproved ? `${APPROVED} The owner's reply "${e.text.trim()}" counts as /approve. ${text}` : `Run board: the owner's reply "${e.text.trim()}" asks to approve the plan, and it is not approved: ${text}`
+
+    return next({ ...e, context: [...(e.context ?? []), said] })
   })
 
   on('command.run', { command: 'approve-main' }, async ($, e) => {
