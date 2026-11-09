@@ -2654,7 +2654,7 @@ async function runSyncBase($: EngineInterface, call: ToolCall): Promise<{ result
  * in the run's own workspace. `merge_check` stops before the claim and
  * changes nothing.
  */
-async function loreMergeTool($: EngineInterface, call: ToolCall, isCheckOnly: boolean): Promise<{ result: string; text: string; isError?: true }> {
+async function loreMergeTool($: EngineInterface, call: ToolCall, isCheckOnly: boolean, signal?: AbortSignal): Promise<Said> {
   const fail = (reason: string) => ({ isError: true as const, result: `${NOT_DONE} ${reason}`, text: `${NOT_DONE} ${reason}` })
   const say = (text: string) => ({ result: text, text })
   const path = await boundLedger($)
@@ -2687,6 +2687,44 @@ async function loreMergeTool($: EngineInterface, call: ToolCall, isCheckOnly: bo
   })
   if (claimed.error !== undefined) return fail(claimed.error)
   if (claimed.value.isError) return fail(claimed.value.text)
+  // The merge goes on in the session's own way: a process the tool call starts dies with the call,
+  // and a person who types or presses Stop meanwhile ends the call. Its claim keeps it the one merge.
+  const job: LoreLanding = { path, ledger, id, task, branch, revision, run, runLore, at, now }
+  const landing = underWay(() => (inSession === undefined ? landLore($, job) : inSession(job))).catch((cause: unknown) =>
+    fail(`the merge of ${id} broke off (${because(cause)}). The claim stays until the board lets it go, ${LORE_CLAIM_STALE_MIN} minutes after it was made; look at lore history --branch ${runLore.branch} before anything else merges`),
+  )
+  const said = await awhile($, landing, MERGE_WAIT_MS, signal)
+  if (said !== undefined && signal?.aborted !== true) return said
+  void landing.then(ended => landed(id, ended))
+
+  return say(`${id} is merging into ${runLore.branch}, and it goes on in the background: a large Lore merge can take up to an hour. The board tells you when it has landed or why it did not. Merge nothing else until then; anything else may go on.`)
+}
+
+/** A claimed Lore merge, as the merge tool hands it on: what the merge after the claim works from. */
+type LoreLanding = {
+  path: string
+  ledger: Ledger
+  id: string
+  task: Task
+  branch: string
+  revision: string
+  run: string
+  runLore: NonNullable<Ledger['run']['lore']>
+  at: string
+  now: number
+}
+
+/**
+ * A claimed Lore merge, from the switch to the run branch to the task done:
+ * the run branch brought up to date, the task's branch merged into it and
+ * pushed, its locks let go and its workspace removed. What it says is what
+ * the merge tool answers, or what the orchestrator is told when the merge
+ * outlasted the tool call.
+ */
+async function landLore($: EngineInterface, job: LoreLanding): Promise<Said> {
+  const { path, ledger, id, task, branch, revision, run, runLore, at, now } = job
+  const fail = (reason: string) => ({ isError: true as const, result: `${NOT_DONE} ${reason}`, text: `${NOT_DONE} ${reason}` })
+  const say = (text: string) => ({ result: text, text })
   const giveUp = async (why: string) => {
     const outcome = await settle($, path, raw => letGo(raw, why))
 
@@ -2769,6 +2807,7 @@ async function mergeTool(
   $: EngineInterface,
   call: ToolCall,
   isCheckOnly: boolean,
+  signal?: AbortSignal,
 ): Promise<{ result: string; text: string; isError?: undefined } | { isError: true; result: string; text: string }> {
   const base = await runBase($)
   const say = (text: string) => ({ result: text, text })
@@ -2780,7 +2819,7 @@ async function mergeTool(
   const path = await boundLedger($)
   if (path === undefined) return fail(NOT_BOUND)
   // Before anything is asked of GitHub: a pull request's number means something only in a repository on GitHub.
-  if ((await backendOf($))?.kind === 'lore') return underWay(() => loreMergeTool($, call, isCheckOnly))
+  if ((await backendOf($))?.kind === 'lore') return loreMergeTool($, call, isCheckOnly, signal)
   if (!(await isAtForge($))) return fail(elsewhere(origin))
   await remember($, path)
   let ledger: Ledger
@@ -2862,6 +2901,42 @@ async function mergeTool(
   }
 
   return say(`Not known yet. The merge call for PR ${asked.pr} went out (${answer}), but GitHub could not be asked afterwards whether it merged. The board keeps ${id} as merging, looks again within a few minutes and settles it either way. Merge nothing meanwhile.`)
+}
+
+/** What a merge tool answers. */
+type Said = { result: string; text: string; isError?: true }
+
+/**
+ * Runs work on the session's own way to the engine, from the hook that
+ * switched the board on: what it starts lives as long as the session, not as
+ * long as one tool call. A reload sets it again.
+ */
+let inSession: ((job: LoreLanding) => Promise<Said>) | undefined
+
+/** How long the merge tool waits for a Lore merge before it says the merge goes on without it: well within a hook's budget. */
+const MERGE_WAIT_MS = 4000
+
+/** Waits for a promise at most `ms`, and no longer than `signal` stays unaborted: undefined when it was not there by then. */
+async function awhile<T>($: EngineInterface, promise: Promise<T>, ms: number, signal: AbortSignal | undefined): Promise<T | undefined> {
+  if (signal?.aborted === true) return undefined
+  let gone = (): void => undefined
+  const abandoned = new Promise<undefined>(resolve => {
+    gone = () => resolve(undefined)
+    signal?.addEventListener('abort', gone, { once: true })
+  })
+  try {
+    return await atMost($, Promise.race([promise, abandoned]), ms)
+  } finally {
+    signal?.removeEventListener('abort', gone)
+  }
+}
+
+/** A Lore merge that outlasted its tool call has ended: the orchestrator is told how, and woken if it is idle. */
+function landed(id: string, said: { text: string }): void {
+  const text = `Run board: ${said.text.replace(/^Not done\. /, '').replace(/^Run board: /, '')}`
+  const waiting = inbox.get(ORCHESTRATOR) ?? []
+  if (!waiting.some(one => one.text === text)) inbox.set(ORCHESTRATOR, [...waiting, { taskId: ORCHESTRATOR, text }])
+  wakes.set(`merge ${id}`, text)
 }
 
 /**
@@ -3128,6 +3203,7 @@ async function isHome($: EngineInterface): Promise<boolean> {
 // The mod switches on at its start as before, or, once, later, when the session is handed to its own folder.
 async function switchOn($: EngineInterface): Promise<void> {
   isOn = true
+  inSession = job => landLore($, job)
   // The timers first: whatever a registration below runs into, the board stays live.
   $.clock.every(POLL_MS, () => void tick($))
   $.clock.every(FLUSH_MS, () => {
@@ -3853,8 +3929,8 @@ export const register: Register = (on, options) => {
 
     return said
   }).catch(broke)
-  on('tool.call', { tool: /^mcp__conductor__merge_check$/ }, ($, e) => mergeTool($, e as unknown as ToolCall, true)).catch(broke)
-  on('tool.call', { tool: /^mcp__conductor__merge$/ }, ($, e) => mergeTool($, e as unknown as ToolCall, false)).catch(broke)
+  on('tool.call', { tool: /^mcp__conductor__merge_check$/ }, ($, e, next) => mergeTool($, e as unknown as ToolCall, true, next.signal)).catch(broke)
+  on('tool.call', { tool: /^mcp__conductor__merge$/ }, ($, e, next) => mergeTool($, e as unknown as ToolCall, false, next.signal)).catch(broke)
   on('tool.call', { tool: /^mcp__conductor__problem_report$/ }, ($, e) =>
     answer($, e as unknown as ToolCall, reportProblem),
   ).catch(broke)
