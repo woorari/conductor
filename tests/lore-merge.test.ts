@@ -23,7 +23,7 @@ const MERGE = { task: 't1', told: [] }
 
 /** A bound Lore run whose t1 is green at REV_T1, its branch still there, and lore merging cleanly. */
 async function green($: Engine, on: Parameters<typeof lored>[1], ledger: Ledger = GREEN) {
-  const { files, engine } = await lored($, on, ledger)
+  const { files, engine, clock } = await lored($, on, ledger)
   engine.lore.unshift(
     answers(['branch', 'info', T1_BRANCH], ok(BRANCH_INFO_PUSHED)),
     answers(['branch', 'info', RUN_BRANCH], ok(`Branch ${RUN_BRANCH}\n  ID: 01a1b056f6bb701783e7a1beb2aa49a0\n  Latest: ${REV_MAIN}\n  Remote Latest: ${REV_MAIN}\n`)),
@@ -40,8 +40,78 @@ async function green($: Engine, on: Parameters<typeof lored>[1], ledger: Ledger 
     state: { name: 'In Progress', type: 'started' }, parent: null, children: { nodes: [] }, comments: { nodes: [] }, team: { id: 'team-abc', key: 'ABC', states },
   }
 
-  return { files, engine }
+  return { files, engine, clock }
 }
+
+/** The lore call that merges this branch, whatever its message. */
+const mergeOf = (branch: string) => (argv: readonly string[]): boolean => {
+  const args = argv.slice(1).filter(one => one !== '--non-interactive')
+
+  return args[0] === 'branch' && args[1] === 'merge' && args[2] === branch
+}
+const MINUTE = 60_000
+
+test('a merge of a large branch that runs past the ten minutes the engine gives one program is waited for, and lands', { timeoutMs: 30_000 }, async ($, on) => {
+  const { files, engine, clock } = await green($, on)
+  engine.slow.push({ match: mergeOf(T1_BRANCH), ms: 11 * MINUTE, sleep: clock.sleep })
+
+  const merging = call($, 'merge', MERGE)
+  await clock.settle()
+  await clock.advance(11 * MINUTE)
+  const said = await merging
+  expect(said.text).toContain(`Merged: t1 is on ${RUN_BRANCH} as ${REV_RUN.slice(0, 7)}`)
+  expect(stored(files).tasks[0]).toMatchObject({ status: 'done', mergeCommit: REV_RUN })
+  expect(stored(files).merge).toBeUndefined()
+  expect(engine.stopped).toEqual([])
+})
+
+test('a merge still running after an hour is stopped and aborted; the claim is let go and nothing is pushed', { timeoutMs: 90_000 }, async ($, on) => {
+  const { files, engine, clock } = await green($, on)
+  engine.slow.push({ match: mergeOf(T1_BRANCH), ms: 3 * 60 * MINUTE, sleep: clock.sleep })
+
+  const merging = call($, 'merge', MERGE)
+  await clock.settle()
+  await clock.advance(61 * MINUTE)
+  const said = await merging
+  expect(said.isError).toBe(true)
+  expect(said.text).toContain('still running after 60 minutes')
+  expect(engine.stopped.map(one => one.slice(2).join(' ')), 'the merge itself is stopped, nothing else').toEqual([`branch merge ${T1_BRANCH} --message=t1: Task t1`])
+  const ran = ranIn(engine, RUN_WS)
+  const merged = ran.findIndex(one => one.startsWith(`branch merge ${T1_BRANCH}`))
+  expect(ran.indexOf('branch merge abort'), 'the half-done merge is aborted after it is stopped').toBeGreaterThan(merged)
+  expect(ran).not.toContain('push')
+  expect(stored(files).merge, 'the claim is let go: the merge may be tried again').toBeUndefined()
+  expect(stored(files).tasks[0]?.status).toBe('green')
+  expect(stored(files).run.lore?.head, 'the board puts nothing new on the run branch').toBe(GREEN.run.lore?.head)
+})
+
+test('the next merge after a stopped one starts from the run branch as the server has it', { timeoutMs: 90_000 }, async ($, on) => {
+  const { engine, clock } = await green($, on)
+  engine.slow.push({ match: mergeOf(T1_BRANCH), ms: 3 * 60 * MINUTE, sleep: clock.sleep })
+  const first = call($, 'merge', MERGE)
+  await clock.settle()
+  await clock.advance(61 * MINUTE)
+  expect((await first).text, 'the first merge was stopped, not refused').toContain('still running after 60 minutes')
+  engine.slow.length = 0
+  engine.loreCalls.length = 0
+
+  const said = await call($, 'merge', MERGE)
+  expect(said.text).toContain(`Merged: t1 is on ${RUN_BRANCH}`)
+  const ran = ranIn(engine, RUN_WS)
+  expect(ran.indexOf(`branch switch ${RUN_BRANCH} --reset`), 'the workspace is reset before anything is merged in it').toBeLessThan(ran.findIndex(one => one.startsWith(`branch merge ${T1_BRANCH}`)))
+})
+
+test('the steps that move a large branch are streamed past the engine limit; short lore commands keep their short limit', async ($, on) => {
+  const { engine } = await green($, on)
+
+  await call($, 'merge', MERGE)
+  const lore = engine.calls.filter(one => one.cwd === RUN_WS && /(^|\/)lore$/.test(one.argv[0] ?? ''))
+  const streamed = lore.filter(one => one.isStreamed === true).map(one => one.argv.slice(2).join(' '))
+  expect(streamed).toEqual([`branch switch ${RUN_BRANCH} --reset`, `branch merge ${T1_BRANCH} --message=t1: Task t1`, 'push'])
+  const short = lore.filter(one => one.isStreamed !== true)
+  expect(short.map(one => one.argv.slice(2, 4).join(' '))).toEqual(expect.arrayContaining(['branch info', 'lock release']))
+  expect(short.every(one => (one.timeoutMs ?? 30_000) <= 30_000), 'a look at a branch or a lock is no long step').toBe(true)
+})
 
 test('a green task is merged into the run branch, pinned to its judged revision', async ($, on) => {
   const { files, engine } = await green($, on)

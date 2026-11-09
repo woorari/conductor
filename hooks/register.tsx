@@ -497,6 +497,120 @@ async function lore($: EngineInterface, args: readonly string[], cwd: string, ti
   }
 }
 
+/**
+ * The longest a Lore step that moves a workspace's content may run: a switch,
+ * a merge, its abort or a push of a large branch. It is past the engine's ten
+ * minutes for one program, so such a step is streamed, not run.
+ */
+const LORE_LONG_MS = 60 * 60_000
+/** How much of a long step's output is kept per stream: its start, where Lore says what it merges, and its end, where it says what came of it. */
+const KEPT_HEAD = 1 << 20
+const KEPT_TAIL = 3 << 20
+
+/** Keeps the start and the end of what a long step prints, with a mark where the middle was left out. */
+const keeper = () => {
+  let head = ''
+  let tail = ''
+  let isCut = false
+
+  return {
+    add(text: string) {
+      const room = Math.max(0, KEPT_HEAD - head.length)
+      head += text.slice(0, room)
+      tail += text.slice(room)
+      if (tail.length > 2 * KEPT_TAIL) {
+        tail = tail.slice(-KEPT_TAIL)
+        isCut = true
+      }
+    },
+    text: (): string => (isCut || tail.length > KEPT_TAIL ? `${head}\n…\n${tail.slice(-KEPT_TAIL)}` : `${head}${tail}`),
+  }
+}
+
+/** Waits for a promise, at most `ms`: undefined when it took longer or failed. */
+async function atMost<T>($: EngineInterface, promise: Promise<T>, ms: number): Promise<T | undefined> {
+  let timer: { cancel: () => void } | undefined
+  const late = new Promise<undefined>(resolve => {
+    timer = $.clock.after(ms, () => resolve(undefined))
+  })
+  try {
+    return await Promise.race([promise.catch(() => undefined), late])
+  } finally {
+    timer?.cancel()
+  }
+}
+
+/**
+ * Runs `lore --non-interactive <args>` for a step that may outlast the
+ * engine's ten minutes for one program: streamed, under the mod's own limit.
+ * A step still running past it is stopped, and a non-zero exit says so.
+ * Never throws. `out` keeps the start and the end of what it printed.
+ */
+async function loreLong($: EngineInterface, args: readonly string[], cwd: string, timeoutMs = LORE_LONG_MS): Promise<Ran> {
+  const bin = await loreBin($, cwd)
+  if (bin === undefined) return { exitCode: 127, stdout: '', stderr: LORE_MISSING, out: LORE_MISSING }
+  const [stdout, stderr] = [keeper(), keeper()]
+  const deadline = await deadlineIn($, timeoutMs).catch((cause: unknown) => because(cause))
+  if (typeof deadline === 'string') return { exitCode: 1, stdout: '', stderr: deadline, out: deadline }
+  const late = deadline.reached
+  try {
+    const stream = $.process.spawn({ argv: [bin, '--non-interactive', ...args], cwd })
+    for (;;) {
+      const pulling = stream.next()
+      pulling.catch(() => undefined)
+      const pulled = await Promise.race([pulling, late])
+      if (pulled === 'late') {
+        // Ending the stream ends the child; a child that does not end within a minute is left to the engine.
+        await atMost($, stream.return({ code: null, signal: 'SIGTERM' }), 60_000)
+        const reason = `lore ${args.slice(0, 2).join(' ')} was still running after ${Math.round(timeoutMs / 60_000)} minutes and was stopped`
+
+        return { exitCode: 1, stdout: stdout.text(), stderr: reason, out: reason }
+      }
+      if (pulled.done === true) {
+        const ended = pulled.value.code === null ? `lore ${args.slice(0, 2).join(' ')} was ended by ${pulled.value.signal ?? 'a signal'}` : ''
+        const [said, erred] = [stdout.text(), [stderr.text(), ended].filter(one => one !== '').join('\n')]
+
+        return { exitCode: pulled.value.code ?? 1, stdout: said, stderr: erred, out: `${said}${erred === '' ? '' : `\n${erred}`}` }
+      }
+      ;(pulled.value.stream === 'stdout' ? stdout : stderr).add(pulled.value.text)
+    }
+  } catch (cause) {
+    const reason = because(cause)
+
+    return { exitCode: 1, stdout: stdout.text(), stderr: reason, out: reason }
+  } finally {
+    deadline.cancel()
+  }
+}
+
+/**
+ * A deadline `ms` from now, waited for a minute at a time, so that no one
+ * timer holds a dispatch open for an hour. `reached` resolves once the clock
+ * is there; `cancel` stops the waiting.
+ */
+async function deadlineIn($: EngineInterface, ms: number): Promise<{ reached: Promise<'late'>; cancel: () => void }> {
+  const at = (await $.clock.now()) + ms
+  let timer: { cancel: () => void } | undefined
+  let isCancelled = false
+  const reached = new Promise<'late'>(resolve => {
+    const wait = async (): Promise<void> => {
+      const now = await $.clock.now().catch(() => at - 60_000)
+      if (isCancelled) return
+      if (now >= at) return resolve('late')
+      timer = $.clock.after(Math.min(60_000, at - now), () => void wait())
+    }
+    void wait()
+  })
+
+  return {
+    reached,
+    cancel: () => {
+      isCancelled = true
+      timer?.cancel()
+    },
+  }
+}
+
 /** The nearest folder at or above the session's own that holds a `.lore` folder. */
 async function loreRoot($: EngineInterface): Promise<string | null> {
   let dir = (await $.session.cwd().catch(() => '')).replace(/\/+$/, '')
@@ -726,7 +840,7 @@ async function pickWorkspace($: EngineInterface, call: ToolCall): Promise<{ resu
   return { result: text, text }
 }
 
-/** How long a copy, a merge, a push or a listing of a large workspace may take: the engine's ceiling for one program. */
+/** How long a copy, a status scan or a listing of a large workspace may take: the engine's ceiling for one program. Lore's merges, switches and pushes run under LORE_LONG_MS. */
 const LONG_MS = 600_000
 /** Lists a copy's folders (each ending in /) and files into a file; the paths are parameters, never part of the script. */
 const LIST_SCRIPT = 'find "$1" -mindepth 1 -type d -exec printf "%s/\\n" {} + > "$2" && find "$1" -mindepth 1 -type f >> "$2"'
@@ -812,6 +926,7 @@ async function prepareWorkspace($: EngineInterface, at: Making): Promise<{ path:
   const removedFailed = await onPaths($, ['rm', '-rf', '--'], removals(relativeListing, rules, at.carry).map(one => `${at.path}/${one}`).filter(one => isInside(at.path, one)))
   if (removedFailed !== undefined) return fail(`what the copy must not hold could not be removed: ${lastLine(removedFailed)}`)
   const step = async (args: readonly string[], timeoutMs = 30_000): Promise<Ran> => lore($, args, at.path, timeoutMs)
+  const longStep = async (args: readonly string[]): Promise<Ran> => loreLong($, args, at.path)
   const updated = await step(['repository', 'update-path'])
   if (updated.exitCode !== 0) return fail(`lore did not take the copy as a workspace of its own: ${lastLine(updated)}`)
   const scanned = await step(['status', '--scan'], LONG_MS)
@@ -819,17 +934,17 @@ async function prepareWorkspace($: EngineInterface, at: Making): Promise<{ path:
   if (scanned.exitCode !== 0 || status === undefined) return fail(`lore could not read the copy's status: ${lastLine(scanned)}`)
   const untrackedFailed = await onPaths($, ['rm', '-f', '--'], status.untracked.map(one => `${at.path}/${one}`).filter(one => isInside(at.path, one)))
   if (untrackedFailed !== undefined) return fail(`the copy's untracked files could not be removed: ${lastLine(untrackedFailed)}`)
-  const from = await step(['branch', 'switch', at.from, '--reset'], LONG_MS)
+  const from = await longStep(['branch', 'switch', at.from, '--reset'])
   if (from.exitCode !== 0) return fail(`lore could not switch the copy to ${at.from}: ${lastLine(from)}`)
   const info = branchInfoOf((await step(['branch', 'info', at.branch])).out)
   if (info?.remoteLatest !== undefined) {
     // A task started again goes on from what its branch holds.
-    const again = await step(['branch', 'switch', at.branch, '--reset'], LONG_MS)
+    const again = await longStep(['branch', 'switch', at.branch, '--reset'])
     if (again.exitCode !== 0) return fail(`lore could not switch the copy to ${at.branch}: ${lastLine(again)}`)
   } else {
     const created = await step(['branch', 'create', at.branch])
     if (created.exitCode !== 0) return fail(`lore could not make the branch ${at.branch}: ${lastLine(created)}`)
-    const pushed = await step(['push'], LONG_MS)
+    const pushed = await longStep(['push'])
     const outcome = pushOf(pushed.exitCode, pushed.out)
     if (outcome.kind === 'refused') return fail(`lore could not push the new branch ${at.branch}: ${outcome.text}`)
   }
@@ -914,7 +1029,7 @@ async function startCheckNow($: EngineInterface, path: string, ledger: Ledger, t
         })
         if (made.error !== undefined) return void (await failed(`the check workspace could not be made: ${made.error}`))
       }
-      const pinned = await lore($, ['branch', 'switch', branch, target.revision, '--reset'], cwd, LONG_MS)
+      const pinned = await loreLong($, ['branch', 'switch', branch, target.revision, '--reset'], cwd)
       const standing = statusOf((await lore($, ['status'], cwd)).out)
       if (pinned.exitCode !== 0 || standing?.revision !== target.revision) {
         return void (await failed(`the check workspace could not be put at ${rev7(target.revision)}: ${lastLine(pinned)}`))
@@ -2305,7 +2420,7 @@ async function approveMain($: EngineInterface, origin: string): Promise<string> 
   if (claimed.error !== undefined) return `Nothing was merged: ${claimed.error}`
   if (claimed.value.isError) return `Nothing was merged: ${claimed.value.text}`
   const giveUp = async (why: string): Promise<string> => (await settle($, path, raw => letGo(raw, why)))?.text ?? `Nothing was merged: ${why}.`
-  const synced = await lore($, ['branch', 'switch', runLore.branch, '--reset'], run, LONG_MS)
+  const synced = await loreLong($, ['branch', 'switch', runLore.branch, '--reset'], run)
   const status = statusOf((await lore($, ['status'], run)).out)
   if (synced.exitCode !== 0 || status === undefined) return giveUp(`the run's workspace could not be brought to ${runLore.branch}`)
   if (status.revision !== head) return giveUp(`${runLore.branch} moved after the approval (it is at ${rev7(status.revision)}, ${rev7(head)} was approved): approve again`)
@@ -2320,7 +2435,7 @@ async function approveMain($: EngineInterface, origin: string): Promise<string> 
       const baseAgain = branchInfoOf((await lore($, ['branch', 'info', base], run)).out)?.remoteLatest
       if (baseAgain !== baseNow) outcome = { kind: 'failed', reason: `${base} moved during the approval (it is at ${baseAgain === undefined ? 'a revision lore did not say' : rev7(baseAgain)}): bring it in with run_sync_base and approve again` }
       else {
-        const merged = await lore($, ['branch', 'merge', 'into', base, `Run ${ledger.run.id}: ${ledger.run.title}`], run, LONG_MS)
+        const merged = await loreLong($, ['branch', 'merge', 'into', base, `Run ${ledger.run.id}: ${ledger.run.title}`], run)
         outcome = mergeOf(merged.exitCode, merged.out)
       }
     }
@@ -2488,17 +2603,17 @@ async function runSyncBase($: EngineInterface, call: ToolCall): Promise<{ result
   if (ledger.merge !== undefined) return fail(`${ledger.merge.task} is still merging: one merge at a time.`)
   const baseNow = branchInfoOf((await lore($, ['branch', 'info', base], run)).out)?.remoteLatest
   if (baseNow === undefined) return fail(`lore did not say where ${base} stands on the server.`)
-  const synced = await lore($, ['branch', 'switch', runLore.branch, '--reset'], run, LONG_MS)
+  const synced = await loreLong($, ['branch', 'switch', runLore.branch, '--reset'], run)
   if (synced.exitCode !== 0) return fail(`the run's workspace could not be brought to ${runLore.branch}: ${lastLine(synced)}.`)
   const runHead = branchInfoOf((await lore($, ['branch', 'info', runLore.branch], run)).out)?.remoteLatest
   if (runHead === undefined || (runLore.head !== undefined && runHead !== runLore.head)) {
     return fail(`${runLore.branch} is at ${runHead === undefined ? 'a revision lore did not say' : rev7(runHead)}, but the board left it at ${runLore.head === undefined ? 'no revision it knows of' : rev7(runLore.head)}: something nobody judged is on it. Nothing was merged; look at lore history --branch ${runLore.branch}.`)
   }
-  const merged = await lore($, ['branch', 'merge', base, `--message=Bring ${base} into ${runLore.branch}`], run, LONG_MS)
+  const merged = await loreLong($, ['branch', 'merge', base, `--message=Bring ${base} into ${runLore.branch}`], run)
   const outcome = mergeOf(merged.exitCode, merged.out)
   const at = iso(await $.clock.now())
   if (outcome.kind === 'conflict') {
-    await lore($, ['branch', 'merge', 'abort'], run, LONG_MS)
+    await loreLong($, ['branch', 'merge', 'abort'], run)
     const files = outcome.files.join(', ') || 'files lore did not name'
     await mutate($, path, raw => {
       const reported = reportProblem(raw, at, { kind: 'orchestrator' }, { text: `Bringing ${base} into ${runLore.branch} conflicts in: ${files}. Give it a task that resolves it on the run branch, then call run_sync_base again.`, severity: 'blocker' })
@@ -2509,17 +2624,17 @@ async function runSyncBase($: EngineInterface, call: ToolCall): Promise<{ result
     return fail(`${base} conflicts with ${runLore.branch} in: ${files}. Nothing was merged; it is a blocker on the board.`)
   }
   if (outcome.kind === 'failed') {
-    await lore($, ['branch', 'merge', 'abort'], run, LONG_MS)
+    await loreLong($, ['branch', 'merge', 'abort'], run)
 
     return fail(`lore did not bring ${base} in: ${outcome.reason}.`)
   }
   if (outcome.source !== undefined && outcome.source !== baseNow) {
     if (runHead !== undefined) await lore($, ['branch', 'reset', runHead, '--branch', runLore.branch], run)
-    await lore($, ['branch', 'switch', runLore.branch, '--reset'], run, LONG_MS)
+    await loreLong($, ['branch', 'switch', runLore.branch, '--reset'], run)
 
     return fail(`${base} moved while it was brought in. Nothing was pushed: call run_sync_base again.`)
   }
-  const sent = await lore($, ['push'], run, LONG_MS)
+  const sent = await loreLong($, ['push'], run)
   const result = pushOf(sent.exitCode, sent.out)
   if (result.kind === 'refused') return fail(`the run branch could not be pushed: ${result.text}.`)
   const broughtHead = result.kind === 'pushed' ? result.revision : outcome.revision
@@ -2577,34 +2692,34 @@ async function loreMergeTool($: EngineInterface, call: ToolCall, isCheckOnly: bo
 
     return fail(outcome?.text ?? `${id} was not merged: ${why}.`)
   }
-  const synced = await lore($, ['branch', 'switch', runLore.branch, '--reset'], run, LONG_MS)
+  const synced = await loreLong($, ['branch', 'switch', runLore.branch, '--reset'], run)
   if (synced.exitCode !== 0) return giveUp(`the run's workspace could not be brought to ${runLore.branch}: ${lastLine(synced)}`)
   const runHead = branchInfoOf((await lore($, ['branch', 'info', runLore.branch], run)).out)?.remoteLatest
   if (runHead === undefined) return giveUp(`lore did not say where ${runLore.branch} stands on the server`)
   // A task is merged only onto what the board itself left on the run branch: anything else would be carried along unjudged.
   if (runLore.head !== undefined && runHead !== runLore.head) return giveUp(`${runLore.branch} is at ${rev7(runHead)}, but the board left it at ${rev7(runLore.head)}: something nobody judged is on it. Nothing was merged; look at lore history --branch ${runLore.branch}`)
-  const merged = await lore($, ['branch', 'merge', branch, `--message=${id}: ${task.title}`], run, LONG_MS)
+  const merged = await loreLong($, ['branch', 'merge', branch, `--message=${id}: ${task.title}`], run)
   const outcome = mergeOf(merged.exitCode, merged.out)
   // Lore merges a branch's latest: one pushed between the look above and the merge is not the judged revision.
   if (outcome.kind === 'merged' && outcome.source !== revision) {
     await lore($, ['branch', 'reset', runHead, '--branch', runLore.branch], run)
-    await lore($, ['branch', 'switch', runLore.branch, '--reset'], run, LONG_MS)
+    await loreLong($, ['branch', 'switch', runLore.branch, '--reset'], run)
     const took = outcome.source === undefined ? 'a revision lore did not name' : rev7(outcome.source)
 
     return giveUp(`lore took in ${took}, not the judged ${rev7(revision)}: the branch moved meanwhile. Nothing was pushed; judge it again`)
   }
   if (outcome.kind === 'conflict') {
-    await lore($, ['branch', 'merge', 'abort'], run, LONG_MS)
+    await loreLong($, ['branch', 'merge', 'abort'], run)
     const said = await settle($, path, raw => conflicted(raw, at, id, outcome.files))
 
     return fail(said?.text ?? `${id} conflicts with the run branch; nothing was merged.`)
   }
   if (outcome.kind === 'failed') {
-    await lore($, ['branch', 'merge', 'abort'], run, LONG_MS)
+    await loreLong($, ['branch', 'merge', 'abort'], run)
 
     return giveUp(`lore did not merge it: ${outcome.reason}`)
   }
-  const pushed = await lore($, ['push'], run, LONG_MS)
+  const pushed = await loreLong($, ['push'], run)
   const sent = pushOf(pushed.exitCode, pushed.out)
   if (sent.kind !== 'pushed') return giveUp(`the merge could not be pushed: ${sent.kind === 'refused' ? sent.text : 'lore pushed nothing'}`)
   // Its locks are let go, and its workspace removed when everything in it is in Lore.
@@ -2766,8 +2881,12 @@ async function underWay<T>(merging: () => Promise<T>): Promise<T> {
   }
 }
 
-/** A Lore claim older than this was not heard of again: longer than three of the engine's longest program runs. */
-const LORE_CLAIM_STALE_MIN = 35
+/**
+ * A Lore claim older than this was not heard of again: longer than the
+ * longest a live merge holds its claim (a switch, a merge and a push of up
+ * to LORE_LONG_MS each, then a scan and a removal of up to LONG_MS each).
+ */
+const LORE_CLAIM_STALE_MIN = (3 * LORE_LONG_MS + 3 * LONG_MS) / 60_000
 
 /**
  * A Lore merge claim nobody heard back from (the session stopped mid-merge,

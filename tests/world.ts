@@ -209,8 +209,18 @@ export type World = {
   loreCalls: { argv: string[]; cwd?: string }[]
   /** How any other program answers (cp, df, rm, sh...): the first entry that matches; none matching is a program that is not there. */
   programs: LoreAnswer[]
-  /** Every program run, with the folder it ran in. */
-  calls: { argv: string[]; cwd?: string; timeoutMs?: number; env?: Record<string, string> }[]
+  /** Every program run, with the folder it ran in; one streamed by `$.process.spawn` is marked so. */
+  calls: { argv: string[]; cwd?: string; timeoutMs?: number; env?: Record<string, string>; isStreamed?: true }[]
+  /**
+   * Programs that take a while, by the mocked clock (`sleep` is the test's
+   * `clock.sleep`): the first entry that matches holds the answer back `ms`.
+   * Run by `$.process.run`, one slower than its time limit (the engine's ten
+   * minutes at most) is aborted as the engine aborts it; streamed by
+   * `$.process.spawn`, it is stopped when the stream is let go.
+   */
+  slow: { match: (argv: readonly string[], cwd?: string) => boolean; ms: number; sleep: (ms: number) => Promise<void> }[]
+  /** Every streamed program that was stopped before it ended, as its argument vector. */
+  stopped: string[][]
   /** What `fs.list` answers for a folder, where a test says; other folders are derived from the files. */
   listings: Record<string, { name: string; kind: 'dir' | 'file' }[]>
   /** Folders that exist, for `fs.exists`: a Lore workspace's `.lore`, say. */
@@ -279,6 +289,8 @@ export function world(on: On, files: Files, repo: { root: string } | null = { ro
     loreCalls: [],
     programs: [],
     calls: [],
+    slow: [],
+    stopped: [],
     listings: {},
     worktree: {},
     dirs: [],
@@ -309,29 +321,73 @@ export function world(on: On, files: Files, repo: { root: string } | null = { ro
   on('env.get', (_$, e) => ({
     value: e.name === 'HOME' ? HOME : e.name === 'GH_TOKEN' || e.name === 'GITHUB_TOKEN' || e.name === 'LINEAR_API_KEY' || e.name === 'LORE_BIN' ? state.env[e.name] : undefined,
   }))
-  on('process.run', (_$, e) => {
-    state.processes.push([...e.argv])
-    const isTokenAsked = e.argv.join(' ') === 'gh auth token'
-    const cwd = e.init?.cwd
-    state.calls.push({ argv: [...e.argv], ...(cwd === undefined ? {} : { cwd }), ...(e.init?.timeoutMs === undefined ? {} : { timeoutMs: e.init.timeoutMs }), ...(e.init?.env === undefined ? {} : { env: { ...e.init.env } }) })
-    const found = state.programs.find(one => one.match(e.argv, cwd))?.answer
-    const program = typeof found === 'function' ? found(e.argv, cwd) : found
-    if (program !== undefined) {
-      return { value: { exitCode: program.exitCode, stdout: program.stdout, stderr: program.stderr ?? '', isStdoutTruncated: false, isStderrTruncated: false } }
+  /** How a program answers, from the tables above; a program none of them knows is not there. */
+  const answerOf = (argv: readonly string[], cwd: string | undefined): { exitCode: number; stdout: string; stderr: string; isMissing?: true } => {
+    const found = state.programs.find(one => one.match(argv, cwd))?.answer
+    const program = typeof found === 'function' ? found(argv, cwd) : found
+    if (program !== undefined) return { exitCode: program.exitCode, stdout: program.stdout, stderr: program.stderr ?? '' }
+    if (/(^|\/)lore$/.test(argv[0] ?? '')) {
+      const given = state.lore.find(one => one.match(argv, cwd))?.answer
+      const scripted = typeof given === 'function' ? given(argv, cwd) : given
+      if (scripted !== undefined) return { exitCode: scripted.exitCode, stdout: scripted.stdout, stderr: scripted.stderr ?? '' }
     }
-    if (/(^|\/)lore$/.test(e.argv[0] ?? '')) {
-      state.loreCalls.push({ argv: [...e.argv], ...(cwd === undefined ? {} : { cwd }) })
-      const given = state.lore.find(one => one.match(e.argv, cwd))?.answer
-      const scripted = typeof given === 'function' ? given(e.argv, cwd) : given
-      if (scripted !== undefined) {
-        return { value: { exitCode: scripted.exitCode, stdout: scripted.stdout, stderr: scripted.stderr ?? '', isStdoutTruncated: false, isStderrTruncated: false } }
-      }
-    }
+    if (argv.join(' ') === 'gh auth token') return { exitCode: state.gh.exitCode, stdout: state.gh.stdout, stderr: '' }
 
-    return {
-      value: isTokenAsked
-        ? { exitCode: state.gh.exitCode, stdout: state.gh.stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false }
-        : { exitCode: 127, stdout: '', stderr: `${e.argv[0] ?? ''}: not found`, isStdoutTruncated: false, isStderrTruncated: false },
+    return { exitCode: 127, stdout: '', stderr: `${argv[0] ?? ''}: not found`, isMissing: true }
+  }
+  /** A lore call is noted as it starts, so one stopped before it answered is among them. */
+  const noteLore = (argv: readonly string[], cwd: string | undefined): void => {
+    if (/(^|\/)lore$/.test(argv[0] ?? '') && !state.programs.some(one => one.match(argv, cwd))) state.loreCalls.push({ argv: [...argv], ...(cwd === undefined ? {} : { cwd }) })
+  }
+  on('process.run', async (_$, e) => {
+    state.processes.push([...e.argv])
+    const cwd = e.init?.cwd
+    noteLore(e.argv, cwd)
+    state.calls.push({ argv: [...e.argv], ...(cwd === undefined ? {} : { cwd }), ...(e.init?.timeoutMs === undefined ? {} : { timeoutMs: e.init.timeoutMs }), ...(e.init?.env === undefined ? {} : { env: { ...e.init.env } }) })
+    const slow = state.slow.find(one => one.match(e.argv, cwd))
+    if (slow !== undefined) {
+      // As the engine runs a program: thirty seconds unless asked, ten minutes at most.
+      const limit = Math.min(e.init?.timeoutMs ?? 30_000, 600_000)
+      await slow.sleep(Math.min(slow.ms, limit))
+      if (slow.ms > limit) return { deny: `$.process.run(${(e.argv[0] ?? '').split('/').pop() ?? ''}) aborted: still running after ${limit}ms` }
+    }
+    const answer = answerOf(e.argv, cwd)
+
+    return { value: { exitCode: answer.exitCode, stdout: answer.stdout, stderr: answer.stderr, isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  on('process.spawn', async function* (_$, e, next) {
+    state.processes.push([...e.argv])
+    const cwd = e.cwd
+    noteLore(e.argv, cwd)
+    state.calls.push({ argv: [...e.argv], ...(cwd === undefined ? {} : { cwd }), ...(e.env === undefined ? {} : { env: { ...e.env } }), isStreamed: true })
+    const slow = state.slow.find(one => one.match(e.argv, cwd))
+    let isOver = false
+    try {
+      if (slow !== undefined) {
+        const stop = new Promise<'stopped'>(resolve => {
+          if (next.signal.aborted) resolve('stopped')
+          next.signal.addEventListener('abort', () => resolve('stopped'), { once: true })
+        })
+        // A long step says something every minute, as Lore does while it works; each piece starts the stand-in's budget afresh.
+        for (let left = slow.ms; left > 0; left -= 60_000) {
+          if ((await Promise.race([slow.sleep(Math.min(left, 60_000)).then(() => 'done' as const), stop])) === 'stopped') return { value: { code: null, signal: 'SIGTERM' } }
+          if (left > 60_000) yield { stream: 'stdout' as const, text: 'working\n' }
+        }
+      }
+      const answer = answerOf(e.argv, cwd)
+      // A program that is not there never starts: the stream rejects its first pull.
+      if (answer.isMissing === true) {
+        isOver = true
+
+        return { deny: `${e.argv[0] ?? ''}: not found` }
+      }
+      if (answer.stdout !== '') yield { stream: 'stdout' as const, text: answer.stdout }
+      if (answer.stderr !== '') yield { stream: 'stderr' as const, text: answer.stderr }
+      isOver = true
+
+      return { value: { code: answer.exitCode, signal: null } }
+    } finally {
+      if (!isOver) state.stopped.push([...e.argv])
     }
   })
   on('session.id', () => ({ value: state.sessionId }))
