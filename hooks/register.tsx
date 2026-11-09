@@ -2370,6 +2370,112 @@ async function approveMain($: EngineInterface, origin: string): Promise<string> 
   return `${done?.text ?? `Merged: run ${ledger.run.id} is on ${base} as ${rev7(landed)}.`} ${tail}${protectLine}`
 }
 
+/**
+ * The folder the mod made for a task of a Lore run, while it is the run's own
+ * to remove: derived, never a path read off the ledger alone.
+ */
+function ownFolder(root: string, ledger: Ledger, taskId: string): string | undefined {
+  try {
+    const derived = workspaceOf(workspacesOf(root, projectOf(ledger)?.lore?.workspaces), ledger.run.id, taskId)
+
+    return isRemovable(root, ledger, derived) ? derived : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** What keeps a done task's workspace, read as a merge reads it: lore's status, less what the copy took along. */
+async function whyKept($: EngineInterface, root: string, folder: string, isOwn: boolean): Promise<string> {
+  if (!isOwn) return 'it is not the folder the mod made for this task, so /cleanup leaves it alone'
+  if (!(await $.fs.exists(folder).catch(() => true))) return 'it is gone already'
+  const status = statusOf((await lore($, ['status', '--scan'], folder, LONG_MS)).out)
+  if (status === undefined) return 'lore could not read it'
+  const left = notInLore(status, await copiedIn($, root, folder, status.untracked))
+
+  return left.length === 0 ? 'it holds nothing of its own, only what the copy took along' : `it holds changes that are not pushed (${someOf(left)})`
+}
+
+const LISTED = '/cleanup <task id> removes one, /cleanup all every one listed; what is not pushed in it is lost. Nothing was removed.'
+
+/**
+ * `/cleanup`: the workspaces a Lore run kept for its done tasks, each with
+ * what keeps it. Named (or `all`), the owner's own hand removes them, changes
+ * not pushed and all, and the board forgets them. Only the folder the mod made
+ * for a done task is ever removed.
+ */
+async function cleanupRun($: EngineInterface, args: string, origin: string): Promise<string> {
+  const path = await boundLedger($)
+  if (path === undefined) return await unbound($)
+  const ledger = parseLedger((await textAt($, path)) ?? '').ledger
+  if (ledger === undefined) return 'The board does not read: nothing was removed.'
+  const id = ledger.run.id
+  if (ledger.run.lore === undefined) return `Run ${id} is no Lore run: /cleanup removes only the workspaces a Lore run copied. A git worktree is git's: git worktree list shows them.`
+  const here = await backendOf($)
+  if (here === null || here.kind !== 'lore') return `The Lore workspace of run ${id} is not found from here: nothing was removed.`
+  const none = `Run ${id} keeps no workspace of a done task.`
+  const named = args.split(/[\s,]+/).filter(one => one !== '')
+  if (named.length === 0) {
+    const kept = ledger.tasks.filter(one => one.status === 'done' && one.workspace !== undefined)
+    if (kept.length === 0) return none
+    const lines: string[] = []
+    for (const one of kept) {
+      const folder = one.workspace!
+      lines.push(`- ${one.id} at ${folder}: ${await whyKept($, here.root, folder, ownFolder(here.root, ledger, one.id) === folder)}`)
+    }
+
+    return [`Run ${id} keeps the workspaces of ${kept.length} done task${kept.length === 1 ? '' : 's'}:`, ...lines, LISTED].join('\n')
+  }
+  if (!OWNER_ORIGINS.has(origin)) return 'Not done. Only the owner removes workspaces, typing /cleanup in the terminal, the desktop app or Remote Control. Nothing was removed.'
+  const wanted = named.includes('all') ? ledger.tasks.filter(one => one.status === 'done' && one.workspace !== undefined).map(one => one.id) : [...new Set(named)]
+  if (wanted.length === 0) return none
+  const removed = new Map<string, string>()
+  const refused: string[] = []
+  let isTried = false
+  for (const taskId of wanted) {
+    const one = ledger.tasks.find(task => task.id === taskId)
+    if (one === undefined) refused.push(`${taskId} (there is no such task in this run)`)
+    else if (one.status !== 'done') refused.push(`${taskId} (it is ${one.status}, not done)`)
+    else if (one.workspace === undefined) refused.push(`${taskId} (it keeps no workspace)`)
+    else if (ownFolder(here.root, ledger, taskId) !== one.workspace) refused.push(`${taskId} (it is not the folder the mod made for this task)`)
+    else {
+      isTried = true
+      const folder = one.workspace
+      // A folder gone already is only forgotten.
+      const isThere = await $.fs.exists(folder).catch(() => true)
+      const failed = isThere ? await runProgram($, ['rm', '-rf', '--', folder], LONG_MS).then(ran => (ran.exitCode === 0 ? undefined : lastLine(ran))) : undefined
+      if (failed === undefined) removed.set(taskId, folder)
+      else refused.push(`${taskId} (rm did not remove it: ${failed})`)
+    }
+  }
+  if (removed.size > 0) {
+    await mutate($, path, raw => {
+      let isChanged = false
+      for (const task of raw.tasks) {
+        if (task.status === 'done' && task.workspace !== undefined && removed.get(task.id) === task.workspace) {
+          delete task.workspace
+          isChanged = true
+        }
+      }
+
+      return { value: undefined, isChanged }
+    })
+    for (const taskId of removed.keys()) {
+      isolated.delete(taskId)
+      workspaces.delete(taskId)
+    }
+  }
+  const free = isTried ? await freeGbAt($, here.root) : undefined
+  const ids = [...removed.keys()]
+
+  return [
+    ids.length === 0 ? '' : `Removed the workspace${ids.length === 1 ? '' : 's'} of ${ids.join(', ')}.`,
+    refused.length === 0 ? '' : `Not removed: ${refused.join(', ')}.`,
+    typeof free === 'number' ? `${free} GB are free now on the disk that holds ${here.root}.` : '',
+  ]
+    .filter(part => part !== '')
+    .join(' ')
+}
+
 /** `run_sync_base`: the orchestrator has the mod bring the base branch into the run branch, so the run can be approved again. */
 async function runSyncBase($: EngineInterface, call: ToolCall): Promise<{ result: string; text: string; isError?: true }> {
   const fail = (reason: string) => ({ isError: true as const, result: `${NOT_DONE} ${reason}`, text: `${NOT_DONE} ${reason}` })
@@ -2508,9 +2614,9 @@ async function loreMergeTool($: EngineInterface, call: ToolCall, isCheckOnly: bo
     const scanned = await lore($, ['status', '--scan'], task.workspace, LONG_MS)
     const status = statusOf(scanned.out)
     const hereNow = await backendOf($)
-    const derived = hereNow === null || projectOf(ledger) === undefined ? undefined : workspaceOf(workspacesOf(hereNow.root, projectOf(ledger)?.lore?.workspaces), ledger.run.id, id)
+    const derived = hereNow === null ? undefined : ownFolder(hereNow.root, ledger, id)
     // Only the folder the mod made for this task is compared with the owner's workspace, and only it is removed.
-    const own = hereNow !== null && derived !== undefined && derived === task.workspace && isRemovable(hereNow.root, ledger, derived) ? { root: hereNow.root, folder: derived } : undefined
+    const own = hereNow !== null && derived !== undefined && derived === task.workspace ? { root: hereNow.root, folder: derived } : undefined
     const left = status === undefined ? undefined : notInLore(status, own === undefined ? new Set() : await copiedIn($, own.root, own.folder, status.untracked))
     if (left !== undefined && left.length === 0 && own !== undefined) {
       await runProgram($, ['rm', '-rf', '--', own.folder], LONG_MS)
@@ -3085,6 +3191,11 @@ async function switchOn($: EngineInterface): Promise<void> {
     name: 'merged',
     description: 'Mark a task of the bound run done by your word: its pull request is merged',
     argumentHint: '<task id>',
+  })
+  await listCommand($, {
+    name: 'cleanup',
+    description: 'List the workspaces the bound Lore run kept for its done tasks and what keeps each; with task ids or all, remove them, changes not pushed and all',
+    argumentHint: '[<task id>… | all]',
   })
   await listCommand($, {
     name: 'rotate',
@@ -3929,6 +4040,14 @@ export const register: Register = (on, options) => {
     if (written.error === undefined && !written.value.isError) carry(written.value)
 
     return { text: written.error ?? written.value.text }
+  })
+
+  on('command.run', { command: 'cleanup' }, async ($, e) => {
+    const text = await cleanupRun($, e.args, e.origin.kind)
+    seen = undefined
+    await refresh($, false)
+
+    return { text }
   })
 
   on('command.run', { command: 'rotate' }, async $ => {
