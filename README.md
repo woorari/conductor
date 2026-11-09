@@ -86,6 +86,7 @@ A run lives in `.claude/conductor/runs/<run id>/`: its `ledger.json`, and `hando
 | `/merged <task>` | Mark a task done by your word: its pull request is merged |
 | `/rotate` | Compact the orchestrator's session with a handover now |
 | `/approve-main` | In Lore: approve the run branch for the base branch; the mod merges exactly that revision now |
+| `/cleanup [<task>… \| all]` | In Lore: list the workspaces kept for done tasks and what keeps each; with task ids or `all`, remove them |
 
 The orchestrator and the workers change the board only through the mod's tools: `task_add`, `task_update`, `run_plan`, `board_post`, `board_rule`, `board_read`, `problem_report`, `problem_resolve`, `problem_assign`, `merge_check` and `merge`. A Lore workspace adds `run_sync_base`; a project with Linear tickets adds `ticket_read` and `ticket_file`.
 
@@ -96,7 +97,7 @@ The orchestrator and the workers change the board only through the mod's tools: 
 `/board` opens the **Run board** pane. In the desktop app it is one picture: the run's progress and time, the open problems, what needs your decision, each worker as a lane on a time axis, and what is building now, handed back, up next and ready to merge. A terminal draws the same board as text. In the desktop app, each queued task (up to 8) has a picker for its model tier under the picture; `/tier` sets any queued task's tier.
 
 - The pane reads the run's ledger every 2 seconds. It costs no model tokens, and an "Updated HH:MM" line says when the ledger was last written.
-- A building worker shows what it was last seen doing and how many tokens its context holds. One with no sign of life for 10 minutes is called silent.
+- A building worker shows what it was last seen doing and how many tokens its context holds. One with no sign of life for 10 minutes is called silent. One that has made no tool call for 30 minutes gets a warning on the board, and the orchestrator is woken with what it can do; the warning goes once the worker is heard from again or its task leaves building.
 - The orchestrator's own line says how full its context is and how often it was compacted: `Orchestrator 43% full · compacted twice`, or `compaction waits` when a compaction is due and has not gone through.
 - The mod alone writes the ledger. The orchestrator and the workers change it only through the mod's tools, and its hooks record each worker's start, activity and hand-back.
 
@@ -105,7 +106,7 @@ The orchestrator and the workers change the board only through the mod's tools: 
 - `/conduct` starts a run with its plan in draft and asks the orchestrator to plan it.
 - The orchestrator slices the work with `task_add`: each task is at most 12 files or folders, with its ticket, the files it is expected to change, what it waits for, and a model tier with the reason for it.
 - The plan check lists open tasks that could run at the same time on the same file, and tasks that name no files. `board_read` shows what it still finds, under "Plan check".
-- `run_plan` proposes the plan, and no worker starts before `/approve`.
+- `run_plan` proposes the plan, and no worker starts before `/approve`. A reply of yours that only approves, such as a button "Approve, start now", counts as `/approve`. A reply from another session, a channel, a plugin or a scheduled prompt approves nothing, and neither does one that asks, adds a condition or names something else.
 - For a run from a spec, the orchestrator drafts the tickets the spec needs and files them only after your approval, recording each number with `task_update`.
 
 ### Workers and the model router
@@ -177,6 +178,8 @@ A long run fills the orchestrator's context. The mod compacts it before it is fu
 
 The session's binding to its run is kept in the mod's own store under the session's id, for 30 days, and taken up again when the session starts. A worker whose session was restarted is listed with its agent id, so the orchestrator can start it again by that id.
 
+When a worker cannot be resumed, the orchestrator takes its task back by setting it to `returned`. The worker and its subagents are retired: the mod refuses every later tool call of theirs, the board's tools included, also after a reload. A worker started again with the task's id as its name gets the same workspace and is told to look at what the earlier one left.
+
 ### Run settings
 
 A run's ledger takes two settings of its own: `maxParallel`, the most workers building at once (3 when absent), and `workerHandbackTokens` (above).
@@ -232,7 +235,7 @@ If the app you run Claude Code in doesn't find `lore` (it looks on the PATH, the
 - `branchPrefix`: the start of each run branch's name (default `conductor/`).
 - `workspaces`: where workers' workspaces go. By default it is a folder beside your workspace, `<workspace>.conductor`, never inside it.
 - `carry`: ignored folders a worker's copy takes along, such as build caches. Nothing else that is untracked or ignored goes in, so local secrets, saves and logs stay out.
-- `minFreeGB`: no new workspace is made with less free disk than this (default 20).
+- `minFreeGB`: no new workspace is made with less free disk than this (default 20). `/approve` also wants this much free for each worker that may build at once (`maxParallel`, else 3) on the disk that holds your workspace; otherwise the plan stays proposed and you are told how much to free.
 - `lockPatterns`: files a worker locks with `lore lock acquire` before changing them, because binary files cannot be merged.
 - `check`: a program the mod runs on each revision you judge green, and on the run branch before `/approve-main`. It runs without Claude Code's permission prompt, so `/conduct` names it when the run starts.
 
@@ -245,7 +248,8 @@ If the app you run Claude Code in doesn't find `lore` (it looks on the PATH, the
 ### Merging in Lore
 
 - A worker commits and pushes its own branch and hands back with the revision it pushed (`task_update` with `revision`). A new revision on a green task sends it back to review.
-- `merge` merges a green task's branch into the run branch, pinned to that revision, one at a time, in the run's own workspace. A conflict is never resolved by the mod: the merge is aborted, and the task comes back blocked, with the files named. A clean, pushed worker workspace is removed afterwards.
+- `merge` merges a green task's branch into the run branch, pinned to that revision, one at a time, in the run's own workspace. A conflict is never resolved by the mod: the merge is aborted, and the task comes back blocked, with the files named. A worker workspace is removed afterwards when everything in it is pushed. Files the copy took along unchanged from your workspace, such as `.claude/settings.local.json`, don't count. A workspace that is kept names what keeps it.
+- `/cleanup` lists the workspaces kept for done tasks and what keeps each. `/cleanup <task>…` or `/cleanup all` removes them, changes not pushed and all. Only you can, from the terminal, the desktop app or Remote Control, and only the folder the mod made for that task is removed.
 - When every task is merged and no blocker or warning is open, you type `/approve-main`. It records your approval of the run branch's revision, unprotects the base branch, merges the run branch into it on the server (`lore branch merge into`), and protects it again, whatever happened.
 - If the base branch moved since the run branch last took it in, `/approve-main` refuses: the orchestrator brings it in with `run_sync_base`, and you approve again.
 - `/approve-main` is taken only from you: the terminal, the desktop app or Remote Control, never another session or a scheduled run.
