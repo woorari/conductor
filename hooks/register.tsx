@@ -344,6 +344,20 @@ function fence(task: Task): void {
   pending.delete(task.id)
 }
 
+/** Puts the subagents retired with a task's worker on the board beside it, so the fence holds after a reload too. */
+async function keepFenced($: EngineInterface, path: string, taskId: string): Promise<void> {
+  const ids = [...retired].filter(([, task]) => task === taskId).map(([agentId]) => agentId)
+  await mutate($, path, raw => {
+    const task = raw.tasks.find(one => one.id === taskId)
+    const known = task !== undefined && Array.isArray(task.retired) ? (task.retired as string[]) : []
+    const more = ids.filter(id => !known.includes(id))
+    if (task === undefined || more.length === 0) return { value: undefined, isChanged: false }
+    task.retired = [...known, ...more]
+
+    return { value: undefined, isChanged: true }
+  })
+}
+
 /**
  * Whether this repository is on GitHub: its `origin` names a repository on
  * github.com. Asked before anything asks GitHub, since a pull request's number
@@ -3241,8 +3255,14 @@ export const register: Register = (on, options) => {
       if ((started as { agentId?: string }).agentId === undefined) await release()
       else {
         const child = (started as { agentId?: string }).agentId
-        if (decided.kind === 'child' && child !== undefined && e.parentAgentId !== undefined) parents.set(child, e.parentAgentId)
-        await heard($, path, e.name ?? decided.taskId, decided, started)
+        const parent = e.parentAgentId
+        if (decided.kind === 'child' && child !== undefined && parent !== undefined) parents.set(child, parent)
+        // Its parent was taken back while the engine started it: the subagent goes with its parent.
+        const takenFrom = parent === undefined ? undefined : retired.get(parent)
+        if (decided.kind === 'child' && child !== undefined && takenFrom !== undefined) {
+          retired.set(child, takenFrom)
+          await keepFenced($, path, takenFrom)
+        } else await heard($, path, e.name ?? decided.taskId, decided, started)
       }
 
       return started
@@ -3480,7 +3500,10 @@ export const register: Register = (on, options) => {
       try {
         const path = await boundLedger($)
         const taken = path === undefined ? undefined : parseLedger(await $.fs.read(path)).ledger?.tasks.find(one => one.id === (e as unknown as ToolCall).task)
-        if (taken !== undefined) fence(taken)
+        if (path !== undefined && taken !== undefined) {
+          fence(taken)
+          await keepFenced($, path, taken.id)
+        }
       } catch {
         // The ledger holds it: the next reload fences it.
       }

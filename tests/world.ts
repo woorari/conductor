@@ -155,6 +155,8 @@ export type World = {
   agentIds: string[]
   /** When set, the engine starts no agent and says this instead. */
   noStart: string | undefined
+  /** While set, the engine holds every agent start until it settles: a start under way. */
+  holdStart: Promise<void> | undefined
   /** No file can be written: the disk is full, or the folder is not the session's to write. */
   isReadOnly: boolean
   /** Every tool call that reached the engine: the mod's own tools never do. */
@@ -250,6 +252,7 @@ export function world(on: On, files: Files, repo: { root: string } | null = { ro
   const state: World = {
     agentIds: [],
     noStart: undefined,
+    holdStart: undefined,
     isReadOnly: false,
     ran: [],
     bash: [],
@@ -455,7 +458,8 @@ export function world(on: On, files: Files, repo: { root: string } | null = { ro
   on('ui.panes', () => ({
     value: [{ id: PANE.requestId, title: PANE.props.title, isShown: true, isFocused: false, isPlaced: true }],
   }))
-  on('agent.spawn', (_$, e) => {
+  on('agent.spawn', async (_$, e) => {
+    if (state.holdStart !== undefined) await state.holdStart
     if (state.noStart !== undefined) return { deny: state.noStart }
     state.spawns.push({ name: e.name, model: e.model, subagentType: e.subagentType })
     state.briefs.push(e.prompt)

@@ -173,6 +173,7 @@ test("a worker taken back takes its own subagents with it, and starts no new one
   const late = (await spawn($, undefined, 'a1')) as { deny?: string }
   expect(late.deny).toBe(FENCED)
   expect(((await spawn($, undefined, 'c1')) as { deny?: string }).deny).toBe(FENCED)
+  expect(stored(files).tasks[0]?.retired, 'its subagents are on the board, so the fence holds after a reload').toEqual(['a1', 'c1', 'g1'])
 
   // The new worker's own subagent works.
   await spawn($, 't1')
@@ -180,4 +181,24 @@ test("a worker taken back takes its own subagents with it, and starts no new one
   await spawn($, undefined, 'a2')
   expect(stored(files).tasks[0]).toMatchObject({ status: 'building', agentId: 'a2' })
   expect((await bash($, 'ls', 'c2')).deny).toBeUndefined()
+})
+
+test('a subagent the worker was starting while its task was taken back is fenced as it starts', async ($, on) => {
+  const { files, engine } = await lored($, on)
+  engine.agentIds.push('a1', 'c1')
+  const path = `${BASE}/ABC-12/t1`
+  await spawn($, 't1')
+  await worktree($, 'agent-a1')
+  engine.dirs.push(path, `${path}/.lore`)
+
+  // The engine is slow to start the subagent: the take-back lands while it starts.
+  let open = (): void => undefined
+  engine.holdStart = new Promise<void>(resolve => (open = resolve))
+  const starting = spawn($, undefined, 'a1')
+  await raise($, { tool: 'mcp__conductor__task_update', tool_use_id: 'take-back', task: 't1', status: 'returned' })
+  open()
+  engine.holdStart = undefined
+  expect(((await starting) as { agentId?: string }).agentId, 'the engine started it').toBe('c1')
+  expect((await bash($, 'ls', 'c1')).deny).toBe(FENCED)
+  expect(stored(files).tasks[0]?.retired).toEqual(['a1', 'c1'])
 })
