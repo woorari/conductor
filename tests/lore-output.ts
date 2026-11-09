@@ -108,6 +108,16 @@ A .claude/settings.local.json
 Tracked changes: 2 added
 `
 
+/** A copy's untracked folder listed by itself, not file by file. */
+export const STATUS_COPIED_FOLDER = `Repository 01a1b056c981721b88ecc4b6b66d6f45
+On branch conductor/S-1-spike/t1 revision 2 -> ${REV_T1}
+Remote revision 2 -> ${REV_T1}
+Local branch in sync with remote
+Untracked files:
+A .claude/
+Tracked changes: 1 added
+`
+
 export const STATUS_MERGING = `Repository 01a1b056c981721b88ecc4b6b66d6f45
 On branch conductor/S-1-spike revision 3 -> ${REV_RUN}
 Remote revision 3 -> ${REV_RUN}

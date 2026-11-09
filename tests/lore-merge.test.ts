@@ -2,7 +2,7 @@ import { expect, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
 import type { Ledger } from '../types'
-import { BRANCH_INFO_PUSHED, MERGE_ABORT, MERGE_CLEAN, MERGE_CONFLICT, PUSH_PROTECTED, PUSH_RUN, REV_MAIN, REV_RUN, REV_T1, STATUS_CLEAN, STATUS_COPIED, STATUS_UNTRACKED } from './lore-output'
+import { BRANCH_INFO_PUSHED, MERGE_ABORT, MERGE_CLEAN, MERGE_CONFLICT, PUSH_PROTECTED, PUSH_RUN, REV_MAIN, REV_RUN, REV_T1, STATUS_CLEAN, STATUS_COPIED, STATUS_COPIED_FOLDER, STATUS_UNTRACKED } from './lore-output'
 import { BASE, LORE_ROOT, LORE_RUNS, RUN, RUN_BRANCH, answers, lored, ok, pinnable, ranIn, stored, task } from './lore-world'
 import { LINEAR_TOKEN } from './world'
 
@@ -171,7 +171,7 @@ test('a file the worker changed after the copy is its own, and keeps the workspa
   copiedAlong(world, '{ "hooks": {} }\n')
 
   const said = await call($, 'merge', MERGE)
-  expect(said.text).toContain('it holds changes that are not pushed (.claude/settings.local.json)')
+  expect(said.text).toContain('it holds changes that are not pushed (.claude/, .claude/settings.local.json)')
   expect(world.engine.calls.map(one => one.argv)).not.toContainEqual(['rm', '-rf', '--', T1_WS])
   expect(stored(world.files).tasks[0]?.workspace).toBe(T1_WS)
 })
@@ -181,7 +181,44 @@ test("a file the owner's workspace does not hold is the worker's, and keeps the 
   copiedAlong(world)
   delete world.files[`${LORE_ROOT}/.claude/settings.local.json`]
 
-  expect((await call($, 'merge', MERGE)).text).toContain('it holds changes that are not pushed (.claude/settings.local.json)')
+  expect((await call($, 'merge', MERGE)).text).toContain('it holds changes that are not pushed (.claude/, .claude/settings.local.json)')
+  expect(world.engine.calls.map(one => one.argv)).not.toContainEqual(['rm', '-rf', '--', T1_WS])
+})
+
+test('bytes the engine does not hand back as base64 are never taken for the same, and keep the workspace', async ($, on) => {
+  const world = await green($, on)
+  copiedAlong(world)
+  world.engine.isBytesWithoutBase64 = true
+
+  expect((await call($, 'merge', MERGE)).text).toContain('it holds changes that are not pushed (.claude/, .claude/settings.local.json)')
+  expect(world.engine.calls.map(one => one.argv)).not.toContainEqual(['rm', '-rf', '--', T1_WS])
+})
+
+/** As copiedAlong, with Lore listing the untracked folder by itself; the copy's folder holds `inside`. */
+function folderAlong(world: Awaited<ReturnType<typeof green>>, inside: { name: string; kind: 'dir' | 'file' }[]): void {
+  copiedAlong(world)
+  world.engine.lore.shift()
+  world.engine.lore.unshift(answers(['status', '--scan'], ok(STATUS_COPIED_FOLDER), T1_WS))
+  world.engine.listings[`${T1_WS}/.claude`] = inside
+}
+
+test("a folder Lore lists by itself is the owner's only when every file in it is: then the workspace is removed", async ($, on) => {
+  const world = await green($, on)
+  folderAlong(world, [{ name: 'settings.local.json', kind: 'file' }])
+
+  expect((await call($, 'merge', MERGE)).text).toContain('Its workspace is removed: everything in it is in Lore.')
+  expect(world.engine.calls.map(one => one.argv)).toContainEqual(['rm', '-rf', '--', T1_WS])
+})
+
+test("a file the worker added inside a folder the copy took along keeps the workspace, though Lore lists only the folder", async ($, on) => {
+  const world = await green($, on)
+  folderAlong(world, [
+    { name: 'settings.local.json', kind: 'file' },
+    { name: 'notes.md', kind: 'file' },
+  ])
+  world.files[`${T1_WS}/.claude/notes.md`] = { text: 'the worker\'s own\n', mtimeMs: 1 }
+
+  expect((await call($, 'merge', MERGE)).text).toContain('it holds changes that are not pushed (.claude/)')
   expect(world.engine.calls.map(one => one.argv)).not.toContainEqual(['rm', '-rf', '--', T1_WS])
 })
 

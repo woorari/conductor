@@ -215,6 +215,8 @@ export type World = {
   listings: Record<string, { name: string; kind: 'dir' | 'file' }[]>
   /** Folders that exist, for `fs.exists`: a Lore workspace's `.lore`, say. */
   dirs: string[]
+  /** An engine whose reads of bytes answer without the `base64` they carry: nothing read so is the same as anything. */
+  isBytesWithoutBase64: boolean
   /** The session's working directory, as `$.session.cwd()` answers it. */
   cwd: string
   /** What the person's own WorktreeCreate settings hook answers, beneath the mod; none answers nothing. */
@@ -280,6 +282,7 @@ export function world(on: On, files: Files, repo: { root: string } | null = { ro
     listings: {},
     worktree: {},
     dirs: [],
+    isBytesWithoutBase64: false,
     cwd: repo?.root ?? ROOT,
     registered: [],
     schemas: {},
@@ -414,7 +417,7 @@ export function world(on: On, files: Files, repo: { root: string } | null = { ro
       .map(path => path.slice(e.path.length + 1).split('/')[0] ?? '')
 
     return {
-      value: [...new Set(runs)].map(name => ({ name, kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false })),
+      value: [...new Set(runs)].map(name => ({ name, kind: files[`${e.path}/${name}`] === undefined ? ('dir' as const) : ('file' as const), size: 0, mtimeMs: 0, isLink: false })),
     }
   })
   on('fs.stat', (_$, e) => {
@@ -426,8 +429,11 @@ export function world(on: On, files: Files, repo: { root: string } | null = { ro
   })
   on('fs.read', (_$, e) => {
     const found = files[e.path]
+    if (found === undefined) return { deny: `ENOENT: ${e.path}` }
+    // Bytes come back as the engine hands them: `{ base64 }`.
+    if (e.as === 'bytes') return { value: state.isBytesWithoutBase64 ? ({} as { base64: string }) : { base64: btoa(String.fromCharCode(...new TextEncoder().encode(found.text))) } }
 
-    return found === undefined ? { deny: `ENOENT: ${e.path}` } : { value: found.text }
+    return { value: found.text }
   })
   on('fs.write', (_$, e) => {
     if (state.isReadOnly) return { deny: `EROFS: ${e.path}` }

@@ -1114,32 +1114,65 @@ function isRemovable(root: string, ledger: Ledger, folder: string): boolean {
   return base !== '' && base !== '/' && isInside(base, folder) && !isOwners
 }
 
-/** How many untracked entries of a copy are compared with the owner's workspace: past these, the copy is kept anyway. */
+/** How many files of a copy are compared with the owner's workspace: past these, the copy is kept anyway. */
 const MOST_COMPARED = 50
+
+/** A file's bytes as the engine hands them, `{ base64 }`; anything else does not read. */
+async function bytesOf($: EngineInterface, path: string): Promise<string | undefined> {
+  const read: unknown = await $.fs.read(path, { as: 'bytes' }).catch(() => undefined)
+  const base64 = typeof read === 'object' && read !== null ? (read as { base64?: unknown }).base64 : undefined
+
+  return typeof base64 === 'string' ? base64 : undefined
+}
 
 /** Whether two files hold the same bytes; a file that does not read is not the same. */
 async function sameBytes($: EngineInterface, one: string, other: string): Promise<boolean> {
-  const [first, second] = await Promise.all([one, other].map(path => $.fs.read(path, { as: 'bytes' }).then(read => JSON.stringify(read)).catch(() => undefined)))
+  const [first, second] = await Promise.all([bytesOf($, one), bytesOf($, other)])
 
   return first !== undefined && first === second
 }
 
 /**
+ * Whether a folder of the copy holds only what the owner's holds at the same
+ * path: every file in it, however deep, byte for byte. A link, or more files
+ * than `left` allows, is not compared, so the folder is not the owner's.
+ */
+async function sameFolder($: EngineInterface, root: string, folder: string, relative: string, left: { files: number }): Promise<boolean> {
+  if ((await $.fs.stat(`${root}/${relative}`).catch(() => undefined))?.kind !== 'dir') return false
+  const entries = await $.fs.list(`${folder}/${relative}`).catch(() => undefined)
+  if (entries === undefined) return false
+  for (const entry of entries) {
+    const path = `${relative}/${entry.name}`
+    if (entry.isLink || (entry.kind !== 'dir' && entry.kind !== 'file')) return false
+    if (entry.kind === 'dir') {
+      if (!(await sameFolder($, root, folder, path, left))) return false
+      continue
+    }
+    left.files -= 1
+    if (left.files < 0 || !(await sameBytes($, `${root}/${path}`, `${folder}/${path}`))) return false
+  }
+
+  return true
+}
+
+/**
  * The untracked entries of a task's workspace that came with the copy, not
  * from its worker: the owner's workspace holds the same at the same path, a
- * folder as a folder and a file byte for byte. Such as the owner's own
+ * file byte for byte and a folder file by file. Such as the owner's own
  * `.claude/settings.local.json`, which Lore does not track.
  */
 async function copiedIn($: EngineInterface, root: string, folder: string, untracked: readonly string[]): Promise<Set<string>> {
   const copied = new Set<string>()
-  const kindOf = async (path: string) => (await $.fs.stat(path).catch(() => undefined))?.kind
-  for (const entry of untracked.slice(0, MOST_COMPARED)) {
+  const left = { files: MOST_COMPARED }
+  for (const entry of untracked) {
     const relative = entry.replace(/\/+$/, '')
     if (relative === '' || relative.startsWith('/') || relative.split('/').includes('..')) continue
-    const isSame = entry.endsWith('/')
-      ? (await kindOf(`${root}/${relative}`)) === 'dir' && (await kindOf(`${folder}/${relative}`)) === 'dir'
-      : await sameBytes($, `${root}/${relative}`, `${folder}/${relative}`)
-    if (isSame) copied.add(entry)
+    if (entry.endsWith('/')) {
+      if (await sameFolder($, root, folder, relative, left)) copied.add(entry)
+      continue
+    }
+    left.files -= 1
+    if (left.files >= 0 && (await sameBytes($, `${root}/${relative}`, `${folder}/${relative}`))) copied.add(entry)
   }
 
   return copied
