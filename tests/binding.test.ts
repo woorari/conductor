@@ -5,7 +5,7 @@ import { APPROVED } from '../hooks/plan'
 import { BOUND_KEPT_DAYS, boundKey, isStale, kept } from '../hooks/store'
 import type { Ledger, Merge } from '../types'
 import { LEDGER, NOW } from './fixture'
-import { board, file, ledgerPath, mergeCommit, pull, start, world } from './world'
+import { ROOT, board, file, ledgerPath, mergeCommit, pull, start, world } from './world'
 import type { Files } from './world'
 
 const PATH = ledgerPath('demo')
@@ -22,6 +22,8 @@ describe('what the store keeps of a binding', () => {
     expect(boundKey('3ec754b5')).toBe('bound:3ec754b5')
     expect(kept({ run: 'Nightly', at: '2026-10-09T08:52:31.025Z' })).toEqual({ run: 'Nightly', at: '2026-10-09T08:52:31.025Z' })
     expect(kept({ run: 'Nightly' })).toEqual({ run: 'Nightly' })
+    expect(kept({ run: 'Nightly', root: '/home/owner/work' }), 'the home it was bound in').toEqual({ run: 'Nightly', root: '/home/owner/work' })
+    expect(kept({ run: 'Nightly', root: 'work' }), 'a root that is no absolute path is left out').toEqual({ run: 'Nightly' })
     for (const other of [undefined, null, 'Nightly', 7, [], {}, { run: 7 }, { run: '../x' }, { run: '' }]) {
       expect(kept(other), JSON.stringify(other)).toBeUndefined()
     }
@@ -45,7 +47,7 @@ test('binding a session writes it down under the session\'s id; letting go remov
   expect(engine.store).toEqual({})
 
   await board($, 'demo')
-  expect(engine.store).toEqual({ [KEY]: { run: 'demo', at: new Date(NOW).toISOString() } })
+  expect(engine.store).toEqual({ [KEY]: { run: 'demo', at: new Date(NOW).toISOString(), root: ROOT } })
   await board($, 'none')
   expect(engine.store).toEqual({})
 

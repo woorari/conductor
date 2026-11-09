@@ -141,6 +141,7 @@ const EMPTY: BoardState = { runId: null, ledger: null, error: null }
 const board = atom({ plugin: 'conductor', key: 'board' } as const, EMPTY)
 const nowMs = atom({ plugin: 'conductor', key: 'nowMs' } as const, 0)
 const pinnedRun = atom({ plugin: 'conductor', key: 'pinnedRun' } as const, null)
+const pinnedRoot = atom({ plugin: 'conductor', key: 'pinnedRoot' } as const, null)
 
 // What the poll remembers between ticks. A reload starts these over, and the
 // first tick after it reads the ledger again: nothing drawn depends on them.
@@ -415,14 +416,52 @@ async function ioOf($: EngineInterface): Promise<Io> {
   }
 }
 
-/** The session's home: found walking up from its folder; a repository home is the repository git or Lore names, as before. */
+/**
+ * The session's home. A session bound to a run keeps the home it bound in,
+ * wherever its working directory went since: a bare cd into the run's Lore
+ * workspace, which holds a `.claude/conductor` of its own, made that
+ * workspace the home, and every tool lost the ledger (COR-1, 2026-11-09).
+ * Any other session finds its home walking up from its folder; a repository
+ * home is the repository git or Lore names, as before.
+ */
 async function homeOf($: EngineInterface): Promise<Home | null> {
   if (home !== undefined) return home
   const cwd = await $.session.cwd().catch(() => '')
   const repo = await $.session.repo().catch(() => null)
-  home = cwd === '' ? null : await findHome(await ioOf($), cwd, repo?.root ?? null)
+  const io = await ioOf($)
+  const anchor = await boundRoot($)
+  if (anchor !== undefined) {
+    // Git named the root a repository home when the session bound there.
+    const named = repo?.root === anchor || (await io.exists(`${anchor}/.git`)) ? anchor : null
+    const found = await findHome(io, anchor, named)
+    if (found?.root === anchor) {
+      home = found
+
+      return home
+    }
+  }
+  home = cwd === '' ? null : await findHome(io, cwd, repo?.root ?? null)
 
   return home
+}
+
+/**
+ * The root of the home this session's run was bound in: held in its state,
+ * or after a restart read from the binding the mod's store kept. Undefined
+ * while bound to no run, for a binding kept before roots were, and for a run
+ * whose ledger is gone. Never throws.
+ */
+async function boundRoot($: EngineInterface): Promise<string | undefined> {
+  try {
+    const held = await read($, pinnedRoot)
+    if (held !== null) return held
+    const was = kept(await $.store.get(boundKey(await $.session.id())))
+    if (was?.root === undefined || !(await $.fs.exists(ledgerPath(was.root, was.run)))) return undefined
+
+    return was.root
+  } catch {
+    return undefined
+  }
 }
 
 /** Whether the mod switched on in this process: its commands, tools and timers are there. */
@@ -1422,6 +1461,8 @@ async function runBase($: EngineInterface): Promise<string> {
 
 /** The folder that holds the run folders: the home's root, which in a repository home is the repository's. */
 async function runsRootOf($: EngineInterface, fallback: string): Promise<string> {
+  const held = await read($, pinnedRoot)
+  if (held !== null) return held
   if (root === undefined) root = await rootOf($)
 
   return root ?? fallback
@@ -1446,10 +1487,17 @@ async function rootOf($: EngineInterface, rescan = false): Promise<string | null
   return (await backendOf($))?.root ?? null
 }
 
-/** The ledger this session's signals and tools write: the bound run's, or undefined. */
+/**
+ * The ledger this session's signals and tools write: the bound run's, or
+ * undefined. It lies in the home the session bound in, never wherever its
+ * working directory is now; its workers, which share the session's state,
+ * read the same one.
+ */
 async function boundLedger($: EngineInterface): Promise<string | undefined> {
   const run = await read($, pinnedRun)
   if (run === null) return undefined
+  const held = await read($, pinnedRoot)
+  if (held !== null) return ledgerPath(held, run)
   if (root === undefined) root = await rootOf($)
 
   return root === null ? undefined : ledgerPath(root, run)
@@ -1463,7 +1511,11 @@ async function boundLedger($: EngineInterface): Promise<string | undefined> {
  * bound to no run, and /approve refused).
  */
 async function bind($: EngineInterface, run: string | null): Promise<void> {
+  // The home goes with the run, so the ledger is found there whatever the working directory does next.
+  if (run !== null && root === undefined) root = await rootOf($).catch(() => null)
+  const homeRoot = run === null ? null : (root ?? null)
   await update($, pinnedRun, () => run)
+  await update($, pinnedRoot, () => homeRoot)
   try {
     const own = boundKey(await $.session.id())
     if (run === null) {
@@ -1472,7 +1524,7 @@ async function bind($: EngineInterface, run: string | null): Promise<void> {
       return
     }
     const now = await $.clock.now()
-    await $.store.set(own, { run, at: iso(now) })
+    await $.store.set(own, { run, at: iso(now), ...(homeRoot === null ? {} : { root: homeRoot }) })
     // The store is one file for every session there ever was: what is old is dropped here.
     for (const key of await $.store.keys()) {
       if (key.startsWith(boundKey('')) && isStale(await $.store.get(key), now)) await $.store.delete(key)
@@ -1483,29 +1535,45 @@ async function bind($: EngineInterface, run: string | null): Promise<void> {
 }
 
 /**
- * A session that starts again takes up the run it was bound to. One that is
- * bound and not written down yet (bound before the mod kept bindings) is
- * written down. Never throws.
+ * A session that starts again takes up the run it was bound to, in the home
+ * it was bound in. One that is bound and not written down yet (bound before
+ * the mod kept bindings, or before it kept their homes) is written down.
+ * Never throws.
  */
 async function rebind($: EngineInterface): Promise<void> {
   try {
     const own = boundKey(await $.session.id())
     const now = await read($, pinnedRun)
-    const was = kept(await $.store.get(own))?.run
+    const was = kept(await $.store.get(own))
     if (now !== null) {
-      if (was !== now) await $.store.set(own, { run: now, at: iso(await $.clock.now()) })
+      // A reload: the state kept the run. Its home is the one written down with it, else the one found now.
+      if ((await read($, pinnedRoot)) === null) {
+        if (was?.run !== now || was.root === undefined) {
+          if (root === undefined) root = await rootOf($)
+        }
+        const found = was?.run === now && was.root !== undefined ? was.root : (root ?? null)
+        await update($, pinnedRoot, () => found)
+      }
+      const held = await read($, pinnedRoot)
+      if (was?.run !== now || was.root !== (held ?? undefined)) {
+        const at = was?.run === now && was.at !== undefined ? was.at : iso(await $.clock.now())
+        await $.store.set(own, { run: now, at, ...(held === null ? {} : { root: held }) })
+      }
 
       return
     }
     if (was === undefined) return
-    if (root === undefined) root = await rootOf($)
+    if (was.root === undefined && root === undefined) root = await rootOf($)
+    const at = was.root ?? root ?? null
     // A run that is gone is not one to be bound to.
-    if (root === null || !(await $.fs.exists(ledgerPath(root, was)))) {
+    if (at === null || !(await $.fs.exists(ledgerPath(at, was.run)))) {
       await $.store.delete(own)
 
       return
     }
-    await update($, pinnedRun, () => was)
+    await update($, pinnedRun, () => was.run)
+    await update($, pinnedRoot, () => at)
+    if (was.root === undefined) await $.store.set(own, { ...was, root: at })
   } catch {
     // What was kept could not be read: the session is bound to no run, and says how to bind it.
   }
@@ -3197,13 +3265,15 @@ async function show(
 async function refresh($: EngineInterface, rescan: boolean): Promise<void> {
   try {
     if (root === undefined || rescan) root = await rootOf($, rescan)
-    if (root === null) {
+    const pinned = await read($, pinnedRun)
+    // A bound run's ledger lies in the home the session bound in, not wherever a rescan finds the working directory.
+    const where = (pinned === null ? null : await read($, pinnedRoot)) ?? root
+    if (where === null) {
       const error = 'This session is not inside a git repository or a Lore workspace, so there is no run folder to read.'
 
       return await show($, `no-repo`, () => ({ runId: null, ledger: null, error }))
     }
-    const runs = `${root}/${RUNS_DIR}`
-    const pinned = await read($, pinnedRun)
+    const runs = `${where}/${RUNS_DIR}`
     if (pinned === null && (followed === null || rescan)) followed = await newestRun($, runs)
     const runId = pinned ?? followed
     if (runId === null) return await show($, 'no-run', () => EMPTY)
@@ -4056,13 +4126,14 @@ export const register: Register = (on, options) => {
     const bound = boundPath === undefined ? undefined : parseLedger((await textAt($, boundPath)) ?? '').ledger
     const runLore = (await backendOf($))?.kind === 'lore' ? bound?.run.lore : undefined
     const checkArgv = bound?.run.config?.check?.argv
-    // In a home that is not a repository: where the run works, and that its commands run there.
+    // In a home that is not a repository: where the run works, and that its commands run there, in a subshell: a bare
+    // cd moves the session itself, and the workspace it lands in may hold a `.claude/conductor` of its own.
     const fixedIn = bound?.run.workspace
     const quotedRoot = fixedIn === undefined ? '' : fixedIn.root.replace(/'/g, "'\\''")
     const placedIn =
       fixedIn === undefined
         ? undefined
-        : `- This run works in ${await relOf($, fixedIn.root)}, a ${fixedIn.kind === 'lore' ? 'Lore workspace' : 'git repository'} inside this home. Run its commands there: cd -- '${quotedRoot}' first${fixedIn.kind === 'git' ? `, or git -C '${quotedRoot}'` : ''}.`
+        : `- This run works in ${await relOf($, fixedIn.root)}, a ${fixedIn.kind === 'lore' ? 'Lore workspace' : 'git repository'} inside this home. Run its commands there in a subshell, so this session's working directory never moves: (cd -- '${quotedRoot}' && <command>)${fixedIn.kind === 'git' ? `, or git -C '${quotedRoot}'` : ''}.`
     const loreBullets =
       runLore === undefined
         ? []
