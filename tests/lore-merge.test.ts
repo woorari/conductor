@@ -51,30 +51,49 @@ const mergeOf = (branch: string) => (argv: readonly string[]): boolean => {
 }
 const MINUTE = 60_000
 
-test('a merge of a large branch that runs past the ten minutes the engine gives one program is waited for, and lands', { timeoutMs: 30_000 }, async ($, on) => {
+const AWHILE = 5000
+const BACKGROUND = `t1 is merging into ${RUN_BRANCH}, and it goes on in the background: a large Lore merge can take up to an hour. The board tells you when it has landed or why it did not. Merge nothing else until then; anything else may go on.`
+
+test('a merge that outlasts what one tool call waits goes on without the call, and the orchestrator is woken when it lands', { timeoutMs: 30_000 }, async ($, on) => {
   const { files, engine, clock } = await green($, on)
   engine.slow.push({ match: mergeOf(T1_BRANCH), ms: 11 * MINUTE, sleep: clock.sleep })
 
   const merging = call($, 'merge', MERGE)
   await clock.settle()
-  await clock.advance(11 * MINUTE)
+  await clock.advance(AWHILE)
   const said = await merging
-  expect(said.text).toContain(`Merged: t1 is on ${RUN_BRANCH} as ${REV_RUN.slice(0, 7)}`)
+  expect(said.isError).toBeUndefined()
+  expect(said.text).toBe(BACKGROUND)
+  expect(stored(files).merge, 'the claim holds while it merges').toMatchObject({ task: 't1', state: 'merging' })
+  expect(stored(files).tasks[0]?.status).toBe('green')
+
+  await clock.advance(11 * MINUTE)
+  await clock.settle()
   expect(stored(files).tasks[0]).toMatchObject({ status: 'done', mergeCommit: REV_RUN })
   expect(stored(files).merge).toBeUndefined()
+  await clock.advance(AWHILE)
+  expect(engine.woke.at(-1)).toContain(`Run board: Merged: t1 is on ${RUN_BRANCH} as ${REV_RUN.slice(0, 7)}, and the task is done.`)
   expect(engine.stopped).toEqual([])
 })
 
-test('a merge still running after an hour is stopped and aborted; the claim is let go and nothing is pushed', { timeoutMs: 90_000 }, async ($, on) => {
+test('a merge that lands within the call is said by the call alone: nobody is woken for it', async ($, on) => {
+  const { engine, clock } = await green($, on)
+
+  expect((await call($, 'merge', MERGE)).text).toContain(`Merged: t1 is on ${RUN_BRANCH}`)
+  await clock.advance(AWHILE)
+  expect(engine.woke).toEqual([])
+})
+
+test('a merge still running after an hour is stopped and aborted; the claim is let go, nothing is pushed, and the orchestrator is told', { timeoutMs: 90_000 }, async ($, on) => {
   const { files, engine, clock } = await green($, on)
   engine.slow.push({ match: mergeOf(T1_BRANCH), ms: 3 * 60 * MINUTE, sleep: clock.sleep })
 
   const merging = call($, 'merge', MERGE)
   await clock.settle()
+  await clock.advance(AWHILE)
+  expect((await merging).text).toBe(BACKGROUND)
   await clock.advance(61 * MINUTE)
-  const said = await merging
-  expect(said.isError).toBe(true)
-  expect(said.text).toContain('still running after 60 minutes')
+  await clock.settle()
   expect(engine.stopped.map(one => one.slice(2).join(' ')), 'the merge itself is stopped, nothing else').toEqual([`branch merge ${T1_BRANCH} --message=t1: Task t1`])
   const ran = ranIn(engine, RUN_WS)
   const merged = ran.findIndex(one => one.startsWith(`branch merge ${T1_BRANCH}`))
@@ -83,6 +102,8 @@ test('a merge still running after an hour is stopped and aborted; the claim is l
   expect(stored(files).merge, 'the claim is let go: the merge may be tried again').toBeUndefined()
   expect(stored(files).tasks[0]?.status).toBe('green')
   expect(stored(files).run.lore?.head, 'the board puts nothing new on the run branch').toBe(GREEN.run.lore?.head)
+  await clock.advance(AWHILE)
+  expect(engine.woke.at(-1)).toContain('Run board: t1 was not merged: lore did not merge it: lore branch merge was still running after 60 minutes')
 })
 
 test('the next merge after a stopped one starts from the run branch as the server has it', { timeoutMs: 90_000 }, async ($, on) => {
@@ -90,8 +111,11 @@ test('the next merge after a stopped one starts from the run branch as the serve
   engine.slow.push({ match: mergeOf(T1_BRANCH), ms: 3 * 60 * MINUTE, sleep: clock.sleep })
   const first = call($, 'merge', MERGE)
   await clock.settle()
+  await clock.advance(AWHILE)
+  expect((await first).text).toBe(BACKGROUND)
   await clock.advance(61 * MINUTE)
-  expect((await first).text, 'the first merge was stopped, not refused').toContain('still running after 60 minutes')
+  await clock.settle()
+  expect(engine.stopped, 'the first merge was stopped').toHaveLength(1)
   engine.slow.length = 0
   engine.loreCalls.length = 0
 
