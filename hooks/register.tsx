@@ -47,7 +47,7 @@ import { LOOK_AGAIN_MIN, dueForLook, isUnderway, unsettled } from './problems'
 import { APPROVED, PLANNING, conducting, isApproval, newRun, planning } from './plan'
 import type { Conducting } from './plan'
 import { ORCHESTRATOR, briefing, digest, post, relative, rule, touch, waiting } from './posts'
-import { HELPER_TYPES, familyOf, route, unlocked } from './router'
+import { HELPER_TYPES, MAX_BUILDING, familyOf, route, unlocked } from './router'
 import type { Route, Spawn } from './router'
 import {
   acted,
@@ -783,10 +783,8 @@ async function prepareWorkspace($: EngineInterface, at: Making): Promise<{ path:
   if (rootDisk.exitCode !== 0 || pathDisk.exitCode !== 0 || rootDisk.stdout.trim() !== pathDisk.stdout.trim()) {
     return fail(`${at.path} lies on another disk than ${at.root} (or its disk could not be read), so a copy there would be a full copy, not a copy-on-write one. Put the workspaces on the same disk (lore.workspaces in .claude/conductor/config.json)`)
   }
-  const df = await runProgram($, ['df', '-Pk', at.path])
-  const freeKb = Number(df.stdout.trim().split(/\n/).at(-1)?.trim().split(/\s+/)[3])
-  if (df.exitCode !== 0 || !Number.isFinite(freeKb)) return fail(`df did not say how much disk is free: ${lastLine(df)}`)
-  const freeGb = Math.floor(freeKb / 1024 / 1024)
+  const freeGb = await freeGbAt($, at.path)
+  if (typeof freeGb === 'string') return fail(freeGb)
   if (freeGb < at.minFreeGB) {
     return fail(`only ${freeGb} GB are free on the disk that holds ${at.path}, and a worker's workspace needs at least ${at.minFreeGB} GB free (lore.minFreeGB in .claude/conductor/config.json)`)
   }
@@ -1046,6 +1044,29 @@ async function checkOnGreen($: EngineInterface, taskId: unknown): Promise<void> 
   }
 }
 
+/** How many whole GB are free on the disk that holds a path, as df says; or why df did not say. */
+async function freeGbAt($: EngineInterface, path: string): Promise<number | string> {
+  const df = await runProgram($, ['df', '-Pk', path])
+  const freeKb = Number(df.stdout.trim().split(/\n/).at(-1)?.trim().split(/\s+/)[3])
+  if (df.exitCode !== 0 || !Number.isFinite(freeKb)) return `df did not say how much disk is free: ${lastLine(df)}`
+
+  return Math.floor(freeKb / 1024 / 1024)
+}
+
+/**
+ * Whether the disk that holds the owner's workspace, and so the copies, has
+ * room for every worker the run may start at once, each with the room a
+ * workspace needs. Answers why not, or undefined.
+ */
+async function roomForWorkers($: EngineInterface, root: string, workers: number, minFreeGB: number): Promise<string | undefined> {
+  const free = await freeGbAt($, root)
+  if (typeof free === 'string') return `${free}.`
+  const needed = workers * minFreeGB
+  if (free >= needed) return undefined
+
+  return `only ${free} GB are free on the disk that holds ${root} and its workspaces, and ${workers} workers at once need ${needed} GB (${minFreeGB} GB each, lore.minFreeGB in .claude/conductor/config.json). Free ${needed - free} GB more, or lower lore.minFreeGB.`
+}
+
 /**
  * Before the owner's approval of a Lore run's plan takes effect: the run's
  * own workspace on its own branch, made from the base branch and pushed, the
@@ -1058,6 +1079,10 @@ async function loreApprove($: EngineInterface, path: string): Promise<string | u
   const runLore = ledger?.run.lore
   if (ledger === undefined || runLore === undefined || ledger.run.plan !== 'proposed' || here?.kind !== 'lore') return undefined
   const project = ledger.run.config
+  const minFreeGB = project?.lore?.minFreeGB ?? LORE_DEFAULTS.minFreeGB
+  // Each worker's copy grows as it builds: a disk with room for one fills under three.
+  const roomless = await roomForWorkers($, here.root, ledger.run.maxParallel ?? MAX_BUILDING, minFreeGB)
+  if (roomless !== undefined) return roomless
   const workspacesBase = workspacesOf(here.root, project?.lore?.workspaces)
   const workspace = runLore.workspace ?? runWorkspaceOf(workspacesBase, ledger.run.id)
   if (!(await $.fs.exists(readyMark(await runsRootOf($, here.root), ledger.run.id, '_run')).catch(() => false)) || !(await $.fs.exists(`${workspace}/.lore`).catch(() => false))) {
@@ -1070,7 +1095,7 @@ async function loreApprove($: EngineInterface, path: string): Promise<string | u
       branch: runLore.branch,
       from: runLore.base,
       carry: project?.lore?.carry ?? LORE_DEFAULTS.carry,
-      minFreeGB: project?.lore?.minFreeGB ?? LORE_DEFAULTS.minFreeGB,
+      minFreeGB,
       runId: ledger.run.id,
       taskId: '_run',
     })
