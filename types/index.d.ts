@@ -32,10 +32,6 @@ export type CheckRecord = {
   line?: string
 }
 
-/**
- * A project's own settings, `.claude/conductor/config.json`: every field
- * optional. A run keeps the copy it was started with.
- */
 export type WorkerKind = 'claude' | 'codex'
 export type WorkerNote = { kind: WorkerKind; for: string; proven: boolean }
 export type Workers = {
@@ -46,6 +42,10 @@ export type Workers = {
   mcp?: string[]
 }
 
+/**
+ * A project's own settings, `.claude/conductor/config.json`: every field
+ * optional. A run keeps the copy it was started with.
+ */
 export type ProjectConfig = {
   tickets?: 'github' | 'linear'
   linear?: { team?: string }
