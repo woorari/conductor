@@ -38,16 +38,54 @@ export function codexArgv(turn: CodexTurn): string[] {
     : ['codex', 'exec', 'resume', '--json', '-c', 'sandbox_mode="workspace-write"', ...options, turn.thread, '-']
 }
 
-const TABLE = /^\s*\[\s*mcp_servers\s*\.\s*(?:"((?:[^"\\]|\\.)*)"|'([^']*)'|([A-Za-z0-9_-]+))/
+const KEY_PART = /^\s*(?:"((?:[^"\\]|\\.)*)"|'([^']*)'|([A-Za-z0-9_-]+))\s*/
 
-/** The names of the MCP servers a Codex config.toml declares: `[mcp_servers.<name>]`, a sub-table such as `.env` not repeating its server. */
+/** A dotted TOML key at the start of `from`: its parts, and what follows it. */
+function keyPath(from: string): { parts: string[]; rest: string } | undefined {
+  const parts: string[] = []
+  let rest = from
+  for (;;) {
+    const match = KEY_PART.exec(rest)
+    if (match === null) return undefined
+    parts.push(match[1] !== undefined ? match[1].replace(/\\(.)/g, '$1') : (match[2] ?? match[3]!))
+    rest = rest.slice(match[0].length)
+    if (!rest.startsWith('.')) return { parts, rest }
+    rest = rest.slice(1)
+  }
+}
+
+/**
+ * The names of the MCP servers a Codex config.toml declares, line by line:
+ * a header `[mcp_servers.<name>]` (a sub-table such as `.env` not repeating
+ * its server), a key under `[mcp_servers]` itself, or a dotted key
+ * `mcp_servers.<name>...` at the top level. A key inside any other table is
+ * not one. A line inside a multi-line value may be taken for a key: a server
+ * found too many costs nothing, a server missed stays switched on.
+ */
 export function serversIn(toml: string | undefined): string[] {
   const found: string[] = []
+  const add = (name: string | undefined): void => {
+    if (name !== undefined && !found.includes(name)) found.push(name)
+  }
+  let table: 'root' | 'servers' | 'other' = 'root'
+
   for (const line of (toml ?? '').split(/\r?\n/)) {
-    const match = TABLE.exec(line)
-    if (match === null) continue
-    const name = match[1] !== undefined ? match[1].replace(/\\(.)/g, '$1') : (match[2] ?? match[3]!)
-    if (!found.includes(name)) found.push(name)
+    const header = /^\s*\[\[?(.*)$/.exec(line)
+    if (header !== null) {
+      const path = keyPath(header[1]!)
+      if (path === undefined) {
+        table = 'other'
+        continue
+      }
+      if (path.parts[0] === 'mcp_servers') add(path.parts[1])
+      table = path.parts[0] === 'mcp_servers' && path.parts.length === 1 ? 'servers' : 'other'
+      continue
+    }
+    if (table === 'other' || line.trim() === '' || line.trim().startsWith('#')) continue
+    const path = keyPath(line)
+    if (path === undefined || !path.rest.startsWith('=')) continue
+    if (table === 'servers') add(path.parts[0])
+    else if (path.parts[0] === 'mcp_servers') add(path.parts[1])
   }
 
   return found

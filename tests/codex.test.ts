@@ -72,6 +72,27 @@ describe('servers', () => {
   })
 })
 
+describe('servers not declared as table headers', () => {
+  test('keys under [mcp_servers] itself', () => {
+    const toml = '[mcp_servers]\npencil = { command = "x" }\n"my.server".command = "y"\n\'q r\' = {}\n'
+    expect(serversIn(toml)).toEqual(['pencil', 'my.server', 'q r'])
+  })
+
+  test('dotted keys at the top level', () => {
+    const toml = 'mcp_servers.blender.command = "z"\nmcp_servers."a.b" = { command = "w" }\nmodel = "m"\n[other]\nx = 1\n'
+    expect(serversIn(toml)).toEqual(['blender', 'a.b'])
+  })
+
+  test('a key inside another table counts only by its own meaning', () => {
+    const toml = '[profiles.x]\nmcp_servers.q.command = "1"\n[mcp_servers.real]\n[profiles.y]\nreal2 = 1\n'
+    expect(serversIn(toml)).toEqual(['real'])
+  })
+
+  test('the sub-table of a server does not make its keys servers', () => {
+    expect(serversIn('[mcp_servers.a.env]\nK = "v"\n[mcp_servers.b]\ncommand = "x"\n')).toEqual(['a', 'b'])
+  })
+})
+
 describe('reader', () => {
   test('events across pieces, and lines that are not events', () => {
     const read = reader()
