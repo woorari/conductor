@@ -376,21 +376,21 @@ describe('a task\'s kind of worker', () => {
   test('why a task has its kind is recorded', () => {
     const why = (input: object) => added(ready(), { kindReason: 'k', ...input }).task?.kindWhy
     expect(why({ kind: 'codex' })).toBe('spread')
-    expect(why({ kind: 'codex', note: 1 })).toBe('trial')
-    expect(why({ kind: 'codex', note: 2 })).toBe('note')
+    expect(why({ kind: 'codex', kindNote: 1 })).toBe('trial')
+    expect(why({ kind: 'codex', kindNote: 2 })).toBe('note')
     expect(why({ kind: 'claude', tier: 'opus' })).toBe('design')
     expect(why({ kind: 'claude' })).toBe('spread')
     expect(added(ready(), { kind: 'codex', kindReason: 'k' }).task).toMatchObject({ kind: 'codex', kindReason: 'k' })
   })
 
   test('a note must exist and be of the same kind', () => {
-    expect(added(ready(), { kind: 'codex', kindReason: 'k', note: 3 }).said.text).toContain('note')
-    expect(added(ready(), { kind: 'codex', kindReason: 'k', note: 9 }).said.text).toContain('note')
+    expect(added(ready(), { kind: 'codex', kindReason: 'k', kindNote: 3 }).said.text).toContain('kindNote')
+    expect(added(ready(), { kind: 'codex', kindReason: 'k', kindNote: 9 }).said.text).toContain('kindNote')
   })
 
   test('an opus task goes to Codex only on a note', () => {
     expect(added(ready(), { tier: 'opus', kind: 'codex', kindReason: 'k' }).said.text).toContain('stay on Claude')
-    expect(added(ready(), { tier: 'opus', kind: 'codex', kindReason: 'k', note: 2 }).said.isError).toBe(false)
+    expect(added(ready(), { tier: 'opus', kind: 'codex', kindReason: 'k', kindNote: 2 }).said.isError).toBe(false)
   })
 
   test('a task of a ready run says its kind', () => {
@@ -420,7 +420,7 @@ describe('a task\'s kind of worker', () => {
 
   test('task_update sets the kind of a queued task, and a worker cannot', () => {
     const ledger = ready()
-    expect(updateTask(ledger, AT, ORCHESTRATOR, { task: 't392-1', kind: 'codex', kindReason: 'k', note: 2 }).text).toBe('t392-1: kind codex.')
+    expect(updateTask(ledger, AT, ORCHESTRATOR, { task: 't392-1', kind: 'codex', kindReason: 'k', kindNote: 2 }).text).toBe('t392-1: kind codex.')
     expect(task(ledger, 't392-1')).toMatchObject({ kind: 'codex', kindWhy: 'note' })
     expect(updateTask(ledger, AT, worker('t392-1'), { task: 't392-1', kind: 'claude', kindReason: 'k' }).isError).toBe(true)
     expect(OWNER.kind).toBe('owner')
@@ -431,5 +431,19 @@ describe('a task\'s kind of worker', () => {
     expect(added(ledger, { kind: 'codex', kindReason: 'k' }).said.isError).toBe(false)
     expect(updateTask(ledger, AT, ORCHESTRATOR, { task: 'a', tier: 'opus', tierReason: 'x' }).text).toContain('stay on Claude')
     expect(task(ledger, 'a').tier).toBe('sonnet')
+  })
+
+  test('the owner\'s tier stands on a task spread to Codex', () => {
+    const ledger = ready()
+    expect(added(ledger, { kind: 'codex', kindReason: 'k' }).said.isError).toBe(false)
+    expect(updateTask(ledger, AT, ORCHESTRATOR, { task: 'a', tier: 'opus', tierReason: 'x' }).isError).toBe(true)
+    expect(ownerSetsTier(ledger, 'a', 'opus').isError).toBe(false)
+    expect(task(ledger, 'a')).toMatchObject({ tier: 'opus', tierBy: 'owner' })
+  })
+
+  test('a number in note is not a suitability note, and kindNote must be a whole number from 1', () => {
+    const ledger = ready()
+    expect(updateTask(ledger, AT, ORCHESTRATOR, { task: 't392-1', kind: 'codex', kindReason: 'k', kindNote: 0 }).text).toContain('kindNote')
+    expect(updateTask(ledger, AT, ORCHESTRATOR, { task: 't392-1', kind: 'codex', kindReason: 'k', note: 2 }).text).toContain('note is a line of text')
   })
 })

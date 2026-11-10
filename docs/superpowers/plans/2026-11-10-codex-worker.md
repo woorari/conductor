@@ -131,9 +131,9 @@ test('folder home: a place cannot switch Codex on or off by itself', () => {
 ```ts
 export const KINDS = ['claude', 'codex'] as const
 export const kindOf = (task: { kind?: WorkerKind }): WorkerKind => task.kind ?? 'claude'
-// Decides a new or changed kind. note is the 1-based index into run.config.workers.notes.
+// Decides a new or changed kind. kindNote is the 1-based index into run.config.workers.notes.
 export function rekind(raw: Raw, task: RawTask, caller: Caller,
-  kind: WorkerKind, reason: string | undefined, note: number | undefined): string | undefined  // a refusal text, or undefined
+  kind: WorkerKind, reason: string | undefined, kindNote: number | undefined): string | undefined  // a refusal text, or undefined
 export function ownerSetsKind(raw: Raw, taskId: string, kind: string): Outcome
 ```
 
@@ -141,9 +141,9 @@ export function ownerSetsKind(raw: Raw, taskId: string, kind: string): Outcome
 - only for a `queued` task: "… has started; its kind of worker is fixed."
 - `codex` while `run.codex?.ready` is not true: "Codex workers are off for this run" plus `run.codex.why` when there is one.
 - the orchestrator needs `reason`; the owner does not, and the owner's choice sets `kindWhy = 'owner'`, after which the orchestrator's `rekind` on that task is refused ("the owner chose …"), as `tierBy: 'owner'` does for the tier.
-- `note` must name an existing note of the same `kind`; then `kindWhy` is `'note'` when it is proven, `'trial'` when not.
-- no `note`: an `opus` task asked for `codex` is refused ("architecture and design stay on Claude unless a suitability note says otherwise"); an `opus` task on `claude` gets `'design'`; anything else `'spread'`.
-- `addTask` and `updateTask` take `kind`, `kindReason`, `note` from their input and call `rekind`. While `run.codex?.ready` is true, `addTask` without `kind` is refused: "say which kind of worker builds it: claude or codex, with kindReason". While it is not, a missing `kind` stays absent and nothing else changes.
+- `kindNote` must name an existing note of the same `kind`; then `kindWhy` is `'note'` when it is proven, `'trial'` when not.
+- no `kindNote`: an `opus` task asked for `codex` is refused ("architecture and design stay on Claude unless a suitability note says otherwise"); an `opus` task on `claude` gets `'design'`; anything else `'spread'`.
+- `addTask` and `updateTask` take `kind`, `kindReason`, `kindNote` from their input and call `rekind`. While `run.codex?.ready` is true, `addTask` without `kind` is refused: "say which kind of worker builds it: claude or codex, with kindReason". While it is not, a missing `kind` stays absent and nothing else changes.
 - `retier` to `opus` on a `codex` task whose `kindWhy` is `'spread'` is refused the same way as above.
 
 - [ ] **Step 1: Write the failing tests.** `tests/ledger.test.ts`: a ledger whose task has `kind: 'codex', kindReason: 'r', kindWhy: 'trial', thread: 'th-1', turns: 1, lastWords: 'done'` and whose run has `codex: { ready: true, servers: ['pencil'] }` parses to the same values; `kind: 'gemini'` and `kindWhy: 'because'` are refused naming the field. `tests/signals.test.ts` (with `LEDGER`, `withTask` from `tests/fixture.ts`; `ready` is the ledger with `run.codex = { ready: true }` and the note of task 2 as note 1):
@@ -156,7 +156,7 @@ test('kind: the orchestrator needs a reason, the owner does not', () => {
 test('kind: why a task has its kind is recorded', () => {
   const why = (input: object) => taskOf(addTask(ready, ORCH, { id: 'a', title: 't', tier: 'sonnet', tierReason: 'r', kindReason: 'k', ...input }), 'a').kindWhy
   expect(why({ kind: 'codex' })).toBe('spread')
-  expect(why({ kind: 'codex', note: 1 })).toBe('trial')
+  expect(why({ kind: 'codex', kindNote: 1 })).toBe('trial')
   expect(why({ kind: 'claude', tier: 'opus' })).toBe('design')
 })
 test('kind: an opus task goes to Codex only on a note', () => {
@@ -184,10 +184,10 @@ test('kind: fixed once started, and the owner\'s choice stands', () => { /* buil
 
 **Interfaces:**
 - Consumes: `rekind`, `ownerSetsKind`, `kindOf` (task 3).
-- Produces: `task_add` and `task_update` accept `kind` (`enum: KINDS`), `kindReason` (string), `note` (integer ≥ 1) — added to the schema **only** when `run.codex?.ready`; `/worker <task> claude|codex`; `planning(id, source, title?, workers?: Workers)` appends, only when `workers?.codex`, one paragraph (below) and the numbered notes.
+- Produces: `task_add` and `task_update` accept `kind` (`enum: KINDS`), `kindReason` (string), `kindNote` (integer ≥ 1) — added to the schema **only** when `run.codex?.ready`; `/worker <task> claude|codex`; `planning(id, source, title?, workers?: Workers)` appends, only when `workers?.codex`, one paragraph (below) and the numbered notes.
 - Planning paragraph, exact copy:
 
-> Workers: Codex builds next to Claude in this run. Give every task a kind of worker, `claude` or `codex`, with `kindReason`. Spread the work: unless a note below or the task itself speaks for one side, give about half of the buildable tasks to each. Architecture and design tasks (opus) stay on Claude unless a note says otherwise. A note is a hint, not a rule; when you follow one, pass its number as `note`. A task that follows a note marked "not proven" is a trial: say so in the plan. A Codex worker cannot ask you anything while it builds and has no board tools, so give it tasks whose brief stands on its own.
+> Workers: Codex builds next to Claude in this run. Give every task a kind of worker, `claude` or `codex`, with `kindReason`. Spread the work: unless a note below or the task itself speaks for one side, give about half of the buildable tasks to each. Architecture and design tasks (opus) stay on Claude unless a note says otherwise. A note is a hint, not a rule; when you follow one, pass its number as `kindNote`. A task that follows a note marked "not proven" is a trial: say so in the plan. A Codex worker cannot ask you anything while it builds and has no board tools, so give it tasks whose brief stands on its own.
 
 Each note is one line: `1. codex: 3D work: Blender scenes, meshes, materials (not proven)`.
 
