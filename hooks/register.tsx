@@ -753,9 +753,10 @@ async function fixWorkspace(
   candidate: Candidate,
   place: Place,
   team: string,
+  home?: ProjectConfig,
 ): Promise<{ workspace: RunWorkspace; config: ProjectConfig; lore?: Ledger['run']['lore'] } | { error: string }> {
   const base = place.base ?? config.base
-  const settings = placeConfig(place, team)
+  const settings = placeConfig(place, team, home)
   const isInGit = (await $.session.repo().catch(() => null)) !== null
   if (!isInGit) {
     const here = await placeholderHere($)
@@ -797,14 +798,14 @@ async function placeRun($: EngineInterface, homeRoot: string, asked: Conducting,
     if ('error' in found) return found
     const place = placeOf(found.candidate)
 
-    return place === undefined ? { error: 'No run was started: the spec\'s place is not in config.json.' } : await fixWorkspace($, asked, found.candidate, place, found.team)
+    return place === undefined ? { error: 'No run was started: the spec\'s place is not in config.json.' } : await fixWorkspace($, asked, found.candidate, place, found.team, project)
   }
   const team = teamOfKey(asked.source)
   const found = await candidatesFor(io, homeRoot, places, team)
   if ('error' in found) return found
   const only = found.candidates.length === 1 ? found.candidates[0] : undefined
   const place = only === undefined ? undefined : placeOf(only)
-  if (only !== undefined && place !== undefined) return await fixWorkspace($, asked, only, place, team)
+  if (only !== undefined && place !== undefined) return await fixWorkspace($, asked, only, place, team, project)
 
   return { config: { places: places.filter(one => one.teams.includes(team)) }, candidates: found.candidates }
 }
@@ -853,7 +854,7 @@ async function pickWorkspace($: EngineInterface, call: ToolCall): Promise<{ resu
   const place = chosen === undefined ? undefined : places.find(one => one.folder === chosen.place)
   if (chosen === undefined || place === undefined) return fail(`${asked || 'That'} is not one of the workspaces this run lists: ${fresh.candidates.map(one => one.root).join(', ')}.`)
   const title = ledger.run.title === `Run ${ledger.run.id}` ? undefined : ledger.run.title
-  const fixed = await fixWorkspace($, { id: ledger.run.id, source, ...(title === undefined ? {} : { title }) }, chosen, place, team)
+  const fixed = await fixWorkspace($, { id: ledger.run.id, source, ...(title === undefined ? {} : { title }) }, chosen, place, team, ledger.run.config)
   if ('error' in fixed) return fail(fixed.error)
   const written = await mutate($, path, raw => {
     const run = raw.run as Record<string, unknown>
