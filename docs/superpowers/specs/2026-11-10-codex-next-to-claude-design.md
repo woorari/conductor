@@ -1,6 +1,6 @@
 # Codex next to Claude: design
 
-Date: 2026-11-10. Status: draft, waiting for the owner's approval.
+Date: 2026-11-10. Status: approved by the owner on 2026-11-10. Revised the same day, with the owner's word: the mod runs Codex itself (4.3), after `$.process.spawn` was found; the first version had a small Claude worker in between.
 
 Marks used below: **(owner)** is something the owner said or confirmed. **(my call)** is a choice the author made to fill a gap; the owner can overturn it. **(unproven)** is something no trial has shown yet.
 
@@ -58,7 +58,7 @@ Anti-goals (things this must never do):
 ### 3.2 From the mod API (read in `.claude-plugin/types/claude-code/index.d.ts`)
 
 - `$.session.usage()` and the `session.measure` event give Claude's rate limits: `five_hour` and `seven_day`, each with `percentUsed` and `resetsAt`. The event fires after each main-thread turn and whenever a window moves a whole point.
-- `$.process.run` is one shot and ends after ten minutes at most. A Codex task takes longer than that, so the mod cannot simply run `codex exec` and wait.
+- `$.process.run` is one shot and ends after ten minutes at most. `$.process.spawn` keeps a child for as long as the mod's module lives and streams what it writes; conductor already runs long Lore steps with it. So the mod can run `codex exec` itself. The child ends when Claude Code is closed or the mod is reloaded.
 - The mod's timers and hooks run in the Claude Code process. They cost no Claude budget and keep running while the Claude session sits idle.
 
 ### 3.3 From the documentation (not tried here)
@@ -70,11 +70,10 @@ Anti-goals (things this must never do):
 
 ### 3.4 Unproven, to be shown by the first build step of the piece that needs it
 
-- A Claude worker can keep a `codex exec` running for longer than ten minutes and be woken when it ends (piece 1).
+- A `codex exec` kept by `$.process.spawn` runs for an hour or more while the session takes other turns, and its JSON events arrive as it writes them (piece 1).
 - A board tool that refuses (for example `merge` on red checks) makes a Codex orchestrator stop and wait instead of trying another way (piece 3). The trial's board server had such a tool, but the run never reached it.
 - A Codex hook can refuse a shell command (piece 3). The trial didn't run this, because it would have needed a flag that bypasses hook trust. The proper way is that the owner reviews and trusts the hook once inside Codex.
 - In `workspace-write` Codex has no network, so it can't push or call `gh` by hand (piece 1: without this a Codex worker could merge by hand, unseen by conductor's guards). And an MCP server Codex starts runs outside the sandbox and does have network (piece 3).
-- The mod can start a process that outlives the ten-minute limit of `$.process.run`, detached, and watch it through a file (piece 3).
 
 If one of these turns out false, the builder stops and brings it back; section 8 says what the fallback would be.
 
@@ -95,31 +94,36 @@ If one of these turns out false, the builder stops and brings it back; section 8
 - Architecture and design tasks, what today is tagged `opus` for that reason, stay with Claude unless a note says otherwise **(my call)**. The first runs should not test Codex on the tasks where a mistake costs most.
 - The tier still means something for a Codex task: project settings map each tier to a Codex model and reasoning effort. Without a mapping, every tier uses Codex's default **(my call)**.
 
-### 4.3 How a Codex worker runs (my call)
+### 4.3 How a Codex worker runs (owner: the mod runs it)
 
-A Codex task still gets a Claude worker, on the cheapest tier, that does no building itself. This document calls it the **carrier**. It:
+No Claude worker stands between conductor and Codex. The mod runs Codex itself:
 
-1. gets its worktree and slot from the router exactly as any worker does;
-2. starts `codex exec` in that worktree with `-s workspace-write`, the task's brief, the findings and rulings that bind the task, and a pointer to the project's `CLAUDE.md` and rules;
-3. waits for it to end, without polling in a way that burns tokens;
-4. reads what Codex changed and its last message, runs the project's checks, commits, pushes, opens the pull request and reports to the board as any worker would;
-5. if Codex ended without finishing, gives it one more turn with `codex exec resume` and what was missing; after that it reports the task as failed with Codex's last words.
+1. The orchestrator starts a Codex task with a board tool of its own, `worker_start`. The Agent tool on a Codex task is refused with a line that names that tool, and `worker_start` on a Claude task is refused the other way. conductor's rule holds: the mod starts nothing nobody asked for.
+2. The router decides as for any worker: plan approved, not paused, dependencies done, parallel limit, no file clash, a slot.
+3. The mod makes the task's worktree and branch itself, as it already does for git in a folder home.
+4. It starts `codex exec` there through `$.process.spawn`, with `-s workspace-write`, JSON events on, the task's brief, the findings and rulings that bind the task, the project's `brief.md`, and a pointer to the project's `CLAUDE.md`.
+5. While Codex runs, the mod reads its events: the thread id goes onto the task, each file change into the task's touched files, each event counts as a sign of life for the stall warning.
+6. When Codex ends, the mod runs the project's `check` if the project has one. If Codex ended with an error, or the check fails, Codex gets **one** more turn (`codex exec resume`) with what went wrong.
+7. Then the mod commits what is in the worktree, pushes the task's branch and opens the pull request through the GitHub API, with Codex's last message as its description. The task goes to `review` and the orchestrator is woken with that message. It judges the pull request as it judges any worker's.
+8. If nothing was changed, or the second turn also failed: the mod still commits and pushes what there is, opens no pull request, sets the task `failed` with Codex's last words, and wakes the orchestrator.
 
-Why this way and not the mod running Codex directly:
+Why this way:
 
-- The mod cannot wait on a long process (3.2), and conductor's rule is that the mod starts no agent by itself.
-- Everything conductor already does for a worker keeps working untouched: the worktree, the slot, the files it touched, the stall warning, the command guards, hand-back, `returned`.
-- Codex keeps the tight sandbox. It can't commit or push (3.1), so the carrier does both, and the commands that do it pass through conductor's existing guards.
+- **A Codex task costs no Claude budget**, apart from the orchestrator starting it and judging its result. That is the point of the whole feature.
+- Codex tasks keep running while Claude is short or paused at the line.
+- Codex keeps the tight sandbox. It can't commit or push (3.1); the mod does both.
+- Piece 3 builds on the same runner instead of replacing it.
 
-What it costs: a few thousand Claude tokens per Codex task for the carrier's turns. That is small next to building the task, but not zero, and it means **piece 1 alone doesn't work while Claude is dry.** That is what piece 3 is for.
-
-The carrier writes Codex's thread id and the step it is at (Codex running, checking, committing) to the task on the ledger. A seat change needs that (7.5).
+What it costs: the mod now commits, pushes and opens pull requests, which so far only workers did. And nobody reads Codex's result before the pull request exists; the mod's retry is mechanical. The orchestrator's review of the pull request is the judgement.
 
 Limits of piece 1, stated so nobody is surprised:
 
-- A ruling or finding posted while Codex is mid-run reaches it only at its next turn, if there is one. The carrier applies it when it checks the result.
+- **Claude Code has to stay open.** Closing it or reloading the mod ends the Codex runs. Their tasks are found again at the next start, as conductor already finds workers after a restart, set `returned`, and a restarted Codex worker continues its thread in the same worktree.
+- A ruling or finding posted while Codex is mid-run reaches it only at its second turn, if there is one. The orchestrator applies it when it judges the pull request.
+- A Codex worker has no board tools. It can't ask a question or report a problem mid-run; what it has to say is in its last message. (Piece 3 gives Codex board tools.)
 - Codex's own sub-agents are switched off for workers (`agents.enabled=false`). One task, one Codex.
 - MCP servers from the owner's own Codex config are switched off for workers unless project settings name them. A 3D task will need one (Blender); the settings carry that list.
+- Only where the mod can open the pull request: a git workspace on GitHub with the mod's GitHub token set. Elsewhere a run has no Codex tasks, and says why once.
 
 ### 4.4 The parallel limit
 
@@ -168,9 +172,9 @@ The same holds the other way: Codex has the same two marks as separate settings 
 
 ### 6.4 At the line
 
-1. The router refuses to start new Claude workers, carriers included.
+1. The router refuses to start new Claude workers.
 2. Running Claude workers are told to commit what they have and hand back, with the hand-back conductor already has. Their tasks become `returned`.
-3. Running carriers stop their Codex run and hand back as in 7.5. Their tasks become `returned`.
+3. Running Codex workers carry on. The mod runs them, and they cost Claude nothing.
 4. The orchestrator writes the handover, as conductor's handover already does, and gives up the seat.
 5. With piece 3 built: Codex takes the seat (7). Without piece 3, or in a Lore run, or with Codex unavailable or itself past its own line: the run pauses with conductor's existing pause, says why and when the window resets, and resumes by itself after the reset.
 
@@ -191,8 +195,8 @@ The run pauses and says which window resets first. Nothing else.
 
 Today the board's tools and rules exist only inside Claude Code. Codex can't reach them. Piece 3 therefore adds **a board server**: a small local program that speaks MCP over stdio, reads and writes the same ledger, and applies the same rules by using the same pure code under `hooks/` (`router`, `ledger`, `merge`, `problems`, `posts`). It is what Codex talks to instead of the mod.
 
-- It offers the Codex orchestrator the board tools an orchestrator has, plus one the Claude side doesn't need: **start a task's worker**. Codex can't start conductor workers itself, so the board server does: it applies the router's rules, makes the worktree, starts `codex exec` for the task and watches it.
-- It does for Codex workers what the carrier does in piece 1: checks, commit, push, pull request. Under the Codex seat there are no carriers, since Claude is away.
+- It offers the Codex orchestrator the board tools an orchestrator has, plus one the Claude side doesn't need: **start a task's worker**. Codex can't start conductor workers itself, so the board server takes the request and the mod carries it out, as in 4.3.
+- Codex workers are run by the mod's runner from piece 1, also under the Codex seat. How much else the board server can leave to the mod in the same way (merging, the GitHub token below) is looked at again before piece 3 is planned; this section was written before the mod was known to be able to run Codex.
 - It merges only through the same merge code, with the same checks.
 - The mod starts the Codex orchestrator at the handover, detached, with the handover note as its prompt and the board server attached, and watches that it is alive. If it dies, the mod starts it again from the board, at most a few times, then pauses the run.
 - The board server is a child of the Codex orchestrator and ends with it **(my call)**. Nothing has to survive a seat change except the ledger, the worktrees and the branches (7.5).
@@ -200,7 +204,7 @@ Today the board's tools and rules exist only inside Claude Code. Codex can't rea
 - **It needs Node on the owner's machine (my call).** The repository has no build step today, and the preference is to keep it that way: the board server runs the same TypeScript files. If that proves impossible, a bundle is committed and a test fails when it is out of date. Without Node, piece 3 is unavailable on that machine and the run pauses at the line as in 6.4.
 - **The GitHub token (my call).** The mod's stored token is not handed to Codex or put on a command line. The board server takes the token from `GH_TOKEN` in the environment or from `gh auth token`. If neither gives one, piece 3 is unavailable for that install and the run pauses at the line.
 - **Linear waits.** The board server makes no Linear calls. State moves for tickets merged under Codex are caught up when Claude takes the seat back.
-- **The mod must be alive (my call).** The mod writes a heartbeat to the ledger about every half minute. When the heartbeat is older than a few minutes (Claude Code was closed), the board server starts no worker and merges nothing, and the Codex orchestrator ends at its next step. Nobody merges while nobody watches, and only the mod can hand the seat back.
+- **The mod must be alive (my call).** The Codex workers end with it anyway (4.3). The mod writes a heartbeat to the ledger about every half minute. When the heartbeat is older than a few minutes (Claude Code was closed), the board server starts no worker and merges nothing, and the Codex orchestrator ends at its next step. Nobody merges while nobody watches, and only the mod can hand the seat back.
 
 ### 7.3 How the rules hold under Codex
 
@@ -220,13 +224,8 @@ The seat is a field on the ledger. While Codex holds it, the mod refuses the Cla
 
 ### 7.5 Tasks that are mid-run when the seat changes (my call)
 
-Nothing running is adopted by the other side. In both directions:
-
-1. The side that leaves stops its running workers. For a Codex run that means: stop the process, then commit whatever is in the worktree as work in progress on the task's branch. The carrier does that on the way to Codex, the board server on the way back.
-2. Those tasks become `returned`, with the Codex thread id kept on the ledger.
-3. The side that arrives starts them again from their branch, as conductor already does for a returned task. A Codex worker restarted on a task that has a thread id continues that thread.
-
-A carrier needs one or two turns for this inside the headroom. That is part of why the line is a setting.
+- **Codex workers carry on** through a seat change in either direction. The mod runs them whoever holds the seat.
+- **Claude workers** are told to commit and hand back at the line (6.4); their tasks become `returned` and are started again by whoever can: by Codex if the task may move (7.4), else by Claude after its return.
 
 ### 7.6 The owner during the Codex seat (my call)
 
@@ -234,17 +233,15 @@ The owner's commands are mod code and cost no Claude budget, so they keep workin
 
 ## 8. If something unproven turns out false
 
-- **A Claude carrier can't hold a long Codex run:** the carrier runs Codex in turns short enough to fit (`exec`, then `exec resume`), or piece 1 moves onto the board server of piece 3, built early. The builder brings this back before choosing.
+- **`$.process.spawn` can't hold a long Codex run:** the first version of this design returns: a Claude worker on the cheapest tier starts Codex and does the commit, push and pull request. Brought back to the owner before it is built.
 - **Codex has network in the sandbox after all (found in piece 1):** piece 1 doesn't ship until a Codex hook, trusted by the owner, is shown to refuse `gh pr merge` and a push to the base branch. If that fails too, it is brought back.
 - **The same, or hooks that can't refuse, found in piece 3:** the Codex seat ships without merging. Codex builds and opens pull requests; merging waits for Claude's return. The owner asked for merging under Codex, so this is brought back to them, not decided by the builder.
 - **A refused Codex orchestrator doesn't wait but improvises:** same as above.
-- **The mod can't keep a detached process:** the owner starts the Codex seat by a command conductor prints at the handover. Less than asked for; brought back.
 - **The app-server budget read goes away:** Codex's budget is "unknown" and the run reacts to limit errors only (6.1 already covers this).
 
 ## 9. Left to the builder
 
 - Names: the task field for the kind of worker, the settings keys, the command name, the board server's file layout.
-- How the carrier waits for Codex and how it is told what to do (its brief).
 - The exact prompt a Codex worker and a Codex orchestrator get.
 - How tiers map to Codex models by default.
 - How the board shows kind, budget and seat.
