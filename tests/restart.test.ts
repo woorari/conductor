@@ -141,7 +141,7 @@ test('a worker taken back is refused from then on, and the one started after it 
   expect(engine.calls.filter(one => one.argv[0] === 'cp').length, 'the workspace is reused, not copied again').toBe(copies)
   expect(await worktree($, 'agent-a2')).toEqual({ worktreePath: path })
   expect(stored(files).tasks[0]).toMatchObject({ status: 'building', agentId: 'a2', retired: ['a1'], workspace: path })
-  expect((await bash($, 'lore status --scan', 'a2')).deny, 'the new worker works').toBeUndefined()
+  expect((await bash($, `cd -- '${path}' || exit 97\nlore status --scan`, 'a2')).deny, 'the new worker works').toBeUndefined()
 
   // The old attempt's turn ending hands nothing back: the task is the new worker's.
   await $.turn.complete({ answer: 'Done.', durationMs: 5, isAborted: false, turnId: 'turn-a1', agentId: 'a1', reason: 'answer' } as never)
@@ -165,10 +165,10 @@ test("a worker taken back takes its own subagents with it, and starts no new one
   engine.dirs.push(path, `${path}/.lore`)
   await spawn($, undefined, 'a1')
   await spawn($, undefined, 'c1')
-  expect((await bash($, 'ls', 'c1')).deny, "the worker's subagent works while the task is the worker's").toBeUndefined()
+  expect((await bash($, `cd -- '${path}' || exit 97\nls`, 'c1')).deny, "the worker's subagent works while the task is the worker's").toBeUndefined()
 
   await raise($, { tool: 'mcp__conductor__task_update', tool_use_id: 'take-back', task: 't1', status: 'returned' })
-  expect((await bash($, 'ls', 'c1')).deny).toBe(FENCED)
+  expect((await bash($, `cd -- '${path}' || exit 97\nls`, 'c1')).deny).toBe(FENCED)
   expect((await bash($, 'ls', 'g1')).deny, "its subagent's subagent too").toBe(FENCED)
   const late = (await spawn($, undefined, 'a1')) as { deny?: string }
   expect(late.deny).toBe(FENCED)
@@ -180,7 +180,7 @@ test("a worker taken back takes its own subagents with it, and starts no new one
   await worktree($, 'agent-a2')
   await spawn($, undefined, 'a2')
   expect(stored(files).tasks[0]).toMatchObject({ status: 'building', agentId: 'a2' })
-  expect((await bash($, 'ls', 'c2')).deny).toBeUndefined()
+  expect((await bash($, `cd -- '${path}' || exit 97\nls`, 'c2')).deny).toBeUndefined()
 })
 
 test('a subagent the worker was starting while its task was taken back is fenced as it starts', async ($, on) => {
@@ -199,6 +199,6 @@ test('a subagent the worker was starting while its task was taken back is fenced
   open()
   engine.holdStart = undefined
   expect(((await starting) as { agentId?: string }).agentId, 'the engine started it').toBe('c1')
-  expect((await bash($, 'ls', 'c1')).deny).toBe(FENCED)
+  expect((await bash($, `cd -- '${path}' || exit 97\nls`, 'c1')).deny).toBe(FENCED)
   expect(stored(files).tasks[0]?.retired).toEqual(['a1', 'c1'])
 })

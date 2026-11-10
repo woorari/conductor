@@ -54,8 +54,10 @@ test("a worker's lore line is pinned to its own workspace", async ($, on) => {
   engine.agentIds.push('a1')
   await spawn($, 't1')
   await worktree($, 'agent-a1')
-  expect((await bash($, 'lore status', 'a1')).deny).toBeUndefined()
-  expect(engine.bash.at(-1)).toBe(`cd -- '${LORE_WS}.conductor/DEF-4/t1' || exit 97\nlore status`)
+  const pin = `cd -- '${LORE_WS}.conductor/DEF-4/t1' || exit 97`
+  expect((await bash($, 'lore status', 'a1')).deny).toContain(`${pin}\nlore status`)
+  expect((await bash($, `${pin}\nlore status`, 'a1')).deny).toBeUndefined()
+  expect(engine.bash.at(-1)).toBe(`${pin}\nlore status`)
 })
 
 test("the worker's brief comes from the home", async ($, on) => {

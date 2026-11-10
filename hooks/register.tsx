@@ -35,7 +35,7 @@ import { KEEP, ROTATE_AT, carried, handover } from './handover'
 import { LINEAR_KEY, RUN_ID, STATUSES, TIERS, parseLedger } from './ledger'
 import { approvedMain, baseBroughtIn, conflicted, letGo, loreReady, onBase, onRunBranch, readyForBase, rev7, startLoreMerge, syncEnded } from './lore-merge'
 import { LINEAR_API, M_CREATE, M_UPDATE, Q_ISSUE, Q_TEAM, apiKeyOf, createdOf, errorsOf, issueOf, issueText, stateFor, teamOf, updatedOf } from './linear'
-import { branchInfoOf, ignoreRules, loreByHand, mergeOf, notInLore, pushOf, repositoryInfoOf, someOf, statusOf } from './lore'
+import { branchInfoOf, ignoreRules, loreByHand, mergeOf, notInLore, pinLine, pinned, pushOf, repositoryInfoOf, someOf, statusOf } from './lore'
 import { candidatesFor, findHome, workspaceOfSpec } from './home'
 import type { Home, Io } from './home'
 import { CONFIG_PATH, LORE_DEFAULTS, PLACEHOLDER_SNIPPET, hasPlaceholder, homeConfigProblem, parseConfig, placeConfig, runsIgnored } from './project'
@@ -3943,7 +3943,6 @@ export const register: Register = (on, options) => {
     }
     const taskId = call.agentId === undefined ? undefined : agents.get(call.agentId)
     // In a bound Lore run the mod does the Lore writes: a worker moves only its own branch, the orchestrator only reads.
-    let pinnedCommand: string | undefined
     // Every command of a bound Lore run goes through the guard, which fails closed on what it cannot read.
     if (call.tool === 'Bash' && typeof call.command === 'string' && (await backendOf($))?.kind === 'lore') {
       const path = await boundLedger($).catch(() => undefined)
@@ -3963,10 +3962,14 @@ export const register: Register = (on, options) => {
               : `conductor: this command ${what} by hand. In a bound Lore run the mod does the Lore writes and the owner's workspace is only read: a judged task merges with ${TOOL_MERGE}, the run branch reaches ${runLore.base} only by the owner's /approve-main, and ${runLore.base} is brought into the run branch with mcp__conductor__run_sync_base. /board none lets go of the run.`,
           }
         }
-        // What a worker runs with lore runs in its own workspace, wherever its shell was left standing.
-        // Every command of a worker runs in its own workspace, wherever its shell was left standing: the folder change stands on a
-        // line of its own, so nothing in the command (a background &, a group) runs before it or outside it.
-        if (isWorker && ownWorkspace !== undefined) pinnedCommand = `cd -- '${ownWorkspace.replace(/'/g, "'\\''")}' || exit 97\n${call.command}`
+        // Every command of a worker starts with the line that puts it in its own workspace, wherever its shell was left standing. The
+        // mod never writes that line for it: auto mode reviews the input the model sent, so a rewritten call has no verdict. A command
+        // without the line is refused, with the line to start it with; one that has it runs as it stands, so the line is never stacked.
+        if (isWorker && ownWorkspace !== undefined && !pinned(call.command, ownWorkspace).isPinned) {
+          return {
+            deny: `conductor: every command of a worker runs in its own workspace, and this one does not start there. Start the command with this line, exactly, on a line of its own, and send it again:\n${pinLine(ownWorkspace)}\n${call.command}`,
+          }
+        }
       }
     }
     // A Lore worker that was not handed a workspace of its own would build in the owner's: it may not write at all.
@@ -3998,7 +4001,7 @@ export const register: Register = (on, options) => {
         changedFiles.set(taskId, set.add(relative(file, root, workspaces.get(taskId))))
       }
     }
-    const ran = await next(pinnedCommand === undefined ? e : ({ ...e, command: pinnedCommand } as typeof e))
+    const ran = await next(e)
     if (inbox.size === 0) return ran
     // A worker's subagent is not its reader: the news is for the loop that holds the task.
     const reader = call.agentId === undefined ? ORCHESTRATOR : workers.has(call.agentId) ? agents.get(call.agentId) : undefined
