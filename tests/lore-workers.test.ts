@@ -132,7 +132,7 @@ test('a worker whose workspace was never handed to it cannot write', async ($, o
   const said = await bash($, 'touch x', 'a1')
   expect(said.deny).toContain('isolation: "worktree"')
   await worktree($, 'agent-a1')
-  expect((await bash($, 'touch x', 'a1')).deny).toBeUndefined()
+  expect((await bash($, `cd -- '${BASE}/ABC-12/t1' || exit 97\ntouch x`, 'a1')).deny).toBeUndefined()
 })
 
 test('in git, WorktreeCreate answers nothing and the engine makes its own worktree', async ($, on) => {

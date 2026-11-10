@@ -156,13 +156,35 @@ describe('what a Lore run is told', () => {
     expect((await bash($, 'lore status')).deny).toBeUndefined()
   })
 
-  test("a worker's lore is pinned to its own workspace, wherever its shell stands", async ($, on) => {
+  test("a worker's every command starts with the pin line of its own workspace: the mod never rewrites one", async ($, on) => {
     const { engine } = await lored($, on, RUNNING)
+    const pin = `cd -- '${BASE}/ABC-12/t1' || exit 97`
 
-    expect((await bash($, 'lore commit "t1: fix"', 'a1')).deny).toBeUndefined()
-    expect(engine.bash.at(-1)).toBe(`cd -- '${BASE}/ABC-12/t1' || exit 97\nlore commit "t1: fix"`)
-    await bash($, 'ls -la', 'a1')
-    expect(engine.bash.at(-1), 'every command of a worker runs in its own workspace').toBe(`cd -- '${BASE}/ABC-12/t1' || exit 97\nls -la`)
+    const bare = await bash($, 'ls -la', 'a1')
+    expect(bare.deny, 'a command without the line is refused, with the line to start it with').toContain(`${pin}\nls -la`)
+    expect(engine.bash.at(-1), 'and runs as nothing').not.toContain('ls -la')
+    const before = engine.bash.length
+    expect((await bash($, 'lore commit "t1: fix"', 'a1')).deny).toContain(pin)
+    expect(engine.bash.length).toBe(before)
+
+    // The model sends the line it was given: it runs as sent, and the line is never stacked.
+    expect((await bash($, `${pin}\nls -la`, 'a1')).deny).toBeUndefined()
+    expect(engine.bash.at(-1)).toBe(`${pin}\nls -la`)
+    expect((await bash($, `${pin}\nlore commit "t1: fix"`, 'a1')).deny).toBeUndefined()
+    expect(engine.bash.at(-1)).toBe(`${pin}\nlore commit "t1: fix"`)
+    expect((await bash($, `${pin}\n${pin}\nls`, 'a1')).deny, 'a stacked line is a second cd').toBeUndefined()
+  })
+
+  test("the lore guard reads past the mod's own pin line and nothing else", () => {
+    const OWN = { ...WORKER, ownWorkspace: '/work/Big Game 5.8.conductor/ABC-12/t1' }
+    const pin = `cd -- '${OWN.ownWorkspace}' || exit 97`
+    for (const command of ['lore status --scan', 'lore stage Source', 'lore commit "t1: x"', `lore push ${OWN.ownBranch}`]) {
+      expect(loreByHand(`${pin}\n${command}`, OWN), `${command} behind the pin`).toBeUndefined()
+    }
+    for (const command of [`${pin}\n${pin}\nlore status`, `${pin}\ncd /x && lore commit x`, `cd -- '/elsewhere' || exit 97\nlore status`, `${pin}; lore status`, `cd /x\nlore status`, `${pin}\n(cd /x; lore push)`]) {
+      expect(loreByHand(command, OWN), command).toContain('changes folder')
+    }
+    expect(loreByHand(`${pin}\nlore branch merge x`, OWN), 'the pin hides nothing else').toBeDefined()
   })
 
   test('the board shows a Lore task by its revision and its check', () => {

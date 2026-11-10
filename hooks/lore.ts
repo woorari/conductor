@@ -476,10 +476,28 @@ export function shellSegments(command: string): string[][] {
 /** Lore's commands that take a second word: `branch merge`, `file history`. An option before that word is not read past. */
 const GROUPS = new Set(['branch', 'file', 'revision', 'repository', 'lock', 'layer', 'link', 'shared-store', 'auth', 'logfile', 'notification', 'service'])
 
+/**
+ * The line a worker's every command starts with: a change into its own workspace, on a line of its own, so nothing in the command
+ * (a background &, a group) runs before it or outside it.
+ */
+export function pinLine(workspace: string): string {
+  return `cd -- '${workspace.replace(/'/g, "'\\''")}' || exit 97`
+}
+
+/** Whether a worker's command starts with its own pin line, and the command past that line. */
+export function pinned(command: string, workspace: string): { isPinned: boolean; rest: string } {
+  const head = `${pinLine(workspace)}\n`
+
+  return command.startsWith(head) ? { isPinned: true, rest: command.slice(head.length) } : { isPinned: false, rest: command }
+}
+
 export function loreByHand(
-  command: string,
+  fullCommand: string,
   ctx: { base: string; runBranch?: string; ownBranch?: string; ownWorkspace?: string; caller: 'orchestrator' | 'worker' },
 ): string | undefined {
+  // The one folder change a worker's line may hold is the mod's own pin line, exactly, first: it is read past, and what follows it
+  // is read as the whole line, so a second pin, or any other cd, is still refused.
+  const command = ctx.caller === 'worker' && ctx.ownWorkspace !== undefined ? pinned(fullCommand, ctx.ownWorkspace).rest : fullCommand
   const segments = shellSegments(command)
   // The words as the shell reads them: an escape, a quote or a bracket does not hide a name.
   const plain = segments.map(one => one.join(' ')).join(' ; ')
