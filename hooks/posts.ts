@@ -241,8 +241,19 @@ export function waiting(ledger: Ledger): Delivery[] {
   ]
 }
 
+/** The project's own `brief.md` for a worker, with the names that are this worker's alone filled in; empty when there is none. */
+export function fillBrief(brief: string, ledger: Ledger, task: Task, slot: number): string {
+  return brief.trim() === ''
+    ? ''
+    : brief
+        .trim()
+        .replaceAll('{task}', task.id.toLowerCase().replace(/[^a-z0-9]+/g, '_'))
+        .replaceAll('{slot}', String(slot))
+        .replaceAll('{run}', ledger.run.id)
+}
+
 /** What a task's worker should know from the board: the rulings that bind it and the findings on its files. */
-function forTask(ledger: Ledger, task: Task): string[] {
+export function forTask(ledger: Ledger, task: Task): string[] {
   const own = [...(task.files ?? []), ...(task.touched ?? [])]
   const asked = new Set(ledger.posts.filter(one => one.kind === 'question' && one.from === task.id).map(one => one.id))
   const rulings = ledger.rulings.filter(one => bindsTask(one, task.id, asked)).slice(-LISTED)
@@ -279,17 +290,8 @@ export function briefing(ledger: Ledger, task: Task, project?: { brief: string; 
   const where = on === undefined ? '' : on.branch === undefined ? `the head branch of pull request ${on.pr ?? '?'}` : `the branch \`${on.branch}\``
   const known = forTask(ledger, task)
   // The project's own rules for a worker, with the names that are this worker's alone filled in.
-  const rules =
-    project === undefined || project.brief.trim() === ''
-      ? []
-      : [
-          '',
-          project.brief
-            .trim()
-            .replaceAll('{task}', task.id.toLowerCase().replace(/[^a-z0-9]+/g, '_'))
-            .replaceAll('{slot}', String(project.slot))
-            .replaceAll('{run}', ledger.run.id),
-        ]
+  const filled = project === undefined ? '' : fillBrief(project.brief, ledger, task, project.slot)
+  const rules = filled === '' ? [] : ['', filled]
 
   // In a Lore run the worker builds in a workspace the mod made, on a branch the mod named, and hands back a revision.
   const runLore = ledger.run.lore
