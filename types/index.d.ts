@@ -36,6 +36,16 @@ export type CheckRecord = {
  * A project's own settings, `.claude/conductor/config.json`: every field
  * optional. A run keeps the copy it was started with.
  */
+export type WorkerKind = 'claude' | 'codex'
+export type WorkerNote = { kind: WorkerKind; for: string; proven: boolean }
+export type Workers = {
+  codex?: boolean
+  notes?: WorkerNote[]
+  models?: Partial<Record<ModelTier, { model: string; effort?: 'low' | 'medium' | 'high' }>>
+  /** Codex MCP servers a Codex worker may keep. */
+  mcp?: string[]
+}
+
 export type ProjectConfig = {
   tickets?: 'github' | 'linear'
   linear?: { team?: string }
@@ -47,6 +57,7 @@ export type ProjectConfig = {
     lockPatterns?: string[]
   }
   check?: { argv: string[]; timeoutMin: number }
+  workers?: Workers
   /** In a home that is not a repository: the folders inside it a run may work in. */
   places?: Place[]
 }
@@ -65,6 +76,7 @@ export type Place = {
   base?: string
   lore?: ProjectConfig['lore']
   check?: ProjectConfig['check']
+  workers?: { notes?: WorkerNote[] }
 }
 
 /** The kinds of workspace a run can work in. */

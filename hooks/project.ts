@@ -19,6 +19,11 @@ const LINEAR = ['team'] as const
 // Lore program option, or LORE_BIN, both the person's own.
 const LORE = ['branchPrefix', 'workspaces', 'carry', 'minFreeGB', 'lockPatterns'] as const
 const CHECK = ['argv', 'timeoutMin'] as const
+const WORKERS = ['codex', 'notes', 'models', 'mcp'] as const
+const PLACE_WORKERS = ['notes'] as const
+const WORKER_NOTE = ['kind', 'for', 'proven'] as const
+const WORKER_MODEL = ['model', 'effort'] as const
+const TIERS = ['opus', 'sonnet', 'haiku'] as const
 const PLACE = ['folder', 'teams', 'about', 'base', 'lore', 'check'] as const
 const TEAM_KEY = /^[A-Z][A-Z0-9]{0,9}$/
 const BRANCH = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/
@@ -27,7 +32,7 @@ class Wrong extends Error {}
 
 const isObject = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value)
 
-/** `quiet` keys are taken without being named in the message: `places` is only for a home that is not a repository. */
+/** `quiet` keys are taken without being named in the message: `places` is only for a home that is not a repository; `workers` is opt-in. */
 function keysOf(value: unknown, where: string, allowed: readonly string[], quiet: readonly string[] = []): Record<string, unknown> {
   if (!isObject(value)) throw new Wrong(`config.json: ${where === '' ? 'the file' : where} is an object.`)
   for (const key of Object.keys(value)) {
@@ -52,7 +57,7 @@ export function parseConfig(text: string | undefined): { config: ProjectConfig }
     return { error: 'config.json is not valid JSON.' }
   }
   try {
-    const top = keysOf(json, '', TOP, ['places'])
+    const top = keysOf(json, '', TOP, ['places', 'workers'])
     if (top.tickets !== undefined && top.tickets !== 'github' && top.tickets !== 'linear') throw new Wrong('config.json: tickets is "github" or "linear".')
     if (top.linear !== undefined) {
       const linear = keysOf(top.linear, 'linear', LINEAR)
@@ -62,6 +67,7 @@ export function parseConfig(text: string | undefined): { config: ProjectConfig }
     }
     if (top.lore !== undefined) checkLore(top.lore, 'lore')
     if (top.check !== undefined) checkCheck(top.check, 'check')
+    if (top.workers !== undefined) checkWorkers(top.workers, 'workers', false)
     if (top.places !== undefined) checkPlaces(top.places)
 
     return { config: json as ProjectConfig }
@@ -97,6 +103,33 @@ function checkCheck(value: unknown, where: string): void {
   }
 }
 
+/** The `workers` settings: a place keeps only its notes, the switch, models and servers are the home's. */
+function checkWorkers(value: unknown, where: string, inPlace: boolean): void {
+  const workers = keysOf(value, where, inPlace ? PLACE_WORKERS : WORKERS)
+  if (workers.codex !== undefined && typeof workers.codex !== 'boolean') throw new Wrong(`config.json: ${where}.codex is true or false.`)
+  if (workers.notes !== undefined) {
+    if (!Array.isArray(workers.notes)) throw new Wrong(`config.json: ${where}.notes is a list of notes.`)
+    workers.notes.forEach((one, at) => {
+      const here = `${where}.notes[${at}]`
+      const note = keysOf(one, here, WORKER_NOTE)
+      if (note.kind !== 'claude' && note.kind !== 'codex') throw new Wrong(`config.json: ${here}.kind is "claude" or "codex".`)
+      if (typeof note.for !== 'string' || note.for.trim() === '') throw new Wrong(`config.json: ${here}.for says, in a line, what kind of work this note is about.`)
+      if (typeof note.proven !== 'boolean') throw new Wrong(`config.json: ${here}.proven is true or false.`)
+    })
+  }
+  if (workers.models !== undefined) {
+    const models = keysOf(workers.models, `${where}.models`, TIERS)
+    for (const tier of Object.keys(models)) {
+      const one = keysOf(models[tier], `${where}.models.${tier}`, WORKER_MODEL)
+      if (typeof one.model !== 'string' || one.model.trim() === '') throw new Wrong(`config.json: ${where}.models.${tier}.model is a model name.`)
+      if (one.effort !== undefined && one.effort !== 'low' && one.effort !== 'medium' && one.effort !== 'high') {
+        throw new Wrong(`config.json: ${where}.models.${tier}.effort is "low", "medium" or "high".`)
+      }
+    }
+  }
+  if (workers.mcp !== undefined && !strings(workers.mcp)) throw new Wrong(`config.json: ${where}.mcp is a list of server names.`)
+}
+
 /** A place's folder as its segments, a trailing slash dropped: undefined for one that is not a plain path inside the home. */
 function segmentsOf(folder: unknown): string[] | undefined {
   if (typeof folder !== 'string') return undefined
@@ -120,7 +153,7 @@ function checkPlaces(value: unknown): void {
   const seen: string[][] = []
   value.forEach((one, at) => {
     const where = `places[${at}]`
-    const place = keysOf(one, where, PLACE)
+    const place = keysOf(one, where, PLACE, ['workers'])
     const problem = folderProblem(place.folder, at)
     if (problem !== undefined) throw new Wrong(problem)
     const segments = segmentsOf(place.folder) ?? []
@@ -136,6 +169,7 @@ function checkPlaces(value: unknown): void {
     }
     if (place.lore !== undefined) checkLore(place.lore, `${where}.lore`)
     if (place.check !== undefined) checkCheck(place.check, `${where}.check`)
+    if (place.workers !== undefined) checkWorkers(place.workers, `${where}.workers`, true)
   })
 }
 
@@ -160,13 +194,20 @@ export function homeConfigProblem(config: ProjectConfig, kind: 'repository' | 'f
   return undefined
 }
 
-/** The settings a run in a place keeps, in the shape a repository's config has: its Linear team is the ticket's own. */
-export function placeConfig(place: Place, team: string): ProjectConfig {
+/**
+ * The settings a run in a place keeps, in the shape a repository's config has: its Linear team is the ticket's own.
+ * The home's `workers` apply to every place, the place's own notes after them.
+ */
+export function placeConfig(place: Place, team: string, home?: ProjectConfig): ProjectConfig {
+  const notes = [...(home?.workers?.notes ?? []), ...(place.workers?.notes ?? [])]
+  const workers = home?.workers === undefined && place.workers === undefined ? undefined : { ...home?.workers, ...(notes.length === 0 ? {} : { notes }) }
+
   return {
     tickets: 'linear',
     linear: { team },
     ...(place.lore === undefined ? {} : { lore: place.lore }),
     ...(place.check === undefined ? {} : { check: place.check }),
+    ...(workers === undefined ? {} : { workers }),
   }
 }
 

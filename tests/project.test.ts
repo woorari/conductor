@@ -164,4 +164,42 @@ describe('places: a home that is not a repository', () => {
       check: { argv: ['npm', 'test'], timeoutMin: 20 },
     })
   })
+
+  test('workers: the switch, notes, models and servers are read', () => {
+    const text = JSON.stringify({
+      workers: {
+        codex: true,
+        mcp: ['blender'],
+        models: { sonnet: { model: 'gpt-5.1-codex', effort: 'medium' } },
+        notes: [{ kind: 'codex', for: '3D work: Blender scenes, meshes, materials', proven: false }],
+      },
+    })
+    expect(parseConfig(text)).toEqual({ config: JSON.parse(text) })
+  })
+
+  test('workers: a wrong value is refused by name', () => {
+    const bad = (workers: unknown) => (parseConfig(JSON.stringify({ workers })) as { error: string }).error
+    expect(bad({ codex: 'yes' })).toContain('workers.codex')
+    expect(bad({ notes: [{ kind: 'gemini', for: 'x', proven: true }] })).toContain('workers.notes[0].kind')
+    expect(bad({ notes: [{ kind: 'codex', for: '', proven: true }] })).toContain('workers.notes[0].for')
+    expect(bad({ models: { best: { model: 'x' } } })).toContain('workers.models.best')
+    expect(bad({ sandbox: 'danger-full-access' })).toContain('workers.sandbox')
+  })
+
+  test('folder home: the home notes apply to a place, the place notes on top', () => {
+    const home = { workers: { codex: true, notes: [{ kind: 'codex' as const, for: 'tests', proven: true }] } }
+    const place = { folder: 'game/art', teams: ['ABC'], about: 'x', workers: { notes: [{ kind: 'codex' as const, for: '3D work', proven: false }] } }
+    expect(placeConfig(place, 'ABC', home).workers).toEqual({
+      codex: true,
+      notes: [{ kind: 'codex', for: 'tests', proven: true }, { kind: 'codex', for: '3D work', proven: false }],
+    })
+  })
+
+  test('folder home: a place cannot switch Codex on or off by itself', () => {
+    const text = JSON.stringify({ places: [{ folder: 'a', teams: ['ABC'], about: 'x', workers: { codex: true } }] })
+    expect((parseConfig(text) as { error: string }).error).toContain('places[0].workers.codex')
+  })
+  test('folder home: workers may stand at the top of a folder home', () => {
+    expect(homeConfigProblem({ places: [PLACES[0]!], workers: { codex: true } }, 'folder')).toBeUndefined()
+  })
 })
