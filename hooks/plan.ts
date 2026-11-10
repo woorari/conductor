@@ -83,7 +83,7 @@ export function conducting(args: string): Conducting | { error: string } {
 }
 
 /** What a new run keeps beyond its source: where its tickets are, the project's config, and its Lore branch. */
-export type RunMore = Pick<Ledger['run'], 'tickets' | 'config' | 'lore' | 'workspace' | 'candidates'>
+export type RunMore = Pick<Ledger['run'], 'tickets' | 'config' | 'lore' | 'workspace' | 'candidates' | 'codex'>
 
 /** A new run's ledger: nothing in it yet, and no worker may start before its plan is approved. */
 export const newRun = (id: string, source: string, at: string, title?: string, more: RunMore = {}): Ledger => ({
@@ -99,6 +99,7 @@ export const newRun = (id: string, source: string, at: string, title?: string, m
     ...(more.lore === undefined ? {} : { lore: more.lore }),
     ...(more.workspace === undefined ? {} : { workspace: more.workspace }),
     ...(more.candidates === undefined ? {} : { candidates: more.candidates }),
+    ...(more.codex === undefined ? {} : { codex: more.codex }),
   },
   tasks: [],
   problems: [],

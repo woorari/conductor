@@ -5,6 +5,7 @@ import {
   acted,
   activityText,
   addTask,
+  ownerSetsKind,
   ownerSetsTier,
   reportProblem,
   resolveProblem,
@@ -349,5 +350,86 @@ describe('tiers and new tasks', () => {
     expect(ownerSetsTier(raw(), 't391-1', 'haiku')).toMatchObject({ isError: true, text: 't391-1 is building; a tier is set before a task starts.' })
     expect(ownerSetsTier(raw(), 't999', 'haiku').isError).toBe(true)
     expect(OWNER.kind).toBe('owner')
+  })
+})
+
+describe('a task\'s kind of worker', () => {
+  const OWNER: Caller = { kind: 'owner' }
+  const ready = (): Raw => {
+    const ledger = raw()
+    ledger.run = { ...(ledger.run as object), codex: { ready: true }, config: { workers: { codex: true, notes: [{ kind: 'codex', for: 'small refactors', proven: false }, { kind: 'codex', for: 'tests', proven: true }, { kind: 'claude', for: 'design', proven: true }] } } } as never
+    return ledger
+  }
+  const base = { id: 'a', title: 't', tier: 'sonnet', tierReason: 'r' }
+  const added = (ledger: Raw, input: object) => {
+    const said = addTask(ledger, ORCHESTRATOR, { ...base, ...input })
+    return { said, task: ledger.tasks.find(one => one.id === 'a') }
+  }
+
+  test('the orchestrator needs a reason, the owner does not', () => {
+    expect(added(ready(), { kind: 'codex' }).said).toMatchObject({ isError: true, text: expect.stringContaining('kindReason') })
+    const ledger = ready()
+    expect(ownerSetsKind(ledger, 't392-1', 'codex')).toMatchObject({ isError: false })
+    expect(task(ledger, 't392-1')).toMatchObject({ kind: 'codex', kindWhy: 'owner' })
+  })
+
+  test('why a task has its kind is recorded', () => {
+    const why = (input: object) => added(ready(), { kindReason: 'k', ...input }).task?.kindWhy
+    expect(why({ kind: 'codex' })).toBe('spread')
+    expect(why({ kind: 'codex', note: 1 })).toBe('trial')
+    expect(why({ kind: 'codex', note: 2 })).toBe('note')
+    expect(why({ kind: 'claude', tier: 'opus' })).toBe('design')
+    expect(why({ kind: 'claude' })).toBe('spread')
+    expect(added(ready(), { kind: 'codex', kindReason: 'k' }).task).toMatchObject({ kind: 'codex', kindReason: 'k' })
+  })
+
+  test('a note must exist and be of the same kind', () => {
+    expect(added(ready(), { kind: 'codex', kindReason: 'k', note: 3 }).said.text).toContain('note')
+    expect(added(ready(), { kind: 'codex', kindReason: 'k', note: 9 }).said.text).toContain('note')
+  })
+
+  test('an opus task goes to Codex only on a note', () => {
+    expect(added(ready(), { tier: 'opus', kind: 'codex', kindReason: 'k' }).said.text).toContain('stay on Claude')
+    expect(added(ready(), { tier: 'opus', kind: 'codex', kindReason: 'k', note: 2 }).said.isError).toBe(false)
+  })
+
+  test('a task of a ready run says its kind', () => {
+    const ledger = ready()
+    expect(added(ledger, {}).said.text).toContain('which kind of worker')
+    expect(ledger).toEqual(ready())
+  })
+
+  test('without Codex, a task without a kind is added as today, and Codex is refused', () => {
+    expect(added(raw(), {}).task).toEqual({ id: 'a', title: 't', tier: 'sonnet', tierReason: 'r', status: 'queued' })
+    expect(added(raw(), { kind: 'codex', kindReason: 'k' }).said.text).toContain('off for this run')
+    const off = raw()
+    off.run = { ...(off.run as object), codex: { ready: false, why: 'not logged in' } } as never
+    expect(added(off, { kind: 'codex', kindReason: 'k' }).said.text).toContain('not logged in')
+  })
+
+  test('the kind is fixed once the task started, and the owner\'s choice stands', () => {
+    const ledger = ready()
+    expect(updateTask(ledger, AT, ORCHESTRATOR, { task: 't391-1', kind: 'codex', kindReason: 'k' }).text).toContain('has started')
+    expect(ownerSetsKind(ledger, 't391-1', 'codex').text).toContain('has started')
+    expect(ownerSetsKind(ledger, 't392-1', 'codex').isError).toBe(false)
+    expect(updateTask(ledger, AT, ORCHESTRATOR, { task: 't392-1', kind: 'claude', kindReason: 'k' }).text).toContain('owner chose')
+    expect(task(ledger, 't392-1').kind).toBe('codex')
+    expect(ownerSetsKind(ledger, 't392-1', 'claude').isError).toBe(false)
+    expect(ownerSetsKind(ledger, 't392-1', 'gemini').isError).toBe(true)
+  })
+
+  test('task_update sets the kind of a queued task, and a worker cannot', () => {
+    const ledger = ready()
+    expect(updateTask(ledger, AT, ORCHESTRATOR, { task: 't392-1', kind: 'codex', kindReason: 'k', note: 2 }).text).toBe('t392-1: kind codex.')
+    expect(task(ledger, 't392-1')).toMatchObject({ kind: 'codex', kindWhy: 'note' })
+    expect(updateTask(ledger, AT, worker('t392-1'), { task: 't392-1', kind: 'claude', kindReason: 'k' }).isError).toBe(true)
+    expect(OWNER.kind).toBe('owner')
+  })
+
+  test('a task spread to Codex cannot be re-tiered to opus', () => {
+    const ledger = ready()
+    expect(added(ledger, { kind: 'codex', kindReason: 'k' }).said.isError).toBe(false)
+    expect(updateTask(ledger, AT, ORCHESTRATOR, { task: 'a', tier: 'opus', tierReason: 'x' }).text).toContain('stay on Claude')
+    expect(task(ledger, 'a').tier).toBe('sonnet')
   })
 })

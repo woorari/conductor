@@ -1,5 +1,5 @@
-import type { Activity, ModelTier, ProblemSeverity, TaskStatus, Ticket } from '../types'
-import { LINEAR_KEY, RUN_ID, STATUSES, TIERS } from './ledger'
+import type { Activity, ModelTier, ProblemSeverity, TaskStatus, Ticket, WorkerKind, WorkerNote } from '../types'
+import { WORKER_KINDS as KINDS, LINEAR_KEY, RUN_ID, STATUSES, TIERS } from './ledger'
 import { REVISION } from './lore'
 import { LOOK_AGAIN_MIN, afterDone, dueForLook, isUnderway, lostWith, named, standing, standingText } from './problems'
 
@@ -9,6 +9,11 @@ import { LOOK_AGAIN_MIN, afterDone, dueForLook, isUnderway, lostWith, named, sta
  * field this version does not know survives a rewrite; the store validates
  * the result before it writes.
  */
+
+export { KINDS }
+
+/** The kind of worker a task has: `claude` when none is recorded. */
+export const kindOf = (task: { kind?: WorkerKind }): WorkerKind => task.kind ?? 'claude'
 
 export type RawTask = Record<string, unknown> & { id: string; status: TaskStatus }
 
@@ -317,6 +322,7 @@ function retier(task: RawTask, caller: Caller, tier: unknown, reason: unknown): 
   if (task.status !== 'queued') {
     return refused(`${task.id} is ${task.status}; a tier is set before a task starts.`)
   }
+  if (next === 'opus' && task.kind === 'codex' && task.kindWhy === 'spread') return refused(OPUS_STAYS)
   if (caller.kind === 'owner') {
     task.tier = next
     task.tierBy = 'owner'
@@ -329,6 +335,66 @@ function retier(task: RawTask, caller: Caller, tier: unknown, reason: unknown): 
   task.tierReason = tidy(reason).slice(0, NOTE_MAX)
 
   return undefined
+}
+
+const OPUS_STAYS = 'Architecture and design stay on Claude unless a suitability note says otherwise.'
+
+/**
+ * Decides a new or changed kind of worker for a queued task, and sets it. `note` is the
+ * 1-based index into the run's `workers.notes`. Answers a refusal text, or undefined.
+ */
+export function rekind(
+  raw: Raw,
+  task: RawTask,
+  caller: Caller,
+  kind: WorkerKind,
+  reason: string | undefined,
+  note: number | undefined,
+): string | undefined {
+  if (caller.kind !== 'orchestrator' && caller.kind !== 'owner') return 'Only the orchestrator and the owner set a task’s kind of worker.'
+  if (task.status !== 'queued') return `${task.id} has started; its kind of worker is fixed.`
+  const run = planOf(raw) as { codex?: { ready?: boolean; why?: string }; config?: { workers?: { notes?: WorkerNote[] } } }
+  if (kind === 'codex' && run.codex?.ready !== true) {
+    return `Codex workers are off for this run${run.codex?.why === undefined ? '' : `: ${run.codex.why}`}.`
+  }
+  const why = reason === undefined ? undefined : tidy(reason).slice(0, NOTE_MAX)
+  if (caller.kind === 'owner') {
+    task.kind = kind
+    task.kindWhy = 'owner'
+    if (why !== undefined && why !== '') task.kindReason = why
+    else delete task.kindReason
+
+    return undefined
+  }
+  if (task.kindWhy === 'owner') return `The owner chose ${kindOf({ kind: task.kind as WorkerKind | undefined })} for ${task.id}; only they change it.`
+  if (why === undefined || why === '') return 'Say in one line why the task has this kind of worker: {"kind": "...", "kindReason": "..."}.'
+  let kindWhy: 'note' | 'trial' | 'design' | 'spread'
+  if (note !== undefined) {
+    const found = run.config?.workers?.notes?.[note - 1]
+    if (found === undefined || found.kind !== kind) return `note ${note} names no suitability note for ${kind} workers in this run.`
+    kindWhy = found.proven ? 'note' : 'trial'
+  } else if (task.tier === 'opus') {
+    if (kind === 'codex') return OPUS_STAYS
+    kindWhy = 'design'
+  } else kindWhy = 'spread'
+  task.kind = kind
+  task.kindReason = why
+  task.kindWhy = kindWhy
+
+  return undefined
+}
+
+/** `/worker`: the owner sets a queued task's kind of worker. */
+export function ownerSetsKind(raw: Raw, taskId: string, kind: string): Outcome {
+  const task = raw.tasks.find(one => one.id === taskId)
+  if (task === undefined) return refused(`There is no task ${taskId} in this run.`)
+  const next = KINDS.find(one => one === kind)
+  if (next === undefined) return refused(`kind is one of ${KINDS.join(', ')}.`)
+  const was = kindOf({ kind: task.kind as WorkerKind | undefined })
+  const no = rekind(raw, task, { kind: 'owner' }, next, undefined, undefined)
+  if (no !== undefined) return refused(no)
+
+  return changed(was === next ? `${taskId} stays on ${next}, now by your word.` : `${taskId}: ${was} to ${next}.`)
 }
 
 const planOf = (raw: Raw): Record<string, unknown> => raw.run as Record<string, unknown>
@@ -377,6 +443,16 @@ export function ownerSetsTier(raw: Raw, taskId: string, tier: ModelTier): Outcom
   return changed(was === tier ? `${taskId} stays on ${tier}, now by your word.` : `${taskId}: ${was} to ${tier}.`)
 }
 
+/** The kind, reason and note of a tool's input, checked and handed to `rekind`. */
+function kindFrom(raw: Raw, task: RawTask, caller: Caller, kind: unknown, reason: unknown, note: unknown): string | undefined {
+  const next = KINDS.find(one => one === kind)
+  if (next === undefined) return `kind is one of ${KINDS.join(', ')}.`
+  if (reason !== undefined && typeof reason !== 'string') return 'kindReason is one line of text.'
+  if (note !== undefined && (typeof note !== 'number' || !Number.isInteger(note) || note < 1)) return 'note is the number of a suitability note, from 1.'
+
+  return rekind(raw, task, caller, next, reason, note)
+}
+
 /** `task_add`: the orchestrator adds a task to the run, tagged with a tier and why. */
 export function addTask(raw: Raw, caller: Caller, input: Record<string, unknown>): Outcome {
   if (caller.kind !== 'orchestrator') return refused('Only the orchestrator adds a task to the run.')
@@ -407,6 +483,13 @@ export function addTask(raw: Raw, caller: Caller, input: Record<string, unknown>
   const task: RawTask = { id, title, tier: 'sonnet', status: 'queued' }
   const no = retier(task, caller, input.tier, input.tierReason)
   if (no !== undefined) return no
+  const run = planOf(raw) as { codex?: { ready?: boolean } }
+  if (input.kind === undefined) {
+    if (run.codex?.ready === true) return refused('Say which kind of worker builds it: claude or codex, with kindReason: {"kind": "...", "kindReason": "..."}.')
+  } else {
+    const noKind = kindFrom(raw, task, caller, input.kind, input.kindReason, input.note)
+    if (noKind !== undefined) return refused(noKind)
+  }
   if (input.ticket !== undefined) task.ticket = input.ticket
   if (dependsOn.length > 0) task.dependsOn = dependsOn
   if (files.length > 0) task.files = files
@@ -488,7 +571,13 @@ export function updateTask(raw: Raw, at: string, caller: Caller, input: Record<s
     if (no !== undefined) return no
     said.push(`tier ${String(task.tier)}`)
   }
-  if (input.note !== undefined) {
+  if (input.kind !== undefined) {
+    const no = kindFrom(raw, task, caller, input.kind, input.kindReason, input.note)
+    if (no !== undefined) return refused(no)
+    said.push(`kind ${String(task.kind)}`)
+  }
+  // With a kind, a number is the suitability note it rests on; the task's own note stays a line of text.
+  if (input.note !== undefined && !(input.kind !== undefined && typeof input.note === 'number')) {
     if (typeof input.note !== 'string') return refused('note is a line of text; an empty one clears it.')
     const note = tidy(input.note)
     if (note.length > NOTE_MAX) return refused(`note is one line of at most ${NOTE_MAX} characters; this one has ${note.length}.`)
