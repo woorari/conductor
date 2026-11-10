@@ -49,6 +49,28 @@ describe('parseLedger', () => {
     expect(refused(withTask('t391-1', { startedAt: 'this morning' }))).toContain('tasks[2].startedAt')
   })
 
+  test('reads a task\'s kind of worker and the run\'s Codex state back as written', () => {
+    const ledger = withTask('t392-1', {
+      kind: 'codex',
+      kindReason: 'r',
+      kindWhy: 'trial',
+      thread: 'th-1',
+      turns: 1,
+      lastWords: 'done',
+    })
+    const withRun = { ...ledger, run: { ...ledger.run, codex: { ready: true, servers: ['pencil'] } } }
+    expect(parseLedger(JSON.stringify(withRun)).ledger).toEqual(withRun)
+  })
+
+  test('refuses a kind of worker, a reason for it and a Codex state that are not allowed, naming the field', () => {
+    expect(refused(withTask('t392-1', { kind: 'gemini' as never }))).toContain('tasks[4].kind')
+    expect(refused(withTask('t392-1', { kindWhy: 'because' as never }))).toContain('tasks[4].kindWhy')
+    expect(refused(withTask('t392-1', { turns: -1 }))).toContain('tasks[4].turns')
+    expect(refused(withTask('t392-1', { thread: '' }))).toContain('tasks[4].thread')
+    expect(refused({ ...LEDGER, run: { ...LEDGER.run, codex: { ready: 'yes' } } })).toContain('run.codex.ready')
+    expect(refused({ ...LEDGER, run: { ...LEDGER.run, codex: { ready: true, servers: [1] } } })).toContain('run.codex.servers[0]')
+  })
+
   test('refuses a run id that could leave the runs folder', () => {
     expect(refused({ ...LEDGER, run: { ...LEDGER.run, id: '../x' } })).toContain('run.id')
   })

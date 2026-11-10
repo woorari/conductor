@@ -119,6 +119,18 @@ export type Task = {
   tierReason?: string
   /** `owner` once the person set the tier: the orchestrator then leaves it alone. */
   tierBy?: 'owner'
+  /** The kind of worker that builds the task; absent means `claude`. */
+  kind?: WorkerKind
+  /** One line: why the task has this kind of worker. */
+  kindReason?: string
+  /** What the kind rests on: the owner's word, a proven or an unproven suitability note, the design rule, or the spread of work. */
+  kindWhy?: 'owner' | 'note' | 'trial' | 'design' | 'spread'
+  /** Codex's thread id, for a Codex task. */
+  thread?: string
+  /** Codex turns run since the last start. */
+  turns?: number
+  /** Codex's last message, cut short. */
+  lastWords?: string
   status: TaskStatus
   /** The issue the task belongs to: a GitHub issue's number or a Linear issue's key. */
   ticket?: Ticket
@@ -299,6 +311,8 @@ export type Ledger = {
     pausedAt?: string
     /** The most workers that may be building at once; 3 when absent. */
     maxParallel?: number
+    /** Whether Codex workers may be used in this run, set at `/conduct`; absent means Codex is off. */
+    codex?: { ready: boolean; why?: string; servers?: string[] }
     /**
      * A worker whose context holds this many tokens is asked to hand back at its
      * next green step. Absent, no worker is asked: the mod cannot see how large

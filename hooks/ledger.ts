@@ -15,6 +15,7 @@ import type {
   Task,
   TaskStatus,
   Ticket,
+  WorkerKind,
 } from '../types'
 
 export const TIERS: readonly ModelTier[] = ['opus', 'sonnet', 'haiku']
@@ -28,6 +29,8 @@ export const STATUSES: readonly TaskStatus[] = [
   'blocked',
   'failed',
 ]
+export const WORKER_KINDS: readonly WorkerKind[] = ['claude', 'codex']
+const KIND_WHYS = ['owner', 'note', 'trial', 'design', 'spread'] as const
 const SEVERITIES: readonly ProblemSeverity[] = ['blocker', 'warning', 'note']
 
 /** A run's folder name: it becomes part of a path, so no separator and no dot-dot. */
@@ -327,6 +330,12 @@ function task(value: unknown, where: string): Task {
     tier: oneOf(from, 'tier', where, TIERS),
     tierReason: optionalText(from, 'tierReason', where),
     tierBy: from.tierBy === undefined ? undefined : oneOf(from, 'tierBy', where, ['owner'] as const),
+    kind: from.kind === undefined ? undefined : oneOf(from, 'kind', where, WORKER_KINDS),
+    kindReason: optionalText(from, 'kindReason', where),
+    kindWhy: from.kindWhy === undefined ? undefined : oneOf(from, 'kindWhy', where, KIND_WHYS),
+    thread: optionalText(from, 'thread', where),
+    turns: optionalCount(from, 'turns', where),
+    lastWords: optionalText(from, 'lastWords', where),
     status: oneOf(from, 'status', where, STATUSES),
     ticket: optionalTicket(from, 'ticket', where),
     dependsOn,
@@ -352,6 +361,14 @@ function task(value: unknown, where: string): Task {
     mergeCommit: optionalText(from, 'mergeCommit', where),
     mergedAt: optionalTime(from, 'mergedAt', where),
   }
+}
+
+function runCodex(value: unknown): Ledger['run']['codex'] {
+  if (value === undefined) return undefined
+  const from = fields(value, 'run.codex')
+  if (typeof from.ready !== 'boolean') refuse('run.codex.ready', 'true or false', from.ready)
+
+  return { ready: from.ready, why: optionalText(from, 'why', 'run.codex'), servers: texts(from.servers, 'run.codex.servers') }
 }
 
 function mainRun(value: unknown): Ledger['main'] {
@@ -511,6 +528,7 @@ export function parseLedger(source: string): Parsed {
         maxParallel: optionalNumber(run, 'maxParallel', 'run'),
         workerHandbackTokens: optionalNumber(run, 'workerHandbackTokens', 'run'),
         pausedAt: optionalTime(run, 'pausedAt', 'run'),
+        codex: runCodex(run.codex),
         tickets: run.tickets === undefined ? undefined : oneOf(run, 'tickets', 'run', ['github', 'linear'] as const),
         issue: optionalKey(run, 'issue', 'run'),
         config: run.config === undefined ? undefined : (fields(run.config, 'run.config') as ProjectConfig),
