@@ -11,7 +11,7 @@ import { post, rule, digest } from './core/posts.mjs';
 import { pauseRun, unpauseRun } from './core/pause.mjs';
 import * as merges from './core/merge.mjs';
 import { linearKeyOf } from './core/linear.mjs';
-import { refreshLinear, pendingLinear, linearApiFromEnvironment, synchronizeLinear, acknowledgeLinear } from './linear.mjs';
+import { issueFromSource, refreshLinear, pendingLinear, linearApiFromEnvironment, synchronizeLinear, acknowledgeLinear } from './linear.mjs';
 
 const now = () => new Date().toISOString();
 const fail = message => { throw new Error(message); };
@@ -106,7 +106,7 @@ export class Conductor {
     if (!Number.isInteger(maxParallel) || maxParallel < 1 || maxParallel > 3) fail('maxParallel must be 1–3; the host may impose a lower limit.');
     return this.locked(() => {
       if (fs.existsSync(this.ledgerFile(request.id))) fail('That run already exists; read its board to resume it.');
-      const issue = input.issue ?? linearKeyOf(request.source);
+      const issue = input.issue ?? issueFromSource(request.source);
       if (issue !== undefined && (typeof issue !== 'string' || !linearKeyOf(issue) || linearKeyOf(issue) !== issue)) fail('issue must be a Linear issue key, such as ABC-12.');
       const raw = newRun(request.id, request.source, now(), request.title, issue ? { tickets: 'linear' } : {});
       if (issue) raw.run.issue = issue;

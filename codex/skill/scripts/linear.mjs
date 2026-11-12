@@ -4,10 +4,15 @@ import { LINEAR_API, M_UPDATE, errorsOf, issueOf, linearKeyOf, stateFor, updated
 const READ_STATE = 'query ConductorIssueState($id: String!) { issue(id: $id) { id identifier state { name type } team { id key states { nodes { id name type position } } } } }';
 const terminal = type => ['completed', 'canceled', 'duplicate'].includes(type);
 
+/** Older Codex runs kept the issue key followed by source/context text. */
+export function issueFromSource(source = '') {
+  return linearKeyOf(source) ?? linearKeyOf(source.trim().split(/\s+/)[0] ?? '');
+}
+
 /** Compute lifecycle intent from persisted work, never from an agent's claim about Linear. */
 export function refreshLinear(raw) {
   if (!raw.codex) return;
-  const root = raw.run.issue ?? linearKeyOf(raw.run.source ?? '');
+  const root = raw.run.issue ?? issueFromSource(raw.run.source);
   const previous = raw.codex.linear;
   const activated = raw.run.plan === 'approved' || previous?.activated === true;
   if (!activated) return;
@@ -40,7 +45,7 @@ export function refreshLinear(raw) {
 
 export function pendingLinear(raw) {
   const pending = Object.entries(raw.codex?.linear?.issues ?? {}).filter(([, value]) => !value.confirmed);
-  const root = raw.run.issue ?? linearKeyOf(raw.run.source ?? '');
+  const root = raw.run.issue ?? issueFromSource(raw.run.source);
   return pending.map(([issue, value]) => ({
     issue, target: value.target,
     ...(value.warning ? { warning: value.warning } : {}),

@@ -97,6 +97,20 @@ test('root ticket used by one task is not completed ahead of the rest of the run
   assert.equal(remote.current.get('ENG-1'), 'started');
 });
 
+test('legacy runs infer their parent from an issue key followed by source context', async t => {
+  const remote = transport();
+  const f = await fixture(t, remote.api);
+  await f.add('one', 'ENG-1'); await f.add('two', 'ENG-2'); await f.approve();
+  const raw = f.app.load('ENG-1');
+  delete raw.run.issue; delete raw.run.tickets;
+  raw.run.source = 'ENG-1 https://linear.app/example/issue/ENG-1; implementation notes';
+  f.app.save('ENG-1', raw);
+  await f.update('one', 'done'); await f.sync();
+  assert.equal(remote.current.get('ENG-1'), 'started');
+  await f.update('two', 'done'); await f.sync();
+  assert.equal(remote.current.get('ENG-1'), 'completed');
+});
+
 test('open warnings hold parent completion until their resolution is saved', async t => {
   const remote = transport();
   const f = await fixture(t, remote.api);
