@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { candidatesFor, findHome, workspaceOfSpec, workspacesIn } from '../hooks/home'
+import { candidatesFor, findHome, trustedRootsOf, workspaceOfSpec, workspacesIn } from '../hooks/home'
 import type { Io } from '../hooks/home'
 import type { Place } from '../types'
 
@@ -9,7 +9,7 @@ import type { Place } from '../types'
  * `links` maps a folder to where it really is, as a symlink does; a folder in
  * `unreadable` has no real path that can be read.
  */
-function tree(paths: readonly string[], more: { links?: Record<string, string>; unreadable?: readonly string[]; userHome?: string } = {}): Io {
+function tree(paths: readonly string[], more: { links?: Record<string, string>; unreadable?: readonly string[]; userHome?: string; trustedRoots?: readonly string[] } = {}): Io {
   const dirs = new Set<string>()
   for (const path of paths) {
     let at = path
@@ -32,6 +32,7 @@ function tree(paths: readonly string[], more: { links?: Record<string, string>; 
       return real
     },
     userHome: more.userHome ?? '/home/owner',
+    trustedRoots: more.trustedRoots,
   }
 }
 
@@ -106,6 +107,62 @@ describe('a folder home lies in the user\'s own home folder', () => {
   test('findHome: a .git folder git did not name for the session is no repository home', async () => {
     const io = tree(['/tmp/x/.git', '/tmp/x/.claude/conductor', '/tmp/x/y'])
     expect(await findHome(io, '/tmp/x/y', null)).toBeNull()
+  })
+  describe('trusted roots', () => {
+    const SSD = '/Volumes/Dev/Afterglow'
+    const LINK = '/home/owner/Afterglow'
+    const world = (trusted?: readonly string[], more: Parameters<typeof tree>[1] = {}) =>
+      tree([`${SSD}/.claude/conductor`, `${SSD}/Games/Coreborn`], { links: { [LINK]: SSD }, trustedRoots: trusted, ...more })
+
+    test('a home that moved outside the home folder is refused without the option', async () => {
+      expect(await findHome(world(), `${SSD}/Games/Coreborn`, null)).toBeNull()
+      expect(await findHome(world([]), `${SSD}/Games/Coreborn`, null)).toBeNull()
+      expect(await findHome(world(), `${LINK}/Games/Coreborn`, null), 'the symlink path leads out of the home folder').toBeNull()
+    })
+
+    test('it is accepted when its folder is trusted', async () => {
+      expect(await findHome(world(['/Volumes/Dev']), `${SSD}/Games/Coreborn`, null)).toEqual({ kind: 'folder', root: SSD })
+      expect(await findHome(world(['/Volumes/Dev/']), `${SSD}/Games/Coreborn`, null), 'a trailing slash changes nothing').toEqual({ kind: 'folder', root: SSD })
+      expect(await findHome(world(['/Volumes/Dev'], { links: { [SSD]: SSD } }), SSD, null)).toEqual({ kind: 'folder', root: SSD })
+      const linked = tree([`${SSD}/.claude/conductor`, `${LINK}/.claude/conductor`, `${LINK}/Games/Coreborn`], { links: { [LINK]: SSD }, trustedRoots: ['/Volumes/Dev'] })
+      expect(await findHome(linked, `${LINK}/Games/Coreborn`, null), 'the home folder path that leads onto the trusted volume').toEqual({ kind: 'folder', root: LINK })
+      const untrusted = tree([`${SSD}/.claude/conductor`, `${LINK}/.claude/conductor`, `${LINK}/Games/Coreborn`], { links: { [LINK]: SSD } })
+      expect(await findHome(untrusted, `${LINK}/Games/Coreborn`, null), 'not without the option').toBeNull()
+    })
+
+    test('a trusted root is itself never a home', async () => {
+      const io = tree(['/Volumes/Dev/.claude/conductor'], { trustedRoots: ['/Volumes/Dev'] })
+      expect(await findHome(io, '/Volumes/Dev', null)).toBeNull()
+    })
+
+    test("a trusted '/' trusts nothing", async () => {
+      expect(await findHome(world(['/']), `${SSD}/Games/Coreborn`, null)).toBeNull()
+      expect(await findHome(world(['//', '///']), `${SSD}/Games/Coreborn`, null)).toBeNull()
+      const io = tree([`${SSD}/.claude/conductor`], { links: { '/Volumes/Dev': '/' }, trustedRoots: ['/Volumes/Dev'] })
+      expect(await findHome(io, SSD, null), 'a root that resolves to /').toBeNull()
+    })
+
+    test('a real path that escapes the trusted root is refused', async () => {
+      const io = tree([`${SSD}/.claude/conductor`], { links: { [SSD]: '/srv/other/Afterglow' }, trustedRoots: ['/Volumes/Dev'] })
+      expect(await findHome(io, SSD, null)).toBeNull()
+      const unreadable = tree([`${SSD}/.claude/conductor`], { unreadable: [SSD], trustedRoots: ['/Volumes/Dev'] })
+      expect(await findHome(unreadable, SSD, null)).toBeNull()
+    })
+
+    test('a folder inside a repository is refused', async () => {
+      const io = tree([`${SSD}/.claude/conductor`, `${SSD}/.git`, `${SSD}/sub/.git`], { trustedRoots: ['/Volumes/Dev'] })
+      expect(await findHome(io, `${SSD}/sub`, null), 'a repository root').toBeNull()
+      const inner = tree(['/Volumes/Dev/repo/.git', '/Volumes/Dev/repo/inner/.claude/conductor'], { trustedRoots: ['/Volumes/Dev'] })
+      expect(await findHome(inner, '/Volumes/Dev/repo/inner', null)).toBeNull()
+      expect(await findHome(world(['/Volumes/Dev']), `${SSD}/Games/Coreborn`, `${SSD}`), 'git names the folder a repository').toEqual({ kind: 'repository', root: SSD })
+    })
+
+    test('the option is read with care', () => {
+      expect(trustedRootsOf({ trustedRoots: '/Volumes/Dev/:/a/b, /c' })).toEqual(['/Volumes/Dev', '/a/b', '/c'])
+      expect(trustedRootsOf({ trustedRoots: '/' })).toEqual([])
+      expect(trustedRootsOf({ trustedRoots: 'rel/path:~/x:/a/../b:/a//b:/ok' })).toEqual(['/ok'])
+      for (const odd of [undefined, null, 7, [], { trustedRoots: 5 }, { trustedRoots: ['/a'] }, { trustedRoots: '' }]) expect(trustedRootsOf(odd)).toEqual([])
+    })
   })
 })
 

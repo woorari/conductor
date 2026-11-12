@@ -13,6 +13,8 @@ export type Io = {
   real(path: string): Promise<string | undefined>
   /** The user's own home folder, which is never a conductor home: its `.claude` is Claude Code's own. */
   userHome: string | undefined
+  /** Folders outside the home folder the user chose to trust (the `trustedRoots` option), as `trustedRootsOf` read them. */
+  trustedRoots?: readonly string[]
 }
 
 /** A repository home is its own workspace, as before; a folder home holds places. */
@@ -25,6 +27,23 @@ const trimmed = (path: string): string => path.replace(/\/+$/, '')
 
 /** Whether `inner` lies strictly inside `outer`. */
 const isWithin = (outer: string, inner: string): boolean => inner.startsWith(`${outer}/`)
+
+/**
+ * The folders given in the `trustedRoots` option, which holds absolute folders
+ * separated by `:` or `,`. Anything odd is ignored: a value that is no string,
+ * a path that is not absolute or has a `.` or `..` part, and `/` itself, which
+ * would trust the whole disk. Trailing slashes are trimmed.
+ */
+export function trustedRootsOf(options: unknown): string[] {
+  const given = typeof options === 'object' && options !== null && !Array.isArray(options) ? (options as Record<string, unknown>).trustedRoots : undefined
+  if (typeof given !== 'string') return []
+  const roots = given
+    .split(/[:,]/)
+    .map(one => trimmed(one.trim()))
+    .filter(one => one.startsWith('/') && !one.split('/').some(part => part === '.' || part === '..') && !one.includes('//'))
+
+  return [...new Set(roots)]
+}
 
 /** Whether `path` is `root` or lies inside it. */
 const holds = (root: string, path: string): boolean => path === root || isWithin(root, path)
@@ -41,7 +60,13 @@ const holds = (root: string, path: string): boolean => path === root || isWithin
  * root, lies inside no repository, and lies strictly inside the user's own
  * home folder, by its path and by its real path. A folder above or outside the
  * home folder may be one another user can write, and a config there names
- * programs that run. With no home folder known there is no folder home.
+ * programs that run. The one exception is a folder the user named in the
+ * `trustedRoots` option (a work volume they own): a folder home may also lie
+ * strictly inside one of those or the home folder by its path, with its real
+ * path inside the real path of one of them (a home folder path may lead by a
+ * symlink onto a trusted volume). `/` is never trusted, whatever it is given as
+ * or resolves to. With no home folder known and no trusted root there is no
+ * folder home.
  * Inside a repository below its root `.claude/conductor` means nothing.
  * Neither `/` nor the user's home folder is ever a home.
  */
@@ -56,19 +81,28 @@ export async function findHome(io: Io, cwd: string, gitRoot: string | null): Pro
 
     return false
   }
+  const trusted = [...new Set((io.trustedRoots ?? []).map(trimmed).filter(one => one.startsWith('/') && one !== ''))]
+  const roots = [...(userHome === undefined || userHome === '' ? [] : [userHome]), ...trusted.filter(one => one !== userHome)]
   const isFolderHome = async (dir: string): Promise<boolean> => {
-    if (userHome === undefined || userHome === '' || !isWithin(userHome, dir) || (await isRoot(dir)) || (await insideRepository(dir))) return false
+    if (roots.length === 0 || (await isRoot(dir)) || (await insideRepository(dir))) return false
     // Real paths are asked for only here: a repository home runs no program to be found.
-    const userReal = await io.real(userHome)
     const real = await io.real(dir)
+    if (real === undefined) return false
+    // The path and the real path may each lie in a different root: the home folder's path can lead by a symlink onto
+    // a trusted volume (/Users/me/Work -> /Volumes/Work/Work). What protects is the real path: it must lie inside one.
+    if (!roots.some(root => isWithin(root, dir))) return false
+    for (const root of roots) {
+      const rootReal = await io.real(root)
+      if (rootReal !== undefined && rootReal !== '/' && isWithin(rootReal, real)) return true
+    }
 
-    return userReal !== undefined && real !== undefined && isWithin(userReal, real)
+    return false
   }
   // The session's own git repository is its home whenever its root holds `.claude/conductor`, as before: git names
   // the main working tree's root from a linked worktree, and the real path from a folder reached through a symlink.
   if (gitRoot !== null && (await io.exists(`${gitRoot}/${CONDUCTOR}`))) return { kind: 'repository', root: gitRoot }
   for (let dir = trimmed(cwd); dir !== ''; dir = parentOf(dir)) {
-    if (dir === userHome || !(await io.exists(`${dir}/${CONDUCTOR}`))) continue
+    if (dir === userHome || trusted.includes(dir) || !(await io.exists(`${dir}/${CONDUCTOR}`))) continue
     if (await isRepository(dir)) return { kind: 'repository', root: dir }
     if (await isFolderHome(dir)) return { kind: 'folder', root: dir }
   }

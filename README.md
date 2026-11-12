@@ -213,6 +213,8 @@ Claude Code lets a mod make a worker's isolated copy outside git only when the p
 
 If the app you run Claude Code in doesn't find `lore` (it looks on the PATH, then in `~/.local/bin`), set the mod's **Lore program** option to its full path, or export `LORE_BIN`. A project never names the program that runs.
 
+A folder home normally has to lie inside your home folder, by its path and by where its symlinks lead. If yours lives on a volume you own (say `/Volumes/Work`, or your home folder is a symlink to it), set the mod's **Trusted folders** option (`trustedRoots`) to the absolute folders to also accept, separated by `:` or `,`, for example `/Volumes/Work`. A folder home must then lie strictly inside one of them by its path and its real path. `/` is never accepted, and a project cannot set this option.
+
 ### Project settings
 
 `.claude/conductor/config.json` is optional, and can be kept in the repository. A run keeps the copy it was started with, so a branch cannot change its own rules:
