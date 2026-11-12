@@ -62,8 +62,9 @@ const holds = (root: string, path: string): boolean => path === root || isWithin
  * home folder may be one another user can write, and a config there names
  * programs that run. The one exception is a folder the user named in the
  * `trustedRoots` option (a work volume they own): a folder home may also lie
- * strictly inside one of those, by its path and by its real path inside the
- * real path of that same root. `/` is never trusted, whatever it is given as
+ * strictly inside one of those or the home folder by its path, with its real
+ * path inside the real path of one of them (a home folder path may lead by a
+ * symlink onto a trusted volume). `/` is never trusted, whatever it is given as
  * or resolves to. With no home folder known and no trusted root there is no
  * folder home.
  * Inside a repository below its root `.claude/conductor` means nothing.
@@ -87,8 +88,10 @@ export async function findHome(io: Io, cwd: string, gitRoot: string | null): Pro
     // Real paths are asked for only here: a repository home runs no program to be found.
     const real = await io.real(dir)
     if (real === undefined) return false
+    // The path and the real path may each lie in a different root: the home folder's path can lead by a symlink onto
+    // a trusted volume (/Users/me/Work -> /Volumes/Work/Work). What protects is the real path: it must lie inside one.
+    if (!roots.some(root => isWithin(root, dir))) return false
     for (const root of roots) {
-      if (!isWithin(root, dir)) continue
       const rootReal = await io.real(root)
       if (rootReal !== undefined && rootReal !== '/' && isWithin(rootReal, real)) return true
     }

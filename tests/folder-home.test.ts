@@ -124,6 +124,10 @@ describe('a folder home lies in the user\'s own home folder', () => {
       expect(await findHome(world(['/Volumes/Dev']), `${SSD}/Games/Coreborn`, null)).toEqual({ kind: 'folder', root: SSD })
       expect(await findHome(world(['/Volumes/Dev/']), `${SSD}/Games/Coreborn`, null), 'a trailing slash changes nothing').toEqual({ kind: 'folder', root: SSD })
       expect(await findHome(world(['/Volumes/Dev'], { links: { [SSD]: SSD } }), SSD, null)).toEqual({ kind: 'folder', root: SSD })
+      const linked = tree([`${SSD}/.claude/conductor`, `${LINK}/.claude/conductor`, `${LINK}/Games/Coreborn`], { links: { [LINK]: SSD }, trustedRoots: ['/Volumes/Dev'] })
+      expect(await findHome(linked, `${LINK}/Games/Coreborn`, null), 'the home folder path that leads onto the trusted volume').toEqual({ kind: 'folder', root: LINK })
+      const untrusted = tree([`${SSD}/.claude/conductor`, `${LINK}/.claude/conductor`, `${LINK}/Games/Coreborn`], { links: { [LINK]: SSD } })
+      expect(await findHome(untrusted, `${LINK}/Games/Coreborn`, null), 'not without the option').toBeNull()
     })
 
     test('a trusted root is itself never a home', async () => {
