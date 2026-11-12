@@ -43,6 +43,14 @@ async function green($: Engine, on: Parameters<typeof lored>[1], ledger: Ledger 
   return { files, engine, clock }
 }
 
+test('merging a task carrying the parent ticket cannot close the Lore run issue', async ($, on) => {
+  const ledger: Ledger = { ...GREEN, run: { ...GREEN.run, tickets: 'linear' }, tasks: GREEN.tasks.map(one => ({ ...one, ticket: 'ABC-12' })) }
+  const { engine } = await green($, on, ledger)
+  engine.linear.issues['ABC-12'] = { ...engine.linear.issues['ABC-13']!, id: 'issue-ABC-12', identifier: 'ABC-12' }
+  await call($, 'merge', MERGE)
+  expect(engine.linear.updated.filter(one => one.id === 'issue-ABC-12')).toEqual([])
+})
+
 /** The lore call that merges this branch, whatever its message. */
 const mergeOf = (branch: string) => (argv: readonly string[]): boolean => {
   const args = argv.slice(1).filter(one => one !== '--non-interactive')

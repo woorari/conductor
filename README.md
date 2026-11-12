@@ -268,7 +268,7 @@ A folder home normally has to lie inside your home folder, by its path and by wh
 - `/conduct ABC-12` (or a `linear.app` link to the issue) starts a run from a Linear issue.
 - A task's ticket is a GitHub issue's number or a Linear key.
 - The orchestrator reads an issue with `ticket_read`. After you approve the plan, it files drafted tickets as sub-issues of the run's issue with `ticket_file`. A run from a spec, with `"tickets": "linear"` and a `linear.team`, gets an issue of its own when you approve it.
-- The mod moves issues itself, by state type: the run's issue and each task's issue to started when work starts, a task's to completed when it is merged, and the run's when the run is merged (in git: when every task is done). A failed Linear call never stops the run. It is a warning on the board, said once.
+- The mod moves issues itself, by state type: the run's issue and each task's issue to started when work starts. A ticket shared by several tasks reaches completed only after every task carrying it is done. The run's own ticket always represents the whole run, even if its key is also attached to individual tasks: in Git it waits for all tasks and unresolved work; in Lore it also waits for the approved merge into the base branch. Open blockers, warnings and unanswered questions keep the corresponding work open. Claude and Codex use the same completion rule. A failed Linear call never stops the run. It is a warning on the board, said once.
 - The key comes from the mod's **Linear API key** option (kept in the system's secure storage), then from `LINEAR_API_KEY`. It goes into the request's header and nowhere else.
 
 ## A home that is not a repository

@@ -11,6 +11,8 @@ Conductor keeps Linear status aligned with the approved run. These are routine l
 
 Drafting a plan does not change Linear. Review and green are not completion. Pausing, failing or blocking a task does not close its ticket. A completed, canceled or duplicate issue is not reopened. Names such as “Doing” or “Shipped” vary between teams, so resolve statuses by their `type` and choose the lowest-position matching status. A task linked directly to the run issue cannot complete the run early.
 
+Claude and Codex share the same issue-completion rule. A warning, blocker or unanswered question attached to a task also keeps that task's ticket open after its code is merged. The parent represents the whole run, including remaining tasks on other tickets. The shared rule requires a Lore parent's approved base merge; this does not add Lore workspace or merge support to the Codex adapter.
+
 A source such as `STU-123` or its Linear URL links the run automatically. For a spec run with an existing parent ticket, pass `issue` to `conduct`, for example `{"args":"docs/spec.md","issue":"STU-123"}`. Link child work with `task_add`/`task_update` using a Linear key in `ticket`. Adding tasks to an already approved plan still requires approval of that changed plan.
 
 ## Connected Linear plugin (no API key needed)
