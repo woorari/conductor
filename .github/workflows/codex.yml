@@ -1,0 +1,42 @@
+name: Codex adapter
+
+on:
+  push:
+    paths:
+      - 'codex/**'
+      - 'hooks/**'
+      - '.claude-plugin/plugin.json'
+      - 'LICENSE'
+      - '.github/workflows/codex.yml'
+  pull_request:
+    paths:
+      - 'codex/**'
+      - 'hooks/**'
+      - '.claude-plugin/plugin.json'
+      - 'LICENSE'
+      - '.github/workflows/codex.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  adapter:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+        node: ['22.18.0', '24']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+          package-manager-cache: false
+      - name: Test installer and adapter
+        run: node codex/test.mjs
+      - name: Preview installation
+        run: node codex/install.mjs --dry-run

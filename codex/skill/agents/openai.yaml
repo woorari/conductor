@@ -1,0 +1,4 @@
+interface:
+  display_name: "Conductor"
+  short_description: "Plan, approve, and conduct isolated Codex workers"
+  default_prompt: "Use $conductor to plan and conduct this work with an approved plan and a persistent task board."
