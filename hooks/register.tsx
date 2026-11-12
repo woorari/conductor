@@ -47,8 +47,8 @@ import { LOOK_AGAIN_MIN, dueForLook, isUnderway, unsettled } from './problems'
 import { APPROVED, PLANNING, conducting, isApproval, newRun, planning } from './plan'
 import type { Conducting } from './plan'
 import { ORCHESTRATOR, briefing, digest, post, relative, rule, touch, waiting } from './posts'
-import { HELPER_TYPES, MAX_BUILDING, familyOf, route, unlocked } from './router'
-import type { Route, Spawn } from './router'
+import { HELPER_TYPES, MAX_BUILDING, familyOf, route, routeCodex, unlocked } from './router'
+import type { Base, Route, Spawn } from './router'
 import {
   acted,
   activityText,
@@ -247,6 +247,9 @@ const RETRY_MS = 150
 // One write at a time: every change reads the file as it is now, edits it and
 // writes it back before the next one starts, so two signals never lose each other.
 let queue: Promise<unknown> = Promise.resolve()
+/** Codex runs owned by this module; the runner supplies cancellation in the next task. */
+const runs = new Map<string, { stop(): void }>()
+let workerStartListed = false
 
 async function attempt<T>(
   $: EngineInterface,
@@ -1517,6 +1520,7 @@ async function bind($: EngineInterface, run: string | null): Promise<void> {
   const homeRoot = run === null ? null : (root ?? null)
   await update($, pinnedRun, () => run)
   await update($, pinnedRoot, () => homeRoot)
+  await syncCodexTool($)
   try {
     const own = boundKey(await $.session.id())
     if (run === null) {
@@ -3352,6 +3356,79 @@ async function listTool($: EngineInterface, spec: Parameters<EngineInterface['to
   }
 }
 
+/** Lists the start tool only after this session binds a ready run. */
+async function syncCodexTool($: EngineInterface): Promise<void> {
+  if (workerStartListed) return
+  const path = await boundLedger($)
+  const ledger = path === undefined ? undefined : parseLedger((await textAt($, path)) ?? '').ledger
+  if (ledger?.run.codex?.ready !== true) return
+  await listTool($, {
+    name: 'worker_start',
+    description: 'Run board: the orchestrator starts a Codex task in its own worktree. The task must pass the same start gates as a Claude worker.',
+    inputSchema: { type: 'object', properties: { task: { type: 'string' } }, required: ['task'], additionalProperties: false },
+    isDeferred: false,
+  })
+  workerStartListed = true
+}
+
+/** Task 6 reserves the carrier; task 7 supplies the process runner and its stop action. */
+async function codexWork(_$: EngineInterface, taskId: string): Promise<void> {
+  runs.set(taskId, { stop: () => { runs.delete(taskId) } })
+}
+
+/** Claims before touching a workspace, so concurrent starts see each other's reservations. */
+async function startCodex($: EngineInterface, call: ToolCall): Promise<{ result: string; text: string; isError?: true }> {
+  const fail = (reason: string) => ({ result: `${NOT_DONE} ${reason}`, text: `${NOT_DONE} ${reason}`, isError: true as const })
+  const path = await boundLedger($)
+  if (path === undefined) return fail(NOT_BOUND)
+  await remember($, path)
+  if (callerOf(call.agentId).kind !== 'orchestrator') return fail('Only the orchestrator starts a Codex worker.')
+  if (typeof call.task !== 'string' || call.task.trim() === '') return fail('Say which task to start: { task: "task-id" }.')
+  const taskId = call.task
+  const at = iso(await $.clock.now())
+  const claimed = await mutate<{ ledger: Ledger; before: RawTask; base?: Base } | { error: string }>($, path, raw => {
+    const ledger = parseLedger(JSON.stringify(raw)).ledger!
+    if (runs.has(taskId)) return { value: { error: `\`${taskId}\` is already running.` }, isChanged: false }
+    const decided = routeCodex(ledger, taskId)
+    if (decided.is === 'deny') return { value: { error: decided.text }, isChanged: false }
+    const before = reserved(raw, at, { taskId, name: taskId, slot: decided.slot, builtOn: decided.base?.taskId })!
+
+    return { value: { ledger, before, base: decided.base }, isChanged: true }
+  })
+  if (claimed.error !== undefined) return fail(claimed.error)
+  if ('error' in claimed.value) return fail(claimed.value.error)
+  const { ledger, before, base } = claimed.value
+  const release = async (reason: string) => {
+    const releasedClaim = await mutate($, path, raw => ({ value: undefined, isChanged: released(raw, before) }))
+    return fail(releasedClaim.error === undefined ? reason : `${reason}; ${releasedClaim.error}`)
+  }
+  try {
+    const here = ledger.run.workspace ?? await backendOf($)
+    if (here?.kind !== 'git') return await release('A Codex worker needs a git repository.')
+    const workspaceBase = workspacesOf(here.root, undefined)
+    const workspace = workspaceOf(workspaceBase, ledger.run.id, taskId)
+    const branch = `${LORE_DEFAULTS.branchPrefix}${ledger.run.id}/${taskId}`
+    const made = await gitWorktreeFor($, { root: here.root, base: workspaceBase, path: workspace, branch, start: base?.branch ?? ledger.run.workspace?.base ?? config.base })
+    if (made.error !== undefined) return await release(`${taskId}'s worktree could not be made: ${made.error}.`)
+    const recorded = await mutate($, path, raw => {
+      const task = raw.tasks.find(one => one.id === taskId)
+      if (task?.status !== 'building' || task.worker !== taskId) return { value: false, isChanged: false }
+      task.workspace = workspace
+      task.branch = branch
+
+      return { value: true, isChanged: true }
+    })
+    if (recorded.error !== undefined) return await release(recorded.error)
+    if (!recorded.value) return fail(`${taskId} was taken back while its worktree was being made; no Codex worker started.`)
+    void codexWork($, taskId)
+    const text = `Codex is building \`${taskId}\` in \`${workspace}\`. You are woken when it ends.`
+
+    return { result: text, text }
+  } catch (cause) {
+    return await release(`${taskId}'s worktree could not be made: ${because(cause)}.`)
+  }
+}
+
 /**
  * The mod works only in a repository that opted in with a `.claude/conductor`
  * folder. Anywhere else it registers nothing and its hooks pass everything on.
@@ -3675,6 +3752,7 @@ async function switchOn($: EngineInterface): Promise<void> {
   await rebind($)
   const path = await boundLedger($).catch(() => undefined)
   if (path !== undefined) await remember($, path)
+  await syncCodexTool($)
   // A reload forgets the last reading of the context: taken again here, so a compaction that was due stays due.
   if (path !== undefined) void gaugeNow($)
 }
@@ -4110,6 +4188,7 @@ export const register: Register = (on, options) => {
     answer($, e as unknown as ToolCall, (raw, _at, caller, input) => resolveProblem(raw, caller, input)),
   ).catch(broke)
   on('tool.call', { tool: /^mcp__conductor__run_sync_base$/ }, ($, e, next) => runSyncBase($, e as unknown as ToolCall, next.signal)).catch(broke)
+  on('tool.call', { tool: /^mcp__conductor__worker_start$/ }, ($, e) => startCodex($, e as unknown as ToolCall)).catch(broke)
   on('tool.call', { tool: /^mcp__conductor__run_check$/ }, ($, e) => runCheckTool($, e as unknown as ToolCall)).catch(broke)
   on('tool.call', { tool: /^mcp__conductor__ticket_read$/ }, ($, e) => ticketRead($, e as unknown as ToolCall)).catch(broke)
   on('tool.call', { tool: /^mcp__conductor__ticket_file$/ }, ($, e) => ticketFile($, e as unknown as ToolCall)).catch(broke)
@@ -4154,6 +4233,7 @@ export const register: Register = (on, options) => {
       `This session is bound to run \`${run}\`. Its board is the pane "Run board"; its ledger is ${RUNS_DIR}/${run}/ledger.json.`,
       '',
       REPORTING,
+      ...(bound?.run.codex?.ready === true ? ['A task whose kind is codex is started with `worker_start`, not with the Agent tool. It cannot be messaged; a ruling reaches it only if it needs a second turn. It ends by itself: you are woken with its pull request, or with why it failed.'] : []),
       ...(placedIn === undefined ? [] : [placedIn]),
       ...(bound?.run.candidates !== undefined && bound.run.workspace === undefined
         ? [

@@ -1,8 +1,9 @@
 import type { On } from 'claude-code'
-import { expect } from 'claude-code/testing'
+import { expect, mock } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
 import type { Ledger } from '../types'
+import { NOW } from './fixture'
 
 export const ROOT = '/repo'
 export const RUNS = `${ROOT}/.claude/conductor/runs`
@@ -22,6 +23,15 @@ export const PANE = {
 export const SURFACES = ['terminal', 'desktop'] as const
 
 export type Files = Record<string, { text: string; mtimeMs: number }>
+
+/** Scripted Codex CLI, kept separate from the world's existing program answers. */
+export type CodexState = {
+  version: string | false
+  login: boolean
+  toml?: string
+  turns: { events: object[]; code: number; writes?: string[]; holds?: boolean }[]
+  inputs: string[]
+}
 
 export const HOME = '/home/owner'
 /** Stands in for the person's GitHub token: a test asserts it is written nowhere. */
@@ -151,6 +161,7 @@ export type LoreAnswer = {
 
 /** What the world hands back for the engine's side of things a test wants to steer or read. */
 export type World = {
+  codex: CodexState
   /** The agent ids the next spawns are given, in order. */
   agentIds: string[]
   /** When set, the engine starts no agent and says this instead. */
@@ -262,6 +273,7 @@ export type World = {
  */
 export function world(on: On, files: Files, repo: { root: string } | null = { root: ROOT }): World {
   const state: World = {
+    codex: { version: false, login: false, turns: [], inputs: [] },
     agentIds: [],
     noStart: undefined,
     holdStart: undefined,
@@ -321,11 +333,21 @@ export function world(on: On, files: Files, repo: { root: string } | null = { ro
   on('env.get', (_$, e) => ({
     value: e.name === 'HOME' ? HOME : e.name === 'GH_TOKEN' || e.name === 'GITHUB_TOKEN' || e.name === 'LINEAR_API_KEY' || e.name === 'LORE_BIN' ? state.env[e.name] : undefined,
   }))
+  const codexWrites = new Map<string, string[]>()
   /** How a program answers, from the tables above; a program none of them knows is not there. */
   const answerOf = (argv: readonly string[], cwd: string | undefined): { exitCode: number; stdout: string; stderr: string; isMissing?: true } => {
     const found = state.programs.find(one => one.match(argv, cwd))?.answer
     const program = typeof found === 'function' ? found(argv, cwd) : found
     if (program !== undefined) return { exitCode: program.exitCode, stdout: program.stdout, stderr: program.stderr ?? '' }
+    if (argv.join(' ') === 'codex --version') return state.codex.version === false
+      ? { exitCode: 127, stdout: '', stderr: 'codex: not found', isMissing: true }
+      : { exitCode: 0, stdout: state.codex.version, stderr: '' }
+    if (argv.join(' ') === 'codex login status') return { exitCode: state.codex.login ? 0 : 1, stdout: state.codex.login ? 'Logged in using ChatGPT' : '', stderr: state.codex.login ? '' : 'Not logged in' }
+    if (argv[0] === 'git' && argv.includes('status') && argv.includes('--porcelain')) {
+      const at = argv.indexOf('-C')
+      const dir = at >= 0 ? argv[at + 1] : cwd
+      if (dir !== undefined && codexWrites.has(dir)) return { exitCode: 0, stdout: (codexWrites.get(dir) ?? []).map(path => ` M ${path}`).join('\n'), stderr: '' }
+    }
     if (/(^|\/)lore$/.test(argv[0] ?? '')) {
       const given = state.lore.find(one => one.match(argv, cwd))?.answer
       const scripted = typeof given === 'function' ? given(argv, cwd) : given
@@ -363,6 +385,25 @@ export function world(on: On, files: Files, repo: { root: string } | null = { ro
     const slow = state.slow.find(one => one.match(e.argv, cwd))
     let isOver = false
     try {
+      if (e.argv[0] === 'codex') {
+        if (e.input !== undefined) state.codex.inputs.push(e.input)
+        const turn = state.codex.turns.shift()
+        if (turn === undefined) {
+          isOver = true
+          return { deny: 'No scripted Codex turn remains' }
+        }
+        for (const event of turn.events) yield { stream: 'stdout' as const, text: `${JSON.stringify(event)}\n` }
+        if (cwd !== undefined && turn.writes !== undefined) codexWrites.set(cwd, [...(codexWrites.get(cwd) ?? []), ...turn.writes])
+        if (turn.holds) {
+          await new Promise<void>(resolve => {
+            if (next.signal.aborted) resolve()
+            else next.signal.addEventListener('abort', () => resolve(), { once: true })
+          })
+          return { value: { code: null, signal: 'SIGTERM' } }
+        }
+        isOver = true
+        return { value: { code: turn.code, signal: null } }
+      }
       if (slow !== undefined) {
         const stop = new Promise<'stopped'>(resolve => {
           if (next.signal.aborted) resolve('stopped')
@@ -484,7 +525,7 @@ export function world(on: On, files: Files, repo: { root: string } | null = { ro
     return { value: { kind: 'file' as const, size: found.text.length, mtimeMs: found.mtimeMs, isLink: false } }
   })
   on('fs.read', (_$, e) => {
-    const found = files[e.path]
+    const found = files[e.path] ?? (e.path === `${HOME}/.codex/config.toml` && state.codex.toml !== undefined ? { text: state.codex.toml, mtimeMs: 1 } : undefined)
     if (found === undefined) return { deny: `ENOENT: ${e.path}` }
     // Bytes come back as the engine hands them: `{ base64 }`.
     if (e.as === 'bytes') return { value: state.isBytesWithoutBase64 ? ({} as { base64: string }) : { base64: btoa(String.fromCharCode(...new TextEncoder().encode(found.text))) } }
@@ -687,3 +728,30 @@ export const spawn = (
     ...(name === undefined ? {} : { name }),
     ...(parent === undefined ? {} : { parentAgentId: parent }),
   })
+
+
+/** A ready, bound Codex run beside a Claude task, using the usual world's hooks. */
+export async function codexRun($: Engine, on: On, more: { ledger?: Ledger; codex?: Partial<CodexState>; store?: World['store'] } = {}) {
+  const clock = mock.clock(on, { now: NOW })
+  const ledger: Ledger = more.ledger ?? {
+    version: 1,
+    run: { id: 'demo', title: 'Codex workers', source: '#1', startedAt: new Date(NOW).toISOString(), plan: 'approved', codex: { ready: true } },
+    tasks: [
+      { id: 't1', title: 'Task one', tier: 'sonnet', kind: 'codex', status: 'queued', files: ['src/a.ts'] },
+      { id: 't2', title: 'Task two', tier: 'sonnet', kind: 'claude', status: 'queued', files: ['src/b.ts'] },
+    ],
+    problems: [], posts: [], rulings: [],
+  }
+  const files: Files = { [ledgerPath(ledger.run.id)]: file(ledger, 1) }
+  const engine = world(on, files)
+  Object.assign(engine.codex, { version: 'codex-cli 0.167.0', login: true }, more.codex)
+  if (more.store !== undefined) Object.assign(engine.store, more.store)
+  engine.programs.push({
+    match: argv => argv[0] === 'git' && (argv[3] === 'fetch' || (argv[3] === 'worktree' && argv[4] === 'add')),
+    answer: { exitCode: 0, stdout: '' },
+  })
+  await start($)
+  await board($, ledger.run.id)
+
+  return { engine, files, clock, ledger }
+}
