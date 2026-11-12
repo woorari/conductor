@@ -10,6 +10,8 @@ import { preflight, route } from './core/router.mjs';
 import { post, rule, digest } from './core/posts.mjs';
 import { pauseRun, unpauseRun } from './core/pause.mjs';
 import * as merges from './core/merge.mjs';
+import { linearKeyOf } from './core/linear.mjs';
+import { issueFromSource, refreshLinear, pendingLinear, linearApiFromEnvironment, synchronizeLinear, acknowledgeLinear } from './linear.mjs';
 
 const now = () => new Date().toISOString();
 const fail = message => { throw new Error(message); };
@@ -54,18 +56,21 @@ export function board(raw) {
   const questions = ledger.posts.filter(one => one.kind === 'question' && !one.answeredBy);
   if (questions.length) lines.push('', 'Open questions:', ...questions.map(one => `- ${one.id} from ${one.from}: ${one.text}`));
   if (ledger.rulings.length) lines.push('', 'Rulings:', ...ledger.rulings.map(one => `- ${one.id}: ${one.text}`));
+  const pending = pendingLinear(raw);
+  if (pending.length) lines.push('', 'Linear updates pending:', ...pending.map(one => `- ${one.issue} → ${one.target}${one.waitingFor ? ` (waiting for ${one.waitingFor.join(', ')})` : ''}${one.warning ? `: ${one.warning}` : ''}`));
   return lines.join('\n');
 }
 
 export class Conductor {
-  constructor(root, { githubApi } = {}) {
+  constructor(root, { githubApi, linearApi = linearApiFromEnvironment() } = {}) {
     this.githubApi = githubApi;
+    this.linearApi = linearApi;
     this.root = fs.realpathSync(root);
     this.home = path.join(this.root, '.codex/conductor');
   }
   ledgerFile(id) { return path.join(this.home, 'runs', validId(id), 'ledger.json'); }
   load(id) { const raw = readJSON(this.ledgerFile(id)); parsed(raw); return raw; }
-  save(id, raw) { parsed(raw); atomic(this.ledgerFile(id), JSON.stringify(raw, null, 2) + '\n'); }
+  save(id, raw) { refreshLinear(raw); parsed(raw); atomic(this.ledgerFile(id), JSON.stringify(raw, null, 2) + '\n'); }
   async locked(action) {
     fs.mkdirSync(this.home, { recursive: true });
     const lock = path.join(this.home, '.adapter.lock');
@@ -101,11 +106,28 @@ export class Conductor {
     if (!Number.isInteger(maxParallel) || maxParallel < 1 || maxParallel > 3) fail('maxParallel must be 1–3; the host may impose a lower limit.');
     return this.locked(() => {
       if (fs.existsSync(this.ledgerFile(request.id))) fail('That run already exists; read its board to resume it.');
-      const raw = newRun(request.id, request.source, now(), request.title);
+      const issue = input.issue ?? issueFromSource(request.source);
+      if (issue !== undefined && (typeof issue !== 'string' || !linearKeyOf(issue) || linearKeyOf(issue) !== issue)) fail('issue must be a Linear issue key, such as ABC-12.');
+      const raw = newRun(request.id, request.source, now(), request.title, issue ? { tickets: 'linear' } : {});
+      if (issue) raw.run.issue = issue;
       raw.run.maxParallel = maxParallel;
       raw.codex = { adapterVersion: 1, base: input.base ?? 'main', workspaces: {} };
       this.save(request.id, raw);
       return ok(`Started run ${request.id}. Read the source and draft tasks; propose the plan before asking for approval.`, { run: request.id });
+    });
+  }
+  async linearSync(id) {
+    return this.locked(async () => {
+      const raw = this.load(id);
+      const result = await synchronizeLinear(raw, this.linearApi, now());
+      this.save(id, raw);
+      return result;
+    });
+  }
+  async linearAck(id, input) {
+    return this.change(id, raw => {
+      acknowledgeLinear(raw, input, now());
+      return ok(input.error ? 'Linear update remains pending and is visible on the board.' : 'Linear transition confirmed.');
     });
   }
   async worktree(id, input) {
@@ -303,7 +325,7 @@ export class Conductor {
 export async function main(argv = process.argv.slice(2)) {
   const command = argv.shift();
   if (!command || command === 'help' || command === '--help') {
-    console.log('conductor.mjs <init|conduct|list|board|digest|brief|worktree|handover|task_add|task_update|run_plan|approve|tier|pause|unpause|merged|board_post|board_rule|problem_report|problem_assign|problem_resolve|merge_check|merge|reconcile> --root <project> [--run <id>] [--input <JSON file>] [--caller orchestrator|owner|worker:<task>]\nJSON input may also be read from stdin with --input -. Approval commands require --caller owner after the user explicitly requests them.');
+    console.log('conductor.mjs <init|conduct|list|board|digest|brief|worktree|handover|task_add|task_update|run_plan|approve|tier|pause|unpause|merged|board_post|board_rule|problem_report|problem_assign|problem_resolve|merge_check|merge|reconcile|linear_sync|linear_ack> --root <project> [--run <id>] [--input <JSON file>] [--caller orchestrator|owner|worker:<task>]\nJSON input may also be read from stdin with --input -. Approval commands require --caller owner after the user explicitly requests them.');
     return;
   }
   const options = {};
@@ -330,12 +352,19 @@ export async function main(argv = process.argv.slice(2)) {
     if (command === 'board') { console.log(board(app.load(id))); return; }
     if (command === 'digest') { console.log(digest(parsed(app.load(id)), caller)); return; }
     if (command === 'brief') { console.log(app.brief(id, input.task)); return; }
-    if (['worktree', 'handover', 'merge_check', 'merge', 'reconcile'].includes(command) && caller.kind !== 'orchestrator') fail('Only the orchestrator performs this action.');
-    if (command === 'worktree') result = await app.worktree(id, input);
+    if (['worktree', 'handover', 'merge_check', 'merge', 'reconcile', 'linear_sync', 'linear_ack'].includes(command) && caller.kind !== 'orchestrator') fail('Only the orchestrator performs this action.');
+    if (command === 'linear_sync') { console.log(JSON.stringify(await app.linearSync(id), null, 2)); return; }
+    if (command === 'linear_ack') result = await app.linearAck(id, input);
+    else if (command === 'worktree') result = await app.worktree(id, input);
     else if (command === 'handover') result = await app.handover(id, input.next);
     else if (command === 'merge_check' || command === 'merge') result = await app.github(id, input, command === 'merge');
     else if (command === 'reconcile') result = await app.reconcile(id, input);
     else result = await app.apply(id, command, input, caller);
+  }
+  const runId = result.run ?? options.run;
+  if (!result.isError && result.isChanged && runId && command !== 'linear_ack') {
+    try { result.linear = await app.linearSync(runId); }
+    catch { result.linear = { warning: 'Linear sync could not finish; use linear_sync to retry. The board change is saved.' }; }
   }
   console.log(JSON.stringify(result, null, 2));
   if (result.isError) process.exitCode = 1;

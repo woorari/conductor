@@ -49,6 +49,12 @@ Use `task_update` with `{"task":"...","status":"review|green|returned|blocked|fa
 - `tier --caller owner` accepts `{"task":"...","tier":"opus|sonnet|haiku"}` for queued tasks. Preserve the user's choice. It changes the planning label only; if they want a different Codex model, obtain their intended mapping.
 - `merged --caller owner` records the user's explicit statement that an externally merged task is done; it performs no merge.
 
+## Linear ticket states
+
+For Linear-linked work, read [linear.md](references/linear.md). Routine state synchronization is part of the workflow: the run moves to its team's started state after approval, a task's issue moves to started when work begins, and completed work moves to the completed state only when all work on that issue is done. The parent waits for every task and for open blockers/warnings/questions to be resolved. Resolve team-specific statuses by type; do not assume English status names.
+
+After each board mutation, process `linear.pending` using the connected Linear plugin and acknowledge only a read-back-confirmed result with `linear_ack`. An optional `LINEAR_API_KEY` lets the CLI perform this directly. On resume and before the final report, run `linear_sync`. Keep pending failures visible and retry without stopping unrelated work. A worker hands pending transitions back to the orchestrator; only the orchestrator makes connector changes and acknowledgements. Never mark a ticket completed merely because a PR is open or a task is green.
+
 ## GitHub integration
 
 The adapter's GitHub checks/merge use the installed authenticated `gh` CLI and GitHub.com. Never print a token. For a GitHub merge, follow [github.md](references/github.md). The workflow's plan approval alone does not authorize every external write: merge or publish only when the user's run approval included that action or they separately requested it.

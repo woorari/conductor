@@ -42,6 +42,12 @@ Replies follow the user's conversation language. A bare issue key or path defaul
 - This is a skill/CLI adapter, not Claude's function-hook runtime. The [compatibility table](skill/references/compatibility.md) lists the missing live pane, automatic hooks, Lore provisioning/merges and other differences.
 - Installing does not change Codex's model, permissions, MCP configuration or Claude's installation. Unreal and Blender connections are separate machine-local configuration and are not shipped in this repository.
 
+## Linear status updates
+
+A Linear issue key or URL links the run automatically. Approval moves the run issue to a started state; tasks move their linked issues to started as work begins and completed after all work on that ticket is done. The parent completes only after every task is done and open problems/questions are resolved. Team-specific states are selected by type rather than name. Completed and canceled tickets are not reopened.
+
+The connected Linear plugin handles state changes without a separate API key. The CLI returns durable pending transitions, and the skill performs and confirms the corresponding connector updates. Optionally, set `LINEAR_API_KEY` in the CLI environment for direct API synchronization. Failed updates remain visible on the board and can be retried with `linear_sync`; they never undo a board change or verified merge. See the [Linear workflow](skill/references/linear.md) for details.
+
 ## Test
 
 The same test command works on macOS and Windows:

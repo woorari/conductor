@@ -17,7 +17,8 @@ This package adapts Conductor's workflow to a Codex skill and local CLI. Origina
 | Automatic compaction, timer and post-merge CI watcher | Not installed; Codex handles its context, orchestrator checks CI during the run |
 | Lore workspaces/merges and exact-revision approve-main | Not ported; no claim of runtime-enforced equivalence |
 | Folder-home workspace selection | Select a concrete repository first; no automatic places routing |
-| Linear source/issues | Use connected Linear tools when present, subject to authorization; no adapter lifecycle synchronization |
+| Linear ticket states | Approval/work-start/completion synchronization via the connected plugin or optional API key; persisted pending updates and retry warnings |
+| Linear issue creation and Lore lifecycle | Existing issues can be linked; automatic issue filing and Lore state synchronization are not ported |
 
 Codex ledgers live in `<project>/.codex/conductor/runs/<id>/`. Claude's `.claude/conductor/runs/` stays separate. A project's existing `.claude/conductor/brief.md` can be read as project reference when no Codex brief exists. No existing run is silently migrated. Worktrees live beside the original repository in `<repo>.conductor-codex/<run>/<task>` and are retained for inspection.
 
