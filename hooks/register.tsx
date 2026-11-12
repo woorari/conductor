@@ -36,7 +36,7 @@ import { LINEAR_KEY, RUN_ID, STATUSES, TIERS, parseLedger } from './ledger'
 import { approvedMain, baseBroughtIn, conflicted, letGo, loreReady, onBase, onRunBranch, readyForBase, rev7, startLoreMerge, syncEnded } from './lore-merge'
 import { LINEAR_API, M_CREATE, M_UPDATE, Q_ISSUE, Q_TEAM, apiKeyOf, createdOf, errorsOf, issueOf, issueText, stateFor, teamOf, updatedOf } from './linear'
 import { branchInfoOf, ignoreRules, loreByHand, mergeOf, notInLore, pinLine, pinned, pushOf, repositoryInfoOf, someOf, statusOf } from './lore'
-import { candidatesFor, findHome, workspaceOfSpec } from './home'
+import { candidatesFor, findHome, trustedRootsOf, workspaceOfSpec } from './home'
 import type { Home, Io } from './home'
 import { CONFIG_PATH, LORE_DEFAULTS, PLACEHOLDER_SNIPPET, hasPlaceholder, homeConfigProblem, parseConfig, placeConfig, runsIgnored } from './project'
 import type { ProjectConfig } from './project'
@@ -395,6 +395,9 @@ let backend: Backend | null | undefined
 /** Where conductor's home is, read once: a repository that is its own home, or a folder that holds places; null for none. */
 let home: Home | null | undefined
 
+/** The folders outside the user's home folder the user trusts for a folder home: the `trustedRoots` option. */
+let trustedRoots: string[] = []
+
 /** The disk as the home's finder reads it. A real path is `pwd -P` run in the folder: no shell, nothing of the path in a command. */
 async function ioOf($: EngineInterface): Promise<Io> {
   const userHome = await $.env.get('HOME').catch(() => undefined)
@@ -413,6 +416,7 @@ async function ioOf($: EngineInterface): Promise<Io> {
       }
     },
     userHome: typeof userHome === 'string' && userHome.startsWith('/') ? userHome : undefined,
+    trustedRoots,
   }
 }
 
@@ -3680,6 +3684,7 @@ async function switchOn($: EngineInterface): Promise<void> {
 
 export const register: Register = (on, options) => {
   config = configOf(options)
+  trustedRoots = trustedRootsOf(options)
   const given = (options as Record<string, unknown> | undefined)?.loreBin
   loreOption = typeof given === 'string' && given.trim() !== '' ? given.trim() : undefined
   linearOption = apiKeyOf(options)

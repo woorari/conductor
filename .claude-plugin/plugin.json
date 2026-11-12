@@ -1,6 +1,6 @@
 {
   "name": "conductor",
-  "version": "0.4.4",
+  "version": "0.4.5",
   "description": "Conducts a larger piece of work in Claude Code: a live run board, a model router for worker agents, board messaging, context rotation, and a merge loop: GitHub pull requests pinned to the checked head, or Lore branches merged into the base only on your approval. Tickets from GitHub or Linear.",
   "author": {
     "name": "René Rieck"
@@ -54,6 +54,13 @@
       "type": "string",
       "title": "Lore program",
       "description": "The full path of the lore program, for a Lore workspace where it is neither on the PATH nor in ~/.local/bin. Leave it empty to look there, or set LORE_BIN.",
+      "required": false
+    },
+    "trustedRoots": {
+      "type": "string",
+      "title": "Trusted folders",
+      "description": "Absolute folders, separated by ':' or ',', outside your home folder where a folder home may also lie, e.g. a work volume you own. Leave it empty to accept a folder home only inside your home folder.",
+      "sensitive": false,
       "required": false
     }
   }
