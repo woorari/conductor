@@ -12,7 +12,7 @@ node codex/install.mjs
 
 The installer uses `CODEX_HOME` when set; otherwise it installs into `.codex/skills/conductor` under the current user's home directory. It needs no administrator privileges, Python, npm install or Unix shell. Git metadata is optional when installing from a source archive.
 
-To update, preserving the previous installation as a backup:
+To update, preserving the previous installation under `CODEX_HOME/skill-backups` (or `~/.codex/skill-backups`):
 
 ```text
 node codex/install.mjs --force
@@ -30,7 +30,9 @@ Use `--target` for a custom skill directory. Quote paths with spaces. The path m
 node codex/install.mjs --target "C:\Users\Your Name\.codex\skills\conductor"
 ```
 
-Start a new Codex chat in the project you want to work on, then send `$conductor STU-123`, `$conductor conduct #12`, `$conductor conduct docs/spec.md`, or a natural-language request to use Conductor. It proposes a plan; `$conductor approve` starts the approved work. `$conductor board` displays the task board.
+Start a new Codex chat in the project you want to work on, then send `$conductor STU-123`, `$conductor conduct #12`, `$conductor conduct docs/spec.md`, or a natural-language request to use Conductor. As soon as the plan is proposed, Conductor displays the full board in chat with task titles, tiers, dependencies and expected files, then waits for approval. `$conductor approve` starts the approved work. `$conductor board` displays the board again at any time. Revised proposals display the updated board before approval too.
+
+Backups stay outside the skills folder so Codex discovers only the current skill. Updating also relocates backups made beside the skill by older installers, preserving their contents. Use `--backup-dir` to override the backup location; it must be outside the skills directory.
 
 Replies follow the user's conversation language. A bare issue key or path defaults to English when no conversation language has been established.
 
@@ -60,4 +62,4 @@ The included GitHub Actions workflow runs this suite on macOS and Windows with N
 
 Tests build a fresh skill into a temporary directory. They exercise install/update/backup and paths with spaces, the actual Git worktree lifecycle, approval/pause/dependency gates, persistence, GitHub merge-policy checks and uncertain-outcome recovery. GitHub transport is simulated; no credentials or live merge are used.
 
-To remove the skill, delete only the installed `conductor` folder. To restore an update backup, close active runs, remove the current skill folder and rename the saved sibling backup to `conductor`. Project ledgers and retained worktrees are independent of the installation.
+To remove the skill, delete only the installed `conductor` folder. To restore an update backup, close active runs, remove the current skill folder and move the saved backup from `skill-backups` back to the skills directory as `conductor`. Project ledgers and retained worktrees are independent of the installation.

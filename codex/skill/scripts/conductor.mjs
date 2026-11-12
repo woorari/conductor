@@ -46,9 +46,9 @@ function sameDirectory(left, right) {
 
 export function board(raw) {
   const ledger = parsed(raw);
-  const lines = [`# ${ledger.run.title} (${ledger.run.id})`, `Plan: ${ledger.run.plan ?? 'approved'}${ledger.run.pausedAt ? ' · PAUSED' : ''}`, '', '| Task | Status | Tier | Depends on | Note |', '| --- | --- | --- | --- | --- |'];
+  const lines = [`# ${ledger.run.title} (${ledger.run.id})`, `Plan: ${ledger.run.plan ?? 'approved'}${ledger.run.pausedAt ? ' · PAUSED' : ''}`, '', '| Task | Status | Tier | Depends on | Expected files | Note |', '| --- | --- | --- | --- | --- | --- |'];
   const cell = value => String(value ?? '').replaceAll('|', '\\|').replaceAll('\n', ' ');
-  for (const task of ledger.tasks) lines.push(`| ${cell(task.id)} | ${task.status} | ${task.tier} | ${(task.dependsOn ?? []).join(', ')} | ${cell(task.note ?? task.title)} |`);
+  for (const task of ledger.tasks) lines.push(`| ${cell(task.id)}: ${cell(task.title)} | ${task.status} | ${task.tier} | ${(task.dependsOn ?? []).join(', ')} | ${cell((task.files ?? []).join(', '))} | ${cell(task.note)} |`);
   const checks = preflight(ledger);
   if (checks.length) lines.push('', 'Plan check:', ...checks.map(one => `- ${one}`));
   const problems = ledger.problems.filter(one => one.status === 'open');
@@ -190,7 +190,14 @@ export class Conductor {
         case 'run_plan': {
           const issues = preflight(parsed(raw));
           if (issues.length) fail(issues.join('\n'));
-          return signals.proposePlan(raw, caller, input);
+          const result = signals.proposePlan(raw, caller, input);
+          if (result.isError) return result;
+          return {
+            ...result,
+            text: 'Plan proposed. Render the full board below in your next user-visible reply, outside a code block, then wait for approval. Tool output alone is not the approval presentation.',
+            board: board(raw),
+            approvalRequired: true,
+          };
         }
         case 'approve': {
           owner();
