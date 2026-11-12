@@ -6,6 +6,10 @@ It also works in a **Lore** workspace (Epic's version control system) and takes 
 
 It is built on Claude Code's mod API (function hooks), which is early access and changes between releases. This version was built and tested on Claude Code 2.1.317.
 
+## Codex
+
+A Codex skill adapter is included alongside the Claude mod. On macOS or Windows, install it from this checkout with `node codex/install.mjs` (Node.js 22.18+). See [Codex setup and compatibility](codex/README.md).
+
 ## Install
 
 At the prompt of a terminal session:

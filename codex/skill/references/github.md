@@ -1,0 +1,12 @@
+# GitHub checks and merging
+
+Only merge when the user authorized merges for this run. Workers do not merge. The adapter requires `gh` authenticated against github.com; it calls REST through `gh api` without reading or logging the token. Prefer available connector tools for ordinary issue/PR reads and creation; the CLI implements the original Conductor merge checks.
+
+1. Review the task's actual change and checks, then `task_update` it to `green` with its `pr` number and `branch` recorded.
+2. Run `merge_check` with `{"task":"id","closes":[12]}`. `closes` must exactly match the PR's closing statements; use `[]` if none. It checks the current PR head, combined check runs and statuses, mergeability, base target, red base CI, dependencies, pause, open problems, and other merge claims. No checks or unread pages never count as green.
+3. With authorization already in the chat, run `merge` with `{"task":"id","closes":[12],"head":"full-sha-from-merge-check","told":[],"method":"merge"}`. `told` records other orchestrators informed of the merge, if any. Do not send external messages without authorization. Method may be merge, squash or rebase. `onRedMain:true` is only for the task that repairs the failing base.
+4. The adapter repeats live checks under its repository lock, verifies the expected head, claims the merge persistently, and submits the merge pinned to that SHA. A changed head requires another review/check. A server-enforced protection rule remains authoritative.
+5. If the write outcome is uncertain, do not retry the merge. Run `reconcile`, which only reads GitHub and adopts a confirmed merge. If GitHub still reports the PR unmerged, inspect it and use `reconcile` with `{"release":true}` only after the original request has settled (at least two minutes). A stale claim is never automatically cleared in the current run.
+6. After a confirmed merge, read the base branch's checks and keep checking in this task until they settle. Report a failure as a blocker; do not call the run done until warnings/blockers are addressed. There is no background watcher after the chat stops.
+
+The adapter serializes its own writes across runs in this project, but cannot lock other tools or external actors. GitHub's pinned head protects the PR revision, not a moving base branch. Protection rules should enforce any required up-to-date-base policy.
