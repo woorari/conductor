@@ -34,7 +34,7 @@ import { dashboardSvg } from './dashboard'
 import { KEEP, ROTATE_AT, carried, handover } from './handover'
 import { LINEAR_KEY, RUN_ID, STATUSES, TIERS, parseLedger } from './ledger'
 import { approvedMain, baseBroughtIn, conflicted, letGo, loreReady, onBase, onRunBranch, readyForBase, rev7, startLoreMerge, syncEnded } from './lore-merge'
-import { LINEAR_API, M_CREATE, M_UPDATE, Q_ISSUE, Q_TEAM, apiKeyOf, createdOf, errorsOf, issueOf, issueText, stateFor, teamOf, updatedOf } from './linear'
+import { LINEAR_API, M_CREATE, M_UPDATE, Q_ISSUE, Q_TEAM, apiKeyOf, createdOf, errorsOf, issueOf, issueText, linearIssueComplete, linearRunIssue, stateFor, teamOf, updatedOf } from './linear'
 import { branchInfoOf, ignoreRules, loreByHand, mergeOf, notInLore, pinLine, pinned, pushOf, repositoryInfoOf, someOf, statusOf } from './lore'
 import { candidatesFor, findHome, trustedRootsOf, workspaceOfSpec } from './home'
 import type { Home, Io } from './home'
@@ -1645,6 +1645,7 @@ async function answer(
   if (written.error !== undefined) return fail(written.error)
   if (written.value.isError) return fail(written.value.text)
   carry(written.value)
+  if (written.value.isChanged) await issueDone($, path)
 
   return { result: written.value.text, text: written.value.text }
 }
@@ -2030,6 +2031,7 @@ async function hold($: EngineInterface, isPausing: boolean): Promise<{ text: str
   if (written.error !== undefined) return { text: written.error }
   // A working orchestrator reads it with its next tool result; an idle one is woken with it.
   if (!written.value.isError) carry(written.value)
+  if (!isPausing && !written.value.isError) await issueDone($, path)
   seen = undefined
   await refresh($, false)
 
@@ -2213,6 +2215,11 @@ async function linearProblem($: EngineInterface, path: string, text: string, rea
  */
 async function moveIssue($: EngineInterface, path: string, key: string, type: 'started' | 'completed'): Promise<void> {
   try {
+    const canComplete = async () => {
+      const ledger = parseLedger(await $.fs.read(path)).ledger
+      return ledger !== undefined && linearIssueComplete(ledger, key)
+    }
+    if (type === 'completed' && !(await canComplete())) return
     const fail = (reason: string) => linearProblem($, path, `Linear did not move ${key} to its ${type} state: ${reason}. The run goes on; later changes are not reported while this lasts.`, reason)
     const read = await linear($, Q_ISSUE, { id: key })
     if (read.error !== undefined) return await fail(read.error)
@@ -2221,6 +2228,8 @@ async function moveIssue($: EngineInterface, path: string, key: string, type: 's
     if (view.state.type === type || (type === 'started' && view.state.type === 'completed')) return
     const stateId = stateFor(view.team.states, type)
     if (stateId === undefined) return await fail(`team ${view.team.key} has no ${type} state`)
+    // Re-read after the network request in case more work was added meanwhile.
+    if (type === 'completed' && !(await canComplete())) return
     const sent = await linear($, M_UPDATE, { id: view.id, input: { stateId } })
     if (sent.error !== undefined) return await fail(sent.error)
     if (!updatedOf(sent.data)) return await fail('Linear did not say the change went through')
@@ -2231,20 +2240,18 @@ async function moveIssue($: EngineInterface, path: string, key: string, type: 's
 }
 
 /**
- * A task that is done moves its Linear issue to completed, when its ticket is
- * one. In a git run with its tickets in Linear, the run's own issue follows
- * once every task is done; a Lore run's moves when it reaches the base
- * branch. Never throws.
+ * Reconcile finished issue scopes after a task, ruling or problem changes.
+ * Shared task tickets wait for every task on that ticket; the parent waits
+ * for the whole run, and in Lore for its merge into the base. Never throws.
  */
-async function issueDone($: EngineInterface, path: string, taskId: string): Promise<void> {
+async function issueDone($: EngineInterface, path: string, _taskId?: string): Promise<void> {
   try {
     const ledger = parseLedger(await $.fs.read(path)).ledger
-    const ticket = ledger?.tasks.find(one => one.id === taskId)?.ticket
-    if (typeof ticket === 'string') await moveIssue($, path, ticket, 'completed')
-    if (ledger === undefined || ledger.run.tickets !== 'linear' || ledger.run.lore !== undefined) return
-    if (!ledger.tasks.every(one => one.status === 'done')) return
-    const issue = ledger.run.issue ?? (LINEAR_KEY.test(ledger.run.source ?? '') ? ledger.run.source : undefined)
-    if (issue !== undefined && issue !== ticket) await moveIssue($, path, issue, 'completed')
+    if (ledger === undefined) return
+    const root = linearRunIssue(ledger)
+    const tickets = [...new Set(ledger.tasks.flatMap(task => typeof task.ticket === 'string' && task.ticket !== root ? [task.ticket] : []))]
+    if (root !== undefined) tickets.push(root)
+    for (const ticket of tickets) if (linearIssueComplete(ledger, ticket)) await moveIssue($, path, ticket, 'completed')
   } catch {
     // Nothing to move.
   }
@@ -2440,7 +2447,10 @@ async function approveRun($: EngineInterface, path: string): Promise<{ text: str
     return { value: outcome, isChanged: outcome.isChanged }
   })
   if (written.error !== undefined) return { text: written.error, isApproved: false }
-  if (!written.value.isError) await linearApproved($, path)
+  if (!written.value.isError) {
+    await linearApproved($, path)
+    await issueDone($, path)
+  }
   seen = undefined
   await refresh($, false)
 
@@ -4409,7 +4419,10 @@ export const register: Register = (on, options) => {
     seen = undefined
     await refresh($, false)
     // What hangs on the task the owner just closed reaches the orchestrator with its next tool result.
-    if (written.error === undefined && !written.value.isError) carry(written.value)
+    if (written.error === undefined && !written.value.isError) {
+      carry(written.value)
+      await issueDone($, path, taskId)
+    }
 
     return { text: written.error ?? written.value.text }
   })

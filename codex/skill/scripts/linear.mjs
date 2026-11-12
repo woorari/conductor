@@ -1,18 +1,18 @@
 import { LINEAR_KEY } from './core/ledger.mjs';
-import { LINEAR_API, M_UPDATE, errorsOf, issueOf, linearKeyOf, stateFor, updatedOf } from './core/linear.mjs';
+import { LINEAR_API, M_UPDATE, errorsOf, issueOf, linearSourceKey, linearRunIssue, linearIssueComplete, stateFor, updatedOf } from './core/linear.mjs';
 
 const READ_STATE = 'query ConductorIssueState($id: String!) { issue(id: $id) { id identifier state { name type } team { id key states { nodes { id name type position } } } } }';
 const terminal = type => ['completed', 'canceled', 'duplicate'].includes(type);
 
 /** Older Codex runs kept the issue key followed by source/context text. */
 export function issueFromSource(source = '') {
-  return linearKeyOf(source) ?? linearKeyOf(source.trim().split(/\s+/)[0] ?? '');
+  return linearSourceKey(source);
 }
 
 /** Compute lifecycle intent from persisted work, never from an agent's claim about Linear. */
 export function refreshLinear(raw) {
   if (!raw.codex) return;
-  const root = raw.run.issue ?? issueFromSource(raw.run.source);
+  const root = linearRunIssue(raw);
   const previous = raw.codex.linear;
   const activated = raw.run.plan === 'approved' || previous?.activated === true;
   if (!activated) return;
@@ -25,13 +25,11 @@ export function refreshLinear(raw) {
     groups.set(task.ticket, group);
   }
   for (const [issue, tasks] of groups) {
-    if (tasks.every(task => task.status === 'done')) desired.set(issue, 'completed');
+    if (linearIssueComplete(raw, issue)) desired.set(issue, 'completed');
     else if (tasks.some(task => task.startedAt || task.status !== 'queued')) desired.set(issue, 'started');
   }
   if (root && LINEAR_KEY.test(root)) {
-    const unresolved = (raw.problems ?? []).some(problem => problem.status === 'open' && problem.severity !== 'note');
-    const questions = (raw.posts ?? []).some(post => post.kind === 'question' && !post.answeredBy);
-    const finished = raw.run.plan === 'approved' && raw.tasks.length > 0 && raw.tasks.every(task => task.status === 'done') && !raw.merge && !unresolved && !questions && !raw.run.lore;
+    const finished = linearIssueComplete(raw, root);
     desired.set(root, finished ? 'completed' : 'started');
   }
   if (!desired.size && !previous) return;
@@ -45,7 +43,7 @@ export function refreshLinear(raw) {
 
 export function pendingLinear(raw) {
   const pending = Object.entries(raw.codex?.linear?.issues ?? {}).filter(([, value]) => !value.confirmed);
-  const root = raw.run.issue ?? issueFromSource(raw.run.source);
+  const root = linearRunIssue(raw);
   return pending.map(([issue, value]) => ({
     issue, target: value.target,
     ...(value.warning ? { warning: value.warning } : {}),

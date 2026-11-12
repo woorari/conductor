@@ -9,6 +9,7 @@
  */
 
 import { LINEAR_KEY } from './ledger'
+import type { Ledger } from '../types'
 
 export { LINEAR_KEY }
 
@@ -20,6 +21,36 @@ export function linearKeyOf(word: string): string | undefined {
   const linked = /^https?:\/\/linear\.app\/[^/\s]+\/issue\/([A-Z][A-Z0-9]{0,9}-[1-9][0-9]{0,8})(?:[/#?]\S*)?$/.exec(word)?.[1]
 
   return linked
+}
+
+/** A run source may keep the issue key followed by explanatory context. */
+export function linearSourceKey(source = ''): string | undefined {
+  return linearKeyOf(source) ?? linearKeyOf(source.trim().split(/\s+/)[0] ?? '')
+}
+
+/** The parent issue is not an ordinary task ticket, even when tasks carry its key. */
+export function linearRunIssue(ledger: Ledger): string | undefined {
+  return ledger.run.issue ?? linearSourceKey(ledger.run.source) ?? (ledger.run.tickets === 'linear' && LINEAR_KEY.test(ledger.run.id) ? ledger.run.id : undefined)
+}
+
+/** Shared by Claude and Codex: an issue completes only when all of its work is finished. */
+export function linearIssueComplete(ledger: Ledger, key: string): boolean {
+  if (!LINEAR_KEY.test(key)) return false
+  const root = linearRunIssue(ledger)
+  const own = key === root ? ledger.tasks : ledger.tasks.filter(task => task.ticket === key)
+  if (own.length === 0 || own.some(task => task.status !== 'done')) return false
+  const ids = new Set(own.map(task => task.id))
+  const problems = (ledger.problems ?? []).some(problem =>
+    problem.status === 'open' && problem.severity !== 'note' &&
+    (key === root || ids.has(problem.taskId ?? '') || ids.has(problem.addressedBy ?? '')),
+  )
+  const questions = (ledger.posts ?? []).some(post => post.kind === 'question' && post.answeredBy === undefined && (key === root || ids.has(post.from)))
+  if (problems || questions) return false
+  if (key !== root) return true
+  if (ledger.run.plan !== undefined && ledger.run.plan !== 'approved') return false
+  if (ledger.run.pausedAt !== undefined || ledger.merge !== undefined) return false
+  // A Lore task reaches the run branch first. The parent is delivered only on the base branch.
+  return ledger.run.lore === undefined || ledger.run.merged !== undefined
 }
 
 /** The key the person set in the mod's Linear API key option, trimmed; empty when none. */

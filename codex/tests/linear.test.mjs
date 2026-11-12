@@ -12,6 +12,7 @@ const skill = buildSkill(path.join(built, 'conductor'));
 const cli = path.join(skill, 'scripts', 'conductor.mjs');
 const { Conductor, board } = await import(pathToFileURL(cli).href);
 const { linearApiFromEnvironment } = await import(pathToFileURL(path.join(skill, 'scripts', 'linear.mjs')).href);
+const { linearIssueComplete } = await import(pathToFileURL(path.join(skill, 'scripts', 'core', 'linear.mjs')).href);
 process.on('exit', () => fs.rmSync(built, { recursive: true, force: true }));
 const owner = { kind: 'owner' };
 const states = [
@@ -86,6 +87,48 @@ test('shared task tickets and parent complete only after all associated work is 
   assert.equal(remote.current.get('ENG-2'), 'completed');
   assert.equal(remote.current.get('ENG-1'), 'completed');
   assert.equal(remote.writes.filter(one => one.key === 'ENG-2' && one.stateId === 'shipped-state').length, 1);
+});
+
+test('both hosts share a completion rule that refuses every unfinished task status', async t => {
+  const f = await fixture(t);
+  await f.add('one', 'ENG-1'); await f.add('two', 'ENG-1'); await f.approve();
+  const raw = f.app.load('ENG-1');
+  raw.tasks[0].status = 'done';
+  for (const status of ['queued', 'building', 'returned', 'review', 'green', 'blocked', 'failed']) {
+    raw.tasks[1].status = status;
+    assert.equal(linearIssueComplete(raw, 'ENG-1'), false, status);
+  }
+  raw.tasks[1].status = 'done';
+  assert.equal(linearIssueComplete(raw, 'ENG-1'), true);
+  raw.run.lore = { remote: 'lores://example.test', repository: 'game', base: 'main', branch: 'conductor/ENG-1' };
+  assert.equal(linearIssueComplete(raw, 'ENG-1'), false);
+  raw.run.merged = { revision: 'a'.repeat(64), at: new Date().toISOString() };
+  assert.equal(linearIssueComplete(raw, 'ENG-1'), true);
+});
+
+test('a problem under completed task work keeps that task ticket and its parent open', async t => {
+  const remote = transport();
+  const f = await fixture(t, remote.api);
+  await f.add('one', 'ENG-2'); await f.approve();
+  await f.app.apply('ENG-1', 'problem_report', { task: 'one', severity: 'warning', text: 'Task work needs verification' });
+  await f.update('one', 'done'); await f.sync();
+  assert.equal(remote.current.get('ENG-2'), 'started');
+  assert.equal(remote.current.get('ENG-1'), 'started');
+  await f.app.apply('ENG-1', 'problem_resolve', { problem: 'P1', resolution: 'Verified' });
+  await f.sync();
+  assert.equal(remote.current.get('ENG-2'), 'completed');
+  assert.equal(remote.current.get('ENG-1'), 'completed');
+});
+
+test('a paused run stays open even when all its tasks have finished', async t => {
+  const remote = transport();
+  const f = await fixture(t, remote.api);
+  await f.add('one', 'ENG-1'); await f.approve(); await f.sync();
+  await f.app.apply('ENG-1', 'pause', {}, owner);
+  await f.update('one', 'done'); await f.sync();
+  assert.equal(remote.current.get('ENG-1'), 'started');
+  await f.app.apply('ENG-1', 'unpause', {}, owner); await f.sync();
+  assert.equal(remote.current.get('ENG-1'), 'completed');
 });
 
 test('root ticket used by one task is not completed ahead of the rest of the run', async t => {

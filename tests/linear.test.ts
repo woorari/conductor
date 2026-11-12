@@ -1,7 +1,7 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
-import { issueOf, issueText, linearKeyOf, stateFor } from '../hooks/linear'
+import { issueOf, issueText, linearIssueComplete, linearKeyOf, stateFor } from '../hooks/linear'
 import type { Ledger, Task } from '../types'
 import { LEDGER, NOW, withTask } from './fixture'
 import { LINEAR_TOKEN, ROOT, board, ci, file, ledgerPath, mergeCommit, pull, spawn, start, world } from './world'
@@ -153,6 +153,67 @@ describe('the ticket tools', () => {
 })
 
 describe('Linear states the mod moves itself', () => {
+  for (const ticket of ['ABC-12', 'ABC-13']) {
+    test(`the first merged task does not close shared ticket ${ticket}`, async ($, on) => {
+      const tasks: Task[] = [
+        { ...T1, status: 'green', ticket, pr: 548 },
+        { ...T1, id: 't2', title: 'Two', status: 'green', ticket, pr: 549, files: ['src/b.ts'] },
+      ]
+      const { engine } = await linearRun($, on, { ...RUN, tasks })
+      engine.forge.pulls[548] = pull('b'.repeat(40))
+      engine.forge.pulls[549] = pull('c'.repeat(40))
+      engine.forge.checks['b'.repeat(40)] = ci('success')
+      engine.forge.checks['c'.repeat(40)] = ci('success')
+      await command($, 'approve')
+
+      await call($, 'merge', { task: 't1', told: [], closes: [] })
+      expect(engine.linear.updated.filter(one => one.input.stateId === 's-done'), 'the other task still has work to do').toEqual([])
+
+      await call($, 'merge', { task: 't2', told: [], closes: [] })
+      expect(engine.linear.updated.filter(one => one.id === `issue-${ticket}` && one.input.stateId === 's-done')).toHaveLength(1)
+    })
+  }
+
+  test('non-code tasks sharing the parent ticket close it only after the final task', async ($, on) => {
+    const tasks = [{ ...T1, ticket: 'ABC-12' }, { ...T1, id: 't2', ticket: 'ABC-12', files: ['src/b.ts'] }]
+    const { engine } = await linearRun($, on, { ...RUN, tasks })
+    await command($, 'approve')
+    await call($, 'task_update', { task: 't1', status: 'done' })
+    expect(engine.linear.updated.filter(one => one.input.stateId === 's-done')).toEqual([])
+    await call($, 'task_update', { task: 't2', status: 'done' })
+    expect(engine.linear.updated.filter(one => one.id === 'issue-ABC-12' && one.input.stateId === 's-done')).toHaveLength(1)
+  })
+
+  test('resolving the last warning completes an otherwise finished run', async ($, on) => {
+    const ledger: Ledger = { ...RUN, tasks: [{ ...T1, ticket: 'ABC-12' }], problems: [{ id: 'P1', text: 'Delivery still needs verification', severity: 'warning', status: 'open' }] }
+    const { engine } = await linearRun($, on, ledger)
+    await command($, 'approve')
+    await call($, 'task_update', { task: 't1', status: 'done' })
+    expect(engine.linear.updated.filter(one => one.input.stateId === 's-done')).toEqual([])
+    await call($, 'problem_resolve', { problem: 'P1', resolution: 'Verified the completed work' })
+    expect(engine.linear.updated.filter(one => one.id === 'issue-ABC-12' && one.input.stateId === 's-done')).toHaveLength(1)
+  })
+
+  test('the owner marking the final shared task merged also completes its ticket', async ($, on) => {
+    const tasks = [{ ...T1, ticket: 'ABC-12' }, { ...T1, id: 't2', ticket: 'ABC-12', files: ['src/b.ts'] }]
+    const { engine } = await linearRun($, on, { ...RUN, tasks })
+    await command($, 'approve')
+    await command($, 'merged', 't1')
+    expect(engine.linear.updated.filter(one => one.input.stateId === 's-done')).toEqual([])
+    await command($, 'merged', 't2')
+    expect(engine.linear.updated.filter(one => one.id === 'issue-ABC-12' && one.input.stateId === 's-done')).toHaveLength(1)
+  })
+
+  test('the shared completion rule keeps a Lore parent open until its run reaches the base', () => {
+    const ledger: Ledger = {
+      ...RUN,
+      run: { ...RUN.run, plan: 'approved', lore: { remote: 'lores://example.test', repository: 'game', base: 'main', branch: 'conductor/ABC-12' } },
+      tasks: [{ ...T1, status: 'done', ticket: 'ABC-12' }],
+    }
+    expect(linearIssueComplete(ledger, 'ABC-12')).toBe(false)
+    expect(linearIssueComplete({ ...ledger, run: { ...ledger.run, merged: { revision: 'a'.repeat(64), at: new Date(NOW).toISOString() } } }, 'ABC-12')).toBe(true)
+  })
+
   test("/approve moves the run's issue to its team's first started state", async ($, on) => {
     const { engine } = await linearRun($, on)
 
