@@ -124,6 +124,18 @@ test('open warnings hold parent completion until their resolution is saved', asy
   assert.equal(remote.current.get('ENG-1'), 'completed');
 });
 
+test('a changed plan cannot complete its parent until the changed plan is approved', async t => {
+  const remote = transport();
+  const f = await fixture(t, remote.api);
+  await f.add('one'); await f.approve(); await f.sync();
+  await f.add('two');
+  await f.update('one', 'done'); await f.update('two', 'done'); await f.sync();
+  assert.equal(f.app.load('ENG-1').run.plan, 'draft');
+  assert.equal(remote.current.get('ENG-1'), 'started');
+  await f.approve(); await f.sync();
+  assert.equal(remote.current.get('ENG-1'), 'completed');
+});
+
 test('API failure keeps board changes durable and a restart can retry the pending update', async t => {
   const remote = transport();
   const f = await fixture(t, remote.api);

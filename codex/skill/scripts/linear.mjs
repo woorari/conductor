@@ -31,7 +31,7 @@ export function refreshLinear(raw) {
   if (root && LINEAR_KEY.test(root)) {
     const unresolved = (raw.problems ?? []).some(problem => problem.status === 'open' && problem.severity !== 'note');
     const questions = (raw.posts ?? []).some(post => post.kind === 'question' && !post.answeredBy);
-    const finished = raw.tasks.length > 0 && raw.tasks.every(task => task.status === 'done') && !raw.merge && !unresolved && !questions && !raw.run.lore;
+    const finished = raw.run.plan === 'approved' && raw.tasks.length > 0 && raw.tasks.every(task => task.status === 'done') && !raw.merge && !unresolved && !questions && !raw.run.lore;
     desired.set(root, finished ? 'completed' : 'started');
   }
   if (!desired.size && !previous) return;
