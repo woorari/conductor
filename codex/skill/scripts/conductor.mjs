@@ -34,6 +34,14 @@ function run(program, args, cwd) {
 }
 const git = (root, args) => run('git', ['-C', root, ...args], root);
 
+// Windows may spell one directory through an 8.3 alias, a long path or a different case.
+// Compare filesystem identity rather than the spelling returned by Git and Node.
+function sameDirectory(left, right) {
+  const a = fs.statSync(left, { bigint: true });
+  const b = fs.statSync(right, { bigint: true });
+  return a.isDirectory() && b.isDirectory() && a.dev === b.dev && a.ino === b.ino;
+}
+
 export function board(raw) {
   const ledger = parsed(raw);
   const lines = [`# ${ledger.run.title} (${ledger.run.id})`, `Plan: ${ledger.run.plan ?? 'approved'}${ledger.run.pausedAt ? ' · PAUSED' : ''}`, '', '| Task | Status | Tier | Depends on | Note |', '| --- | --- | --- | --- | --- |'];
@@ -109,14 +117,14 @@ export class Conductor {
       const decision = route(ledger, { name: taskId, subagentType: 'worker' });
       if (decision.kind !== 'worker') return { isError: true, isChanged: false, text: decision.text ?? 'No worker route.' };
       if (!raw.codex) fail('This is not a Codex adapter ledger; do not write Claude run files.');
-      const mainRoot = fs.realpathSync(git(this.root, ['rev-parse', '--show-toplevel']));
-      if (mainRoot !== this.root) fail('Use the repository root for --root.');
+      const mainRoot = git(this.root, ['rev-parse', '--show-toplevel']);
+      if (!sameDirectory(mainRoot, this.root)) fail('Use the repository root for --root.');
       const workspace = path.join(path.dirname(this.root), `${path.basename(this.root)}.conductor-codex`, id, taskId);
       const branch = `conductor/${id}/${taskId}`;
       const task = raw.tasks.find(one => one.id === taskId);
       const existing = raw.codex.workspaces?.[taskId];
       if (existing) {
-        if (fs.realpathSync(git(existing, ['rev-parse', '--show-toplevel'])) !== fs.realpathSync(existing) || git(existing, ['branch', '--show-current']) !== task.branch) fail('Recorded worktree is missing or on a different branch; inspect it before resuming.');
+        if (!sameDirectory(git(existing, ['rev-parse', '--show-toplevel']), existing) || git(existing, ['branch', '--show-current']) !== task.branch) fail('Recorded worktree is missing or on a different branch; inspect it before resuming.');
       } else {
         if (fs.existsSync(workspace)) fail(`Workspace already exists: ${workspace}. Inspect it before reusing it.`);
         let base;
