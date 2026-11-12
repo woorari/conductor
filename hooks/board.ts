@@ -180,6 +180,13 @@ export function problemDetail(row: ProblemRow): string {
   return [row.severity, row.taskId, standingText(row.standing)].filter(one => one !== undefined).join(' · ')
 }
 
+/** The tier and, for Codex tasks, the kind of worker and an unproven trial. */
+export function tierLabel(task: Pick<Task, 'tier' | 'kind' | 'kindWhy'>): string {
+  return task.kind === 'codex'
+    ? `${task.tier} · codex${task.kindWhy === 'trial' ? ' · trial' : ''}`
+    : task.tier
+}
+
 /** The dim second line under a task's title: what matters for the section it is in. */
 export function detail(row: TaskRow): string {
   const parts: string[] = []
@@ -188,7 +195,7 @@ export function detail(row: TaskRow): string {
   if (row.merging !== undefined) parts.push(row.mergeMinutes === undefined ? row.merging : `${row.merging} ${elapsed(row.mergeMinutes)}`)
   else if (row.status === 'green') parts.push('ready to merge')
   if (row.status === 'review') parts.push('in review')
-  if (row.status !== 'done') parts.push(row.tier)
+  if (row.status !== 'done') parts.push(tierLabel(row))
   if (row.worker !== undefined && row.status !== 'queued' && row.status !== 'done') parts.push(row.worker)
   if (row.minutes !== undefined) parts.push(elapsed(row.minutes))
   if (row.silentMinutes !== undefined) parts.push(`silent ${elapsed(row.silentMinutes)}`)

@@ -1,6 +1,6 @@
 import type { ProblemSeverity, TaskStatus } from '../types'
 import type { Board, TaskRow, Timeline } from './board'
-import { elapsedShort, orchestratorLine, problemDetail, summary, thousands } from './board'
+import { elapsedShort, orchestratorLine, problemDetail, summary, thousands, tierLabel } from './board'
 
 /**
  * The run board as one SVG picture, for the surfaces that draw images. Pure:
@@ -300,7 +300,7 @@ export function dashboardSvg(board: Board, options: DashboardOptions): Dashboard
     }
     for (const task of board.attention.slice(0, ROWS_SHOWN)) {
       dot(y, task.status === 'failed' ? 'red' : 'amber')
-      row(task.id, task.title, task.tier, 'secondary', task.note === undefined ? task.status : `${task.status} · ${task.note}`)
+      row(task.id, task.title, tierLabel(task), 'secondary', task.note === undefined ? task.status : `${task.status} · ${task.note}`)
     }
     more(board.attention.length - ROWS_SHOWN, 'waiting')
     // A worker's question waits for the orchestrator's ruling, not for the person: said so in its second line.
@@ -385,7 +385,7 @@ export function dashboardSvg(board: Board, options: DashboardOptions): Dashboard
       const lead = task.worker ?? task.id
       const meta = [
         lead === task.id ? undefined : task.id,
-        task.tier,
+        tierLabel(task),
         task.silentMinutes === undefined ? undefined : `silent ${elapsedShort(task.silentMinutes)}`,
         task.contextTokens === undefined ? undefined : `${thousands(task.contextTokens)} tokens`,
         task.note ?? task.activity?.text,
@@ -406,7 +406,7 @@ export function dashboardSvg(board: Board, options: DashboardOptions): Dashboard
     for (const task of board.returned.slice(0, ROWS_SHOWN)) {
       ring(y, 'secondary')
       const lead = task.worker ?? task.id
-      const meta = [lead === task.id ? undefined : task.id, task.tier, task.note ?? 'waits for the orchestrator']
+      const meta = [lead === task.id ? undefined : task.id, tierLabel(task), task.note ?? 'waits for the orchestrator']
       row(
         lead,
         task.title,
@@ -429,7 +429,7 @@ export function dashboardSvg(board: Board, options: DashboardOptions): Dashboard
       }
     }
     const chip = (task: TaskRow, isWaiting: boolean): void => {
-      const text = cut(`${task.id} ${task.tier}`, right - PAD - 16, MONO_12)
+      const text = cut(`${task.id} ${tierLabel(task)}`, right - PAD - 16, MONO_12)
       const w = text.length * MONO_12 + 16
       place(w)
       parts.push(

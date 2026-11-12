@@ -1,6 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
+import { detail } from '../hooks/board'
 import type { Ledger, Task } from '../types'
 import { LEDGER, NOW } from './fixture'
 import { board, file, ledgerPath, picture$, spawn, start, world } from './world'
@@ -243,4 +244,15 @@ test('a worker and the orchestrator each read their own part of the board', asyn
   expect(whole, 'the orchestrator reads the whole run').toContain('## Tasks')
   expect(whole).toContain('- Q1 from t392-1: Which words?')
   expect(engine.ran, 'the board\'s tools are the mod\'s own').toEqual([])
+})
+
+test('task detail shows Codex and trials after the tier, leaving Claude and done rows unchanged', () => {
+  const row = { id: 'a', title: 'Build the feature', tier: 'sonnet' as const, status: 'queued' as const, waitsFor: [] }
+  expect(detail(row)).toBe('sonnet')
+  expect(detail({ ...row, kind: 'claude' })).toBe('sonnet')
+  expect(detail({ ...row, kind: 'claude', kindWhy: 'trial' })).toBe('sonnet')
+  expect(detail({ ...row, kind: 'codex' })).toBe('sonnet · codex')
+  expect(detail({ ...row, kind: 'codex', kindWhy: 'trial' })).toBe('sonnet · codex · trial')
+  expect(detail({ ...row, kind: 'codex', kindWhy: 'note' })).toBe('sonnet · codex')
+  expect(detail({ ...row, status: 'done', kind: 'codex', kindWhy: 'trial', pr: 12 })).toBe('PR 12')
 })
