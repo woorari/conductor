@@ -50,6 +50,7 @@ import { ORCHESTRATOR, briefing, digest, post, relative, rule, touch, waiting } 
 import { HELPER_TYPES, MAX_BUILDING, familyOf, route, routeCodex, unlocked } from './router'
 import type { Base, Route, Spawn } from './router'
 import {
+  KINDS,
   acted,
   activityText,
   addTask,
@@ -57,6 +58,7 @@ import {
   askAgain,
   assignProblem,
   ownerSetsTier,
+  ownerSetsKind,
   gauge,
   heldUp,
   markRead,
@@ -235,6 +237,9 @@ let isLooking = false
 let isWatchingStalls = false
 /** The commands and tools the engine would not take when the mod started, each with the engine's reason. */
 const unlisted: string[] = []
+/** Whether the task tools currently expose the bound run's Codex fields. */
+let taskToolsReady: boolean | undefined
+let hasWorkerCommand = false
 
 const iso = (ms: number): string => new Date(ms).toISOString()
 
@@ -1520,6 +1525,7 @@ async function bind($: EngineInterface, run: string | null): Promise<void> {
   const homeRoot = run === null ? null : (root ?? null)
   await update($, pinnedRun, () => run)
   await update($, pinnedRoot, () => homeRoot)
+  await syncTaskTools($)
   await syncCodexTool($)
   try {
     const own = boundKey(await $.session.id())
@@ -1732,6 +1738,21 @@ async function pick($: EngineInterface, taskId: string, tier: string): Promise<s
   if (path === undefined) return unbound($)
   const written = await mutate($, path, raw => {
     const outcome = ownerSetsTier(raw, taskId, chosen satisfies ModelTier)
+
+    return { value: outcome, isChanged: outcome.isChanged }
+  })
+  seen = undefined
+  await refresh($, false)
+
+  return written.error ?? written.value.text
+}
+
+/** The owner's choice of worker kind goes through the same serialized ledger write as /tier. */
+async function pickKind($: EngineInterface, taskId: string, kind: string): Promise<string> {
+  const path = await boundLedger($)
+  if (path === undefined) return unbound($)
+  const written = await mutate($, path, raw => {
+    const outcome = ownerSetsKind(raw, taskId, kind)
 
     return { value: outcome, isChanged: outcome.isChanged }
   })
@@ -3305,6 +3326,7 @@ async function refresh($: EngineInterface, rescan: boolean): Promise<void> {
     }
     seen = { path, mtimeMs }
     const { ledger } = parsed
+    await syncTaskTools($, pinned !== null && ledger.run.codex?.ready === true)
     if (pinned !== null) learn(ledger, path)
     await show($, `read ${path} ${mtimeMs}`, () => ({ runId, ledger, error: null, updatedMs: mtimeMs }))
   } catch (cause) {
@@ -3429,6 +3451,75 @@ async function startCodex($: EngineInterface, call: ToolCall): Promise<{ result:
   }
 }
 
+/** Re-register only the two run-dependent schemas when readiness changes. */
+async function syncTaskTools($: EngineInterface, ready?: boolean): Promise<void> {
+  if (ready === undefined) {
+    const path = await boundLedger($)
+    const ledger = path === undefined ? undefined : parseLedger(await textAt($, path) ?? '').ledger
+    ready = ledger?.run.codex?.ready === true
+  }
+  if (taskToolsReady === ready) return
+  const kindFields = ready ? {
+    kind: { type: 'string' as const, enum: [...KINDS] },
+    kindReason: { type: 'string' as const, description: 'One line: why this kind of worker.' },
+    kindNote: { type: 'integer' as const, minimum: 1, description: 'The numbered suitability note in this run, from 1.' },
+  } : {}
+  await listTool($, {
+    name: 'task_update',
+    description:
+      'Run board: say where a task of the run this session is bound to stands. The orchestrator may set any status, and may change the tier of a task that has not started (with tierReason). A task\'s own worker may set review (its pull request is open), blocked (it waits on a ruling) or failed, and may set note, pr and branch. The board is written only through these tools: never edit ledger.json.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        task: { type: 'string', description: 'The task\'s id, e.g. t391-1.' },
+        status: { type: 'string', enum: [...STATUSES] },
+        tier: { type: 'string', enum: [...TIERS], description: 'Only before the task starts, and only by the orchestrator.' },
+        tierReason: { type: 'string', description: 'One line: why this tier. Required with tier.' },
+        ...kindFields,
+        note: { type: 'string', description: 'One line: what it is doing now, or why it is blocked. An empty string clears it.' },
+        ticket: { anyOf: [{ type: 'integer', minimum: 1 }, { type: 'string', pattern: TICKET_PATTERN }], description: 'The issue it belongs to, a GitHub number or a Linear key like ABC-12; the orchestrator\'s to set.' },
+        pr: { type: 'integer', minimum: 1, description: 'The pull request\'s number.' },
+        branch: { type: 'string' },
+        revision: { type: 'string', pattern: '^[0-9a-f]{64}$', description: 'In Lore: the revision its branch was pushed at, which the merge is pinned to.' },
+      },
+      required: ['task'],
+      additionalProperties: false,
+    },
+    isDeferred: false,
+  })
+  await listTool($, {
+    name: 'task_add',
+    description:
+      'Run board: the orchestrator adds a task to the run, tagged with the model tier its worker runs on: opus for architecture and design, sonnet for challenging development, haiku for easy jobs. Its worker is then started with the task\'s id as the agent\'s name, and the mod sets the model from the tier. A task added to deal with open problems names them in addresses, so they have a task.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'A short name unique in the run, e.g. t391-2: letters, digits, _ and -.' },
+        title: { type: 'string', description: 'What the task delivers, in a few words.' },
+        tier: { type: 'string', enum: [...TIERS] },
+        tierReason: { type: 'string', description: 'One line: why this tier.' },
+        ...kindFields,
+        ticket: { anyOf: [{ type: 'integer', minimum: 1 }, { type: 'string', pattern: TICKET_PATTERN }], description: 'The issue it belongs to: a GitHub number or a Linear key like ABC-12.' },
+        dependsOn: { type: 'array', items: { type: 'string' }, description: 'Ids of tasks that must be done first.' },
+        files: { type: 'array', items: { type: 'string' }, description: 'The files or folders the task is expected to change, relative to the repository. Findings on them reach its worker, and a second task on the same file is flagged.' },
+        addresses: { type: 'array', items: { type: 'string' }, description: 'The ids of open problems this task is to deal with, e.g. ["P3"]: each then has this task, and is resolved once it is done and the fix holds.' },
+      },
+      required: ['id', 'title', 'tier', 'tierReason'],
+      additionalProperties: false,
+    },
+    isDeferred: false,
+  })
+  if (ready && !hasWorkerCommand) {
+    await listCommand($, {
+      name: 'worker',
+      description: 'Set the kind of worker for a task of the bound run that has not started',
+      argumentHint: '<task> claude|codex',
+    })
+    hasWorkerCommand = true
+  }
+  taskToolsReady = ready
+}
+
 /**
  * The mod works only in a repository that opted in with a `.claude/conductor`
  * folder. Anywhere else it registers nothing and its hooks pass everything on.
@@ -3472,49 +3563,8 @@ async function switchOn($: EngineInterface): Promise<void> {
     description: 'Show the run board: what is building, next, done, and the problems found',
     argumentHint: '[run id]',
   })
-  await listTool($, {
-    name: 'task_update',
-    description:
-      'Run board: say where a task of the run this session is bound to stands. The orchestrator may set any status, and may change the tier of a task that has not started (with tierReason). A task\'s own worker may set review (its pull request is open), blocked (it waits on a ruling) or failed, and may set note, pr and branch. The board is written only through these tools: never edit ledger.json.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        task: { type: 'string', description: 'The task\'s id, e.g. t391-1.' },
-        status: { type: 'string', enum: [...STATUSES] },
-        tier: { type: 'string', enum: [...TIERS], description: 'Only before the task starts, and only by the orchestrator.' },
-        tierReason: { type: 'string', description: 'One line: why this tier. Required with tier.' },
-        note: { type: 'string', description: 'One line: what it is doing now, or why it is blocked. An empty string clears it.' },
-        ticket: { anyOf: [{ type: 'integer', minimum: 1 }, { type: 'string', pattern: TICKET_PATTERN }], description: 'The issue it belongs to, a GitHub number or a Linear key like ABC-12; the orchestrator\'s to set.' },
-        pr: { type: 'integer', minimum: 1, description: 'The pull request\'s number.' },
-        branch: { type: 'string' },
-        revision: { type: 'string', pattern: '^[0-9a-f]{64}$', description: 'In Lore: the revision its branch was pushed at, which the merge is pinned to.' },
-      },
-      required: ['task'],
-      additionalProperties: false,
-    },
-    isDeferred: false,
-  })
-  await listTool($, {
-    name: 'task_add',
-    description:
-      'Run board: the orchestrator adds a task to the run, tagged with the model tier its worker runs on: opus for architecture and design, sonnet for challenging development, haiku for easy jobs. Its worker is then started with the task\'s id as the agent\'s name, and the mod sets the model from the tier. A task added to deal with open problems names them in addresses, so they have a task.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        id: { type: 'string', description: 'A short name unique in the run, e.g. t391-2: letters, digits, _ and -.' },
-        title: { type: 'string', description: 'What the task delivers, in a few words.' },
-        tier: { type: 'string', enum: [...TIERS] },
-        tierReason: { type: 'string', description: 'One line: why this tier.' },
-        ticket: { anyOf: [{ type: 'integer', minimum: 1 }, { type: 'string', pattern: TICKET_PATTERN }], description: 'The issue it belongs to: a GitHub number or a Linear key like ABC-12.' },
-        dependsOn: { type: 'array', items: { type: 'string' }, description: 'Ids of tasks that must be done first.' },
-        files: { type: 'array', items: { type: 'string' }, description: 'The files or folders the task is expected to change, relative to the repository. Findings on them reach its worker, and a second task on the same file is flagged.' },
-        addresses: { type: 'array', items: { type: 'string' }, description: 'The ids of open problems this task is to deal with, e.g. ["P3"]: each then has this task, and is resolved once it is done and the fix holds.' },
-      },
-      required: ['id', 'title', 'tier', 'tierReason'],
-      additionalProperties: false,
-    },
-    isDeferred: false,
-  })
+  await rebind($)
+  await syncTaskTools($)
   await listTool($, {
     name: 'board_post',
     description:
@@ -3749,7 +3799,6 @@ async function switchOn($: EngineInterface): Promise<void> {
   if (unlisted.length > 0) {
     void Promise.resolve($.ui.toast(`Run board: the engine did not take ${unlisted.join('; ')}. Everything else of the mod works.`)).catch(() => undefined)
   }
-  await rebind($)
   const path = await boundLedger($).catch(() => undefined)
   if (path !== undefined) await remember($, path)
   await syncCodexTool($)
@@ -4412,14 +4461,15 @@ export const register: Register = (on, options) => {
       placed !== undefined
         ? { tickets, config: placed.config, lore: loreRun, workspace: placed.workspace, candidates: placed.candidates }
         : { tickets, config: configText === undefined ? undefined : project, lore: loreRun }
-    await $.fs.write(path, `${JSON.stringify(newRun(id, source, iso(now), title, more), null, 2)}\n`)
+    const run = newRun(id, source, iso(now), title, more)
+    await $.fs.write(path, `${JSON.stringify(run, null, 2)}\n`)
     await flush($)
     await bind($, id)
     await update($, nowMs, () => now)
     seen = undefined
     await refresh($, true)
     await $.ui.open({ id: PANE, title: TITLE })
-    asks.push(planning(id, source, title))
+    asks.push(planning(id, source, title, run.run.codex?.ready === true ? run.run.config?.workers : undefined))
 
     // The mod runs the project's check itself, without Claude Code's permission prompt: the owner sees the program now.
     // The mod runs a check only in a Lore workspace: a git run's checks are its pull request's on GitHub.
@@ -4512,6 +4562,15 @@ export const register: Register = (on, options) => {
     }
 
     return { text: await pick($, taskId, tier) }
+  })
+
+  on('command.run', { command: 'worker' }, async ($, e) => {
+    const [taskId, kind, ...rest] = e.args.trim().split(/\s+/)
+    if (taskId === undefined || taskId === '' || kind === undefined || !KINDS.some(one => one === kind) || rest.length > 0) {
+      return { text: 'Say which task and which kind of worker: /worker <task> claude|codex.' }
+    }
+
+    return { text: await pickKind($, taskId, kind) }
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {

@@ -1,4 +1,4 @@
-import type { Ledger } from '../types'
+import type { Ledger, Workers } from '../types'
 import { RUN_ID } from './ledger'
 import { linearKeyOf } from './linear'
 import { FILES_PER_TASK, tidy } from './signals'
@@ -112,8 +112,17 @@ export const newRun = (id: string, source: string, at: string, title?: string, m
  * this line in the conversation too, so it says what happened; how a run is
  * planned is `PLANNING`, part of the orchestrator's standing instructions.
  */
-export const planning = (id: string, source: string, title?: string): string =>
-  `Run board: the owner started run \`${id}\` from ${source}${title === undefined ? '' : `, and calls it "${title}"`}. Plan it; start no worker yet.`
+export const planning = (id: string, source: string, title?: string, workers?: Workers): string => {
+  const started = `Run board: the owner started run \`${id}\` from ${source}${title === undefined ? '' : `, and calls it "${title}"`}. Plan it; start no worker yet.`
+  if (!workers?.codex) return started
+
+  return [
+    started,
+    '',
+    'Workers: Codex builds next to Claude in this run. Give every task a kind of worker, `claude` or `codex`, with `kindReason`. Spread the work: unless a note below or the task itself speaks for one side, give about half of the buildable tasks to each. Architecture and design tasks (opus) stay on Claude unless a note says otherwise. A note is a hint, not a rule; when you follow one, pass its number as `kindNote`. A task that follows a note marked "not proven" is a trial: say so in the plan. A Codex worker cannot ask you anything while it builds and has no board tools, so give it tasks whose brief stands on its own.',
+    ...(workers.notes ?? []).map((note, at) => `${at + 1}. ${note.kind}: ${note.for}${note.proven ? '' : ' (not proven)'}`),
+  ].join('\n')
+}
 
 /** How a run is planned: plan first, dispatch nothing. */
 export const PLANNING = [
