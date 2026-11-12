@@ -58,6 +58,34 @@ test('draft/proposed approval gate, owner requirement, pause and workspace isola
   assert.equal(app.load('run').tasks[0].status, 'building');
 });
 
+test('a proposed plan returns the complete approval board without starting workers', async t => {
+  const { app } = await started(t);
+  await add(app, 'one', ['src/upload.js']);
+  await add(app, 'two', ['tests/upload.test.js'], ['one']);
+  await app.apply('run', 'task_update', { task: 'one', note: 'Keep existing retries' });
+  const result = await app.apply('run', 'run_plan', { title: 'Upload fixes' });
+  assert.equal(result.approvalRequired, true);
+  assert.match(result.board, /Upload fixes/);
+  assert.match(result.board, /one: Task one/);
+  assert.match(result.board, /two: Task two/);
+  assert.match(result.board, /src\/upload.js/);
+  assert.match(result.board, /tests\/upload.test.js/);
+  assert.match(result.board, /Keep existing retries/);
+  assert.match(result.board, /\| two: Task two \| queued \| sonnet \| one \|/);
+  assert.equal(app.load('run').run.plan, 'proposed');
+  assert.ok(app.load('run').tasks.every(task => task.status === 'queued'));
+  assert.equal((await app.worktree('run', { task: 'one' })).isError, true);
+  const cli = path.join(skillPath, 'scripts', 'conductor.mjs');
+  const visible = JSON.parse(execFileSync(process.execPath, [cli, 'run_plan', '--root', app.root, '--run', 'run'], { encoding: 'utf8' }));
+  assert.equal(visible.approvalRequired, true);
+  assert.equal(visible.board, result.board);
+  await add(app, 'three', ['docs/upload.md']);
+  assert.match((await app.apply('run', 'run_plan')).board, /three: Task three/);
+  const denied = await app.apply('run', 'run_plan', {}, worker('one'));
+  assert.equal(denied.isError, true);
+  assert.equal(denied.board, undefined);
+});
+
 test('overlapping plans are refused; failed changes do not modify the ledger', async t => {
   const { app } = await started(t);
   await add(app, 'one', ['src']);
