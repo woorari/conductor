@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { familyOf, readiness, route, unlocked } from '../hooks/router'
+import { familyOf, readiness, route, routeCodex, unlocked } from '../hooks/router'
 import type { Ledger, Merge, TaskStatus } from '../types'
 import { LEDGER, withTask } from './fixture'
 
@@ -143,5 +143,102 @@ describe('when a task may start', () => {
     expect(unlocked(run('review', 'queued'), 'a')).toEqual([])
     const started: Ledger = { ...run('green', 'queued'), tasks: run('green', 'queued').tasks.map(one => (one.id === 'c' ? { ...one, status: 'building' as const } : one)) }
     expect(unlocked(started, 'a'), 'one that started already is not listed').toEqual([])
+  })
+})
+
+describe('Codex worker routing', () => {
+  const ready: Ledger = {
+    ...LEDGER,
+    run: { ...LEDGER.run, plan: 'approved', codex: { ready: true } },
+    tasks: [
+      { id: 't1', title: 'Build one', tier: 'sonnet', kind: 'codex', status: 'queued', files: ['src/one.ts'] },
+      { id: 't2', title: 'Build two', tier: 'haiku', status: 'queued', files: ['src/two.ts'] },
+    ],
+  }
+  const claudeRoute = (ledger: Ledger) => route({
+    ...ledger,
+    tasks: ledger.tasks.map(task => task.id === 't1' ? { ...task, kind: 'claude' } : task),
+  }, { ...worker, name: 't1' })
+  const sameRefusal = (ledger: Ledger, contains: string) => {
+    const claude = claudeRoute(ledger)
+    expect(claude).toMatchObject({ kind: 'deny' })
+    expect(claude.kind === 'deny' ? claude.text : '').toContain(contains)
+    expect(routeCodex(ledger, 't1')).toEqual({ is: 'deny', text: claude.kind === 'deny' ? claude.text : '' })
+  }
+
+  test('each kind names its own start tool, including an agent named as the recorded worker', () => {
+    for (const name of ['t1', 'codex-one']) {
+      const ledger = { ...ready, tasks: ready.tasks.map(task => task.id === 't1' ? { ...task, worker: 'codex-one' } : task) }
+      const decided = route(ledger, { ...worker, name })
+      expect(decided).toMatchObject({ kind: 'deny' })
+      expect(decided.kind === 'deny' ? decided.text : '').toContain('worker_start')
+    }
+    for (const kind of [undefined, 'claude'] as const) {
+      const ledger = { ...ready, tasks: ready.tasks.map(task => task.id === 't2' ? { ...task, kind } : task) }
+      expect(routeCodex(ledger, 't2')).toEqual({ is: 'deny', text: 'conductor: `t2` is built by Claude: start its worker with the Agent tool.' })
+      expect(route(ledger, { ...worker, name: 't2' })).toMatchObject({ kind: 'worker' })
+    }
+  })
+
+  test('an unknown task is refused instead of starting a helper', () => {
+    expect(routeCodex(ready, 'missing')).toMatchObject({ is: 'deny', text: expect.stringContaining('missing') })
+  })
+
+  test('Codex readiness is required, including a recorded reason it is off', () => {
+    for (const codex of [undefined, { ready: false, why: 'not installed' }]) {
+      const decided = routeCodex({ ...ready, run: { ...ready.run, codex } }, 't1')
+      expect(decided).toMatchObject({ is: 'deny', text: expect.stringContaining('off for this run') })
+      if (codex !== undefined) expect(decided.is === 'deny' ? decided.text : '').toContain('not installed')
+    }
+  })
+
+  test('draft and proposed plans and owner pause use the Claude refusals verbatim', () => {
+    for (const plan of ['draft', 'proposed'] as const) sameRefusal({ ...ready, run: { ...ready.run, plan } }, plan === 'draft' ? 'draft' : 'approval')
+    sameRefusal({ ...ready, run: { ...ready.run, pausedAt: '2026-11-12T12:00:00Z' } }, 'paused')
+  })
+
+  test('done or already building never starts another worker', () => {
+    for (const status of ['done', 'building'] as const) {
+      sameRefusal({ ...ready, tasks: ready.tasks.map(task => task.id === 't1' ? { ...task, status, worker: 'codex-one' } : task) }, status === 'done' ? 'is done' : 'already being built')
+    }
+  })
+
+  test('unfinished dependencies and two unmerged green branches use the Claude refusals', () => {
+    const dependent: Ledger = { ...ready, tasks: ready.tasks.map(task => task.id === 't1' ? { ...task, dependsOn: ['t2'] } : task) }
+    for (const status of ['queued', 'building', 'returned', 'review', 'blocked', 'failed'] as const) {
+      sameRefusal({ ...dependent, tasks: dependent.tasks.map(task => task.id === 't2' ? { ...task, status } : task) }, `t2 (${status})`)
+    }
+    sameRefusal({ ...dependent, tasks: [
+      { ...dependent.tasks[0]!, dependsOn: ['t2', 't3'] },
+      { ...dependent.tasks[1]!, status: 'green' },
+      { id: 't3', title: 'Three', tier: 'haiku', status: 'green' },
+    ] }, 'one unmerged branch only')
+  })
+
+  test('Claude and Codex workers both count towards the default and configured capacity', () => {
+    const building: Ledger = { ...ready, tasks: [ready.tasks[0]!, ...['claude', 'codex', 'claude'].map((kind, i) => ({
+      id: `building-${i}`, title: 'Busy', tier: 'sonnet' as const, kind: kind as 'claude' | 'codex', status: 'building' as const, slot: i + 1,
+    }))] }
+    sameRefusal(building, '3 workers are building')
+    sameRefusal({ ...building, run: { ...building.run, maxParallel: 1 }, tasks: building.tasks.slice(0, 2) }, '1 workers are building')
+    expect(routeCodex({ ...building, run: { ...building.run, maxParallel: 4 } }, 't1')).toEqual({ is: 'start', slot: 4 })
+  })
+
+  test('a building worker blocks overlapping files and folders, regardless of kind', () => {
+    for (const kind of ['claude', 'codex'] as const) {
+      sameRefusal({ ...ready, tasks: [ready.tasks[0]!, { ...ready.tasks[1]!, status: 'building', kind, files: ['src'] }] }, 'both change src/one.ts')
+    }
+  })
+
+  test('a free slot and the single green base are identical to Claude routing', () => {
+    const ledger: Ledger = { ...ready, tasks: [
+      { ...ready.tasks[0]!, dependsOn: ['t2'] },
+      { ...ready.tasks[1]!, status: 'green', branch: 'feat/t2', pr: 7 },
+      { id: 't3', title: 'Three', tier: 'haiku', kind: 'claude', status: 'building', slot: 1 },
+      { id: 't4', title: 'Four', tier: 'sonnet', kind: 'codex', status: 'building', slot: 3 },
+    ] }
+    expect(routeCodex(ledger, 't1')).toEqual({ is: 'start', slot: 2, base: { taskId: 't2', branch: 'feat/t2', pr: 7 } })
+    expect(claudeRoute(ledger)).toMatchObject({ kind: 'worker', slot: 2, base: { taskId: 't2', branch: 'feat/t2', pr: 7 } })
+    expect(routeCodex({ ...ledger, tasks: ledger.tasks.map(task => task.id === 't2' ? { ...task, status: 'done' } : task) }, 't1')).toEqual({ is: 'start', slot: 2 })
   })
 })

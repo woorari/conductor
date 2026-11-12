@@ -1,4 +1,5 @@
 import type { Ledger, ModelTier, Task } from '../types'
+import { kindOf } from './signals'
 
 /**
  * Which model a new agent runs on in a session bound to a run. Pure: the
@@ -135,6 +136,16 @@ export function route(ledger: Ledger, spawn: Spawn): Route {
       text: `conductor: this session is bound to run ${run}, where every worker is a task. Add the task with mcp__conductor__task_add (id, title, tier and why), then start the agent with the task's id as its name. Read-only helpers of type ${HELPER_TYPES.join(', ')} start without a task.`,
     }
   }
+  if (kindOf(task) === 'codex') {
+    return { kind: 'deny', text: `conductor: \`${task.id}\` is built by Codex: start it with worker_start, not with the Agent tool.` }
+  }
+
+  return workerRoute(ledger, task)
+}
+
+/** The start gates and slot allocation shared by both kinds of worker. */
+function workerRoute(ledger: Ledger, task: Task): Extract<Route, { kind: 'worker' | 'deny' }> {
+  const run = ledger.run.id
   if (ledger.run.plan === 'draft' || ledger.run.plan === 'proposed') {
     return {
       kind: 'deny',
@@ -195,4 +206,19 @@ export function route(ledger: Ledger, spawn: Spawn): Route {
   while (taken.has(slot)) slot += 1
 
   return { kind: 'worker', taskId: task.id, model: task.tier, slot, ...(ready.base === undefined ? {} : { base: ready.base }) }
+}
+
+/** A Codex task starts through the board tool, with exactly the same gates as a Claude worker. */
+export function routeCodex(ledger: Ledger, taskId: string): { is: 'start'; slot: number; base?: Base } | { is: 'deny'; text: string } {
+  const task = ledger.tasks.find(one => one.id === taskId)
+  if (task === undefined) return { is: 'deny', text: `conductor: there is no task ${taskId} in run ${ledger.run.id}. Add it with mcp__conductor__task_add first.` }
+  if (kindOf(task) !== 'codex') return { is: 'deny', text: `conductor: \`${task.id}\` is built by Claude: start its worker with the Agent tool.` }
+  if (ledger.run.codex?.ready !== true) {
+    return { is: 'deny', text: `conductor: Codex workers are off for this run${ledger.run.codex?.why === undefined ? '.' : `: ${ledger.run.codex.why}`}` }
+  }
+  const decided = workerRoute(ledger, task)
+
+  return decided.kind === 'deny'
+    ? { is: 'deny', text: decided.text }
+    : { is: 'start', slot: decided.slot, ...(decided.base === undefined ? {} : { base: decided.base }) }
 }
