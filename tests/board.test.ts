@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
-import { detail } from '../hooks/board'
+import { boardView, byKind, detail } from '../hooks/board'
 import type { Ledger, Task } from '../types'
 import { LEDGER, NOW } from './fixture'
 import { board, file, ledgerPath, picture$, spawn, start, world } from './world'
@@ -255,4 +255,55 @@ test('task detail shows Codex and trials after the tier, leaving Claude and done
   expect(detail({ ...row, kind: 'codex', kindWhy: 'trial' })).toBe('sonnet · codex · trial')
   expect(detail({ ...row, kind: 'codex', kindWhy: 'note' })).toBe('sonnet · codex')
   expect(detail({ ...row, status: 'done', kind: 'codex', kindWhy: 'trial', pr: 12 })).toBe('PR 12')
+})
+
+const resultTask = (id: string, change: Partial<Task> = {}): Task => ({
+  id, title: id, tier: 'sonnet', status: 'done', ...change,
+})
+const resultsLedger = (tasks: Task[]): Ledger => ({ ...LEDGER, tasks, problems: [], posts: [], rulings: [] })
+
+test('byKind reports the source example exactly, with default tasks counted as Claude', () => {
+  const ledger = resultsLedger([
+    resultTask('c-trial', { kind: 'codex', kindWhy: 'trial', turns: 1 }),
+    resultTask('c-done', { kind: 'codex' }),
+    resultTask('c-failed', { kind: 'codex', status: 'failed' }),
+    ...Array.from({ length: 4 }, (_, at) => resultTask(`a${at}`)),
+  ])
+  const before = JSON.stringify(ledger)
+  expect(byKind(ledger)).toBe('codex: 3 built · 2 merged · 1 failed · 1 needed a second turn · 1 trial (merged)\nclaude: 4 built · 4 merged')
+  expect(JSON.stringify(ledger), 'reporting never promotes a trial or rewrites the ledger').toBe(before)
+})
+
+test('byKind counts only built statuses, lists every trial outcome and uses turns >= 1', () => {
+  const ledger = resultsLedger([
+    resultTask('review', { kind: 'codex', status: 'review', kindWhy: 'trial', turns: 0 }),
+    resultTask('green', { kind: 'codex', status: 'green', kindWhy: 'trial', turns: 1 }),
+    resultTask('failed', { kind: 'codex', status: 'failed', kindWhy: 'trial', turns: 2 }),
+    resultTask('merged', { kind: 'codex', kindWhy: 'trial' }),
+    ...(['queued', 'building', 'returned', 'blocked'] as const).map(status => resultTask(status, { kind: 'codex', status, kindWhy: 'trial', turns: 3 })),
+    resultTask('claude', { kind: 'claude', status: 'failed', kindWhy: 'trial' }),
+  ])
+  expect(byKind(ledger)).toBe('codex: 4 built · 1 merged · 1 failed · 2 needed a second turn · 4 trials (review, green, failed, merged)\nclaude: 1 built · 0 merged · 1 failed · 1 trial (failed)')
+})
+
+test('byKind omits absent kinds and runs with no Codex or no built tasks', () => {
+  expect(byKind(LEDGER)).toBeUndefined()
+  expect(byKind(resultsLedger([]))).toBeUndefined()
+  expect(byKind(resultsLedger([resultTask('queued', { kind: 'codex', status: 'queued' })]))).toBeUndefined()
+  expect(byKind(resultsLedger([resultTask('codex', { kind: 'codex' })]))).toBe('codex: 1 built · 1 merged')
+  expect(byKind(resultsLedger([resultTask('queued', { kind: 'codex', status: 'queued' }), resultTask('claude')]))).toBe('claude: 1 built · 1 merged')
+})
+
+test('boardView adds worker results and identified trials only after all tasks are done or failed', () => {
+  const tasks = [resultTask('c-trial', { kind: 'codex', kindWhy: 'trial' }), resultTask('a-trial', { kindWhy: 'trial', status: 'failed' })]
+  const finished = boardView(resultsLedger(tasks), NOW)
+  expect(finished.kindResults).toBe('codex: 1 built · 1 merged · 1 trial (merged)\nclaude: 1 built · 0 merged · 1 failed · 1 trial (failed)')
+  expect(finished.kindTrials).toEqual(['Trial c-trial: codex · merged', 'Trial a-trial: claude · failed'])
+  for (const status of ['queued', 'building', 'returned', 'blocked', 'review', 'green'] as const) {
+    const unfinished = boardView(resultsLedger([...tasks, resultTask('pending', { status })]), NOW)
+    expect(unfinished.kindResults, status).toBeUndefined()
+    expect(unfinished.kindTrials, status).toBeUndefined()
+  }
+  expect(boardView(LEDGER, NOW).kindResults).toBeUndefined()
+  expect(boardView(resultsLedger([resultTask('claude', { kindWhy: 'trial' })]), NOW).kindTrials).toBeUndefined()
 })

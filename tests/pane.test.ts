@@ -120,3 +120,30 @@ test('outside a git repository the command says so', async ($, on) => {
   world(on, {}, null)
   expect((await board($)).text).toContain('not inside a git repository')
 })
+
+test('finished terminal board shows results and every identified trial, and hides them while work remains', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  const finished: Ledger = { ...LEDGER, problems: [], tasks: [
+    { id: 'c-trial', title: 'Trial', tier: 'sonnet', status: 'done', kind: 'codex', kindWhy: 'trial', turns: 1 },
+    { id: 'a-trial', title: 'Trial', tier: 'sonnet', status: 'failed', kindWhy: 'trial' },
+  ] }
+  const files: Files = { [ledgerPath('demo')]: file(finished, 1) }
+  world(on, files)
+  await start($)
+  await board($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ text: /^Worker results$/ })).toBeDefined()
+  const line = await ui.find({ text: /^codex: 1 built · 1 merged · 1 needed a second turn · 1 trial \(merged\)$/ })
+  expect(line).toBeDefined()
+  expect(line?.props.wrap).toBe('wrap')
+  expect(await ui.find({ text: /^claude: 1 built · 0 merged · 1 failed · 1 trial \(failed\)$/ })).toBeDefined()
+  expect(await ui.find({ text: /^Trial c-trial: codex · merged$/ })).toBeDefined()
+  expect(await ui.find({ text: /^Trial a-trial: claude · failed$/ })).toBeDefined()
+  await ui.unmount()
+
+  files[ledgerPath('demo')] = file({ ...finished, tasks: [...finished.tasks, { id: 'pending', title: 'Pending', tier: 'sonnet', status: 'queued' }] }, 2)
+  await board($)
+  const pending = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await pending.find({ text: /^Worker results$/ })).toBeUndefined()
+  await pending.unmount()
+})

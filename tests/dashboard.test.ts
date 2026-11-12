@@ -262,3 +262,49 @@ test('dashboard output for explicit Claude workers is identical to the default w
   expect(draw(explicit)).toEqual(draw())
   expect(draw().source).not.toContain(' · codex')
 })
+
+test('finished dashboard shows wrapped worker results and identified trials in its picture and alt text', () => {
+  const ledger: Ledger = { ...LEDGER, problems: [], tasks: [
+    { id: 'codex-trial', title: 'Trial', tier: 'sonnet', status: 'done', kind: 'codex', kindWhy: 'trial', turns: 1 },
+    { id: 'claude-trial', title: 'Trial', tier: 'sonnet', status: 'failed', kindWhy: 'trial' },
+  ] }
+  for (const width of [260, 320, 560]) {
+    const picture = draw(ledger, width)
+    expect(picture.source).toContain('>Worker results<')
+    expect(picture.alt).toContain('codex: 1 built · 1 merged · 1 needed a second turn · 1 trial (merged)')
+    expect(picture.alt).toContain('claude: 1 built · 0 merged · 1 failed · 1 trial (failed)')
+    expect(picture.alt).toContain('Trial codex-trial: codex · merged')
+    expect(picture.alt).toContain('Trial claude-trial: claude · failed')
+    const result = picture.source.slice(picture.source.indexOf('>Worker results<'))
+    expect(result).toContain('codex-trial')
+    expect(result).toContain('claude-trial')
+    expect(result).not.toContain('…')
+    for (const match of result.matchAll(/<text x="([\d.]+)" y="[\d.]+" font-size="12"[^>]*>([^<]*)<\/text>/g)) {
+      expect(Number(match[1]) + match[2]!.length * 6.5, `result text at ${width}`).toBeLessThanOrEqual(width)
+    }
+  }
+  expect(draw({ ...ledger, tasks: [...ledger.tasks, { id: 'pending', title: 'Pending', tier: 'sonnet', status: 'queued' }] }).source).not.toContain('>Worker results<')
+  expect(draw({ ...ledger, tasks: ledger.tasks.map(({ kind: _kind, ...task }) => task) }).source).not.toContain('>Worker results<')
+})
+
+test('worker results escape trial identifiers and preserve full accessible text', () => {
+  const ledger: Ledger = { ...LEDGER, tasks: [{ id: 'trial<&"', title: 'Trial', tier: 'sonnet', status: 'done', kind: 'codex', kindWhy: 'trial' }], problems: [] }
+  const picture = draw(ledger, 260)
+  expect(picture.source).toContain('Trial trial&lt;&amp;&quot;: codex')
+  expect(picture.source).not.toContain('Trial trial<&"')
+  expect(picture.alt).toContain('Trial trial<&": codex · merged')
+})
+
+test('finished dashboard wraps a maximum-length trial id without dropping any characters', () => {
+  for (const id of [`trial-${'a'.repeat(58)}`, 'W'.repeat(64)]) {
+    const ledger: Ledger = { ...LEDGER, problems: [], tasks: [{ id, title: 'Trial', tier: 'sonnet', status: 'done', kind: 'codex', kindWhy: 'trial' }] }
+    const picture = draw(ledger, 260)
+    const result = picture.source.slice(picture.source.indexOf('>Worker results<'))
+    const lines = [...result.matchAll(/<text x="[\d.]+" y="[\d.]+" font-size="12"[^>]*>([^<]*)<\/text>/g)].map(match => match[1]!)
+    expect(lines.join('').replace(/\s/g, '')).toContain(`Trial${id}:codex·merged`)
+    expect(lines.every(line => line.length * 7.25 <= 256), 'monospace advances fit inside the pane, including wide W glyphs').toBe(true)
+    expect(result).toContain('font-size="12" font-family="ui-monospace,')
+    expect(result).not.toContain('…')
+    expect(picture.alt).toContain(`Trial ${id}: codex · merged`)
+  }
+})

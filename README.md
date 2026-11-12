@@ -61,6 +61,44 @@ The token goes into a request's header and nowhere else: not the ledger, not a m
 | Base branch | `main` | The branch a run's pull requests merge into |
 | Merge method | `merge` | `merge`, `squash` or `rebase`, as GitHub merges a pull request |
 
+## Codex next to Claude
+
+Codex workers are off by default. To let Codex build tasks alongside Claude, set `"workers": { "codex": true }` in `.claude/conductor/config.json`. The full block can also carry suitability notes, model mappings and the MCP servers workers may keep:
+
+```json
+{
+  "workers": {
+    "codex": true,
+    "notes": [
+      { "kind": "codex", "for": "3D work: Blender scenes, meshes, materials", "proven": false },
+      { "kind": "claude", "for": "changes to conductor's own rules", "proven": true }
+    ],
+    "models": {
+      "sonnet": { "model": "gpt-5.1-codex", "effort": "medium" }
+    },
+    "mcp": ["blender"]
+  }
+}
+```
+
+The model mapping and server name above are examples: use a model and servers available in your installation, or omit those fields. Each tier can map to a Codex `model` and optional `effort` (`low`, `medium` or `high`); without a mapping, Codex uses its own default.
+
+A Codex worker is run directly by the mod through `codex exec` in its task's git worktree, in the `workspace-write` sandbox with network access forced off. The mod runs the project's check, gives Codex one more turn if the turn or check fails, then commits, pushes the task branch and opens its pull request. The orchestrator reviews and merges it under the same rules as a Claude task. Codex tasks share `maxParallel` and all approval, pause, dependency and file-conflict checks.
+
+The plan names each task's kind, `claude` or `codex`, and why it was chosen. `/worker <task> claude|codex` changes a queued task's kind; once you choose, the orchestrator leaves that choice alone. A task that has started keeps its kind.
+
+Suitability notes guide the split of work; they are hints the orchestrator may go against with a reason. Following a note with `proven: false` marks the task as a trial. The finished board shows results per kind, including failures, second turns and each trial's outcome. You decide whether to edit a note to `proven: true`, change it or remove it. In a folder home, home notes apply to its places and each place's notes are added on top.
+
+Limits of Codex workers:
+
+- **Claude Code must stay open.** Closing it or reloading the mod ends Codex runs. At the next start their tasks are returned; a restarted worker continues its thread in the same worktree.
+- Findings and rulings posted during a turn reach Codex only on its second turn, if one is needed. The orchestrator applies them during review.
+- Codex workers have no board tools: questions and problems go in their last message, rather than reaching the board during a turn.
+- Codex's own subagents are off. MCP servers from your Codex config are off unless `workers.mcp` names them.
+- Codex workers require a git workspace on GitHub and the mod's GitHub token. They are unavailable in Lore. If Codex is unavailable when a run starts, the run says why once and uses Claude tasks.
+
+Using a ChatGPT subscription through the Codex CLI falls under OpenAI's terms, which you must check for yourself.
+
 ## Using it
 
 1. **Start a run.** `/conduct #12` starts a run from issue 12; `/conduct docs/specs/export.md` starts one from a spec document. Any other words become the run's title: `/conduct #12 Retry the flaky upload`. `id=<name>` names the run yourself. The session is now bound to the run, and the orchestrator is asked for a plan.
