@@ -83,6 +83,44 @@ describe('a run starts with a plan', () => {
   })
 })
 
+describe('planning with Codex workers', () => {
+  const guidance = 'Workers: Codex builds next to Claude in this run. Give every task a kind of worker, `claude` or `codex`, with `kindReason`. Spread the work: unless a note below or the task itself speaks for one side, give about half of the buildable tasks to each. Architecture and design tasks (opus) stay on Claude unless a note says otherwise. A note is a hint, not a rule; when you follow one, pass its number as `kindNote`. A task that follows a note marked "not proven" is a trial: say so in the plan. A Codex worker cannot ask you anything while it builds and has no board tools, so give it tasks whose brief stands on its own.'
+
+  test('off or absent workers keep the original planning text, including the title', () => {
+    const original = 'Run board: the owner started run `r1` from src, and calls it "Worker planning". Plan it; start no worker yet.'
+    expect(planning('r1', 'src', 'Worker planning')).toBe(original)
+    expect(planning('r1', 'src', 'Worker planning', {})).toBe(original)
+    expect(planning('r1', 'src', 'Worker planning', { codex: false, notes: [{ kind: 'codex', for: '3D work', proven: false }] })).toBe(original)
+    expect(planning('r1', 'src', undefined, { notes: [{ kind: 'codex', for: '3D work', proven: false }] })).toBe(
+      'Run board: the owner started run `r1` from src. Plan it; start no worker yet.',
+    )
+  })
+
+  test('enabled workers append the exact guidance even without suitability notes', () => {
+    expect(planning('r1', 'src', undefined, { codex: true })).toBe(`${planning('r1', 'src')}\n\n${guidance}`)
+    expect(planning('r1', 'src', undefined, { codex: true, notes: [] })).toBe(`${planning('r1', 'src')}\n\n${guidance}`)
+  })
+
+  test('suitability notes keep their order and number, and identify unproven trials', () => {
+    const text = planning('r1', 'src', 'Worker planning', {
+      codex: true,
+      notes: [
+        { kind: 'codex', for: '3D work: Blender scenes, meshes, materials', proven: false },
+        { kind: 'claude', for: 'changes to conductor rules', proven: true },
+        { kind: 'claude', for: 'a new experiment', proven: false },
+      ],
+    })
+    expect(text).toBe([
+      planning('r1', 'src', 'Worker planning'),
+      '',
+      guidance,
+      '1. codex: 3D work: Blender scenes, meshes, materials (not proven)',
+      '2. claude: changes to conductor rules',
+      '3. claude: a new experiment (not proven)',
+    ].join('\n'))
+  })
+})
+
 describe('slicing', () => {
   test('a task that names more files than one worker should take on is refused', () => {
     const files = Array.from({ length: 13 }, (_, at) => `api/file_${at}.py`)
