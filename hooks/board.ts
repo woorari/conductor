@@ -29,6 +29,9 @@ export type ProblemRow = Problem & { standing: Standing }
 export type Board = {
   title: string
   total: number
+  /** Per-kind results and identified trials, present only when all tasks are done or failed and Codex took part. */
+  kindResults?: string
+  kindTrials?: string[]
   /** Open problems, blockers first, each severity in the ledger's order. */
   problems: ProblemRow[]
   resolved: number
@@ -79,6 +82,31 @@ function minutesSince(startedAt: string | undefined, nowMs: number): number | un
   return Math.floor((nowMs - started) / 60_000)
 }
 
+const built = (task: Task): boolean => ['review', 'green', 'done', 'failed'].includes(task.status)
+const workerKind = (task: Task): 'claude' | 'codex' => task.kind ?? 'claude'
+const resultOf = (task: Task): string => task.status === 'done' ? 'merged' : task.status
+
+/** Results per kind, including every trial's outcome; a Claude-only run keeps its existing board. */
+export function byKind(ledger: Ledger): string | undefined {
+  if (!ledger.tasks.some(task => task.kind === 'codex')) return undefined
+  const lines: string[] = []
+  for (const kind of ['codex', 'claude'] as const) {
+    const tasks = ledger.tasks.filter(task => workerKind(task) === kind && built(task))
+    if (tasks.length === 0) continue
+    const merged = tasks.filter(task => task.status === 'done').length
+    const failed = tasks.filter(task => task.status === 'failed').length
+    const second = tasks.filter(task => (task.turns ?? 0) >= 1).length
+    const trials = tasks.filter(task => task.kindWhy === 'trial')
+    const parts = [`${kind}: ${tasks.length} built`, `${merged} merged`]
+    if (failed > 0) parts.push(`${failed} failed`)
+    if (second > 0) parts.push(`${second} needed a second turn`)
+    if (trials.length > 0) parts.push(`${trials.length} ${trials.length === 1 ? 'trial' : 'trials'} (${trials.map(resultOf).join(', ')})`)
+    lines.push(parts.join(' · '))
+  }
+
+  return lines.length === 0 ? undefined : lines.join('\n')
+}
+
 export function boardView(ledger: Ledger, nowMs: number): Board {
   const silent = (one: Task): number | undefined => {
     const quiet = one.status === 'building' ? minutesSince(one.activity?.at, nowMs) : undefined
@@ -95,11 +123,16 @@ export function boardView(ledger: Ledger, nowMs: number): Board {
   }))
   const open = ledger.problems.filter(one => one.status === 'open').map((one): ProblemRow => ({ ...one, standing: standing(one, ledger.tasks) }))
   const finishedAt = (row: TaskRow): number => (row.finishedAt === undefined ? 0 : Date.parse(row.finishedAt))
+  const kindResults = ledger.tasks.every(task => task.status === 'done' || task.status === 'failed') ? byKind(ledger) : undefined
 
   return {
     title: ledger.run.title,
     ...(ledger.run.workspace === undefined ? {} : { workspace: shownWorkspace(ledger.run.workspace) }),
     total: rows.length,
+    ...(kindResults === undefined ? {} : {
+      kindResults,
+      kindTrials: ledger.tasks.filter(task => task.kindWhy === 'trial').map(task => `Trial ${task.id}: ${workerKind(task)} · ${resultOf(task)}`),
+    }),
     problems: [...open].sort((a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity]),
     resolved: ledger.problems.length - open.length,
     attention: rows.filter(row => row.status === 'blocked' || row.status === 'failed'),

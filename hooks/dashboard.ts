@@ -470,6 +470,25 @@ export function dashboardSvg(board: Board, options: DashboardOptions): Dashboard
     more(board.review.length - ROWS_SHOWN, 'to merge')
   }
 
+  if (board.kindResults !== undefined) {
+    label('Worker results', '')
+    // Keep every result and trial readable, including identifiers longer than one line.
+    const room = Math.max(1, Math.floor((right - PAD) / MONO_12))
+    for (const text of [...board.kindResults.split('\n'), ...(board.kindTrials ?? [])]) {
+      const words = text.split(/\s+/).flatMap(word => {
+        const pieces: string[] = []
+        for (let at = 0; at < word.length; at += room) pieces.push(word.slice(at, at + room))
+
+        return pieces
+      })
+      for (const line of wrap(words.join(' '), right - PAD, right - PAD, MONO_12, text.length)) {
+        parts.push(`<text x="${PAD}" y="${y + 12}" font-size="12" font-family="${MONO}"${fill('secondary')}>${escape(line)}</text>`)
+        y += 16
+      }
+      y += 4
+    }
+  }
+
   const own = orchestratorLine(board.orchestrator)
   if (own !== undefined) {
     y += 14
@@ -493,6 +512,7 @@ export function dashboardSvg(board: Board, options: DashboardOptions): Dashboard
     `${board.title}: ${summary(board)}.`,
     ...board.problems.map(one => `Problem ${one.id}, ${one.severity}: ${one.text}.`),
     ...board.attention.map(one => `${one.id} ${one.title} is ${one.status}.`),
+    ...(board.kindResults === undefined ? [] : [board.kindResults.replaceAll('\n', ' '), ...(board.kindTrials ?? [])]),
   ].join(' ')
   const light =
     theme === 'auto'

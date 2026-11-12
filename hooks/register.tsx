@@ -4720,6 +4720,14 @@ export const register: Register = (on, options) => {
         {section('WAITING', view.waiting)}
         {section('DONE', view.done.slice(0, DONE_SHOWN), undefined, view.done.length)}
         {earlier > 0 && <Text dimColor>{`  and ${earlier} earlier`}</Text>}
+        {view.kindResults !== undefined && (
+          <Box flexDirection="column" marginTop={1}>
+            <Text bold>Worker results</Text>
+            {[...view.kindResults.split('\n'), ...(view.kindTrials ?? [])].map(line => (
+              <Text dimColor wrap="wrap">{line}</Text>
+            ))}
+          </Box>
+        )}
         {view.resolved > 0 && (
           <Box marginTop={1}>
             <Text dimColor>{`${view.resolved} ${view.resolved === 1 ? 'problem' : 'problems'} resolved`}</Text>
