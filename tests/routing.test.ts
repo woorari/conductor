@@ -266,3 +266,90 @@ test('a worker whose start cannot be written down is not started', async ($, on)
   expect(engine.spawns, 'nothing reached the engine').toEqual([])
   expect(task(files, 'a').status).toBe('queued')
 })
+
+const codexReady: Ledger = {
+  ...LEDGER,
+  run: { ...LEDGER.run, codex: { ready: true }, config: { workers: { codex: true,
+    notes: [{ kind: 'codex', for: 'small standalone changes', proven: false }] } } },
+}
+const propertiesOf = (engine: Awaited<ReturnType<typeof bound>>['engine'], name: string) =>
+  (engine.schemas[name] as { properties: Record<string, unknown> }).properties
+
+test('/worker sets a queued task by the owner and the orchestrator cannot undo it', async ($, on) => {
+  const { files, engine } = await bound($, on, codexReady)
+  expect(engine.registered).toContain('/worker')
+  expect((await command($, 'worker', 't392-1 codex')).text).toBe('t392-1: claude to codex.')
+  expect(task(files, 't392-1')).toMatchObject({ kind: 'codex', kindWhy: 'owner' })
+  const back = await call($, 'mcp__conductor__task_update', { task: 't392-1', kind: 'claude', kindReason: 'copy' })
+  expect(back.text).toContain('The owner chose codex')
+  expect((await command($, 'worker', 't392-1 claude')).text).toBe('t392-1: codex to claude.')
+  expect(task(files, 't392-1')).toMatchObject({ kind: 'claude', kindWhy: 'owner' })
+  expect((await command($, 'worker', 't391-1 codex')).text).toContain('has started')
+  expect((await command($, 'worker', 'missing codex')).text).toContain('There is no task missing')
+})
+
+test('/worker reports usage for malformed input and refuses unavailable Codex', async ($, on) => {
+  const { files } = await bound($, on)
+  for (const args of ['', 't392-1', 't392-1 gemini', 't392-1 codex extra']) {
+    expect((await command($, 'worker', args)).text).toContain('/worker <task> claude|codex')
+  }
+  expect((await command($, 'worker', 't392-1 codex')).text).toContain('off for this run')
+  expect(task(files, 't392-1').kind).toBeUndefined()
+})
+
+test('worker-kind tool fields follow the bound run and disappear on unbinding', async ($, on) => {
+  const { files, engine } = await bound($, on, codexReady)
+  for (const name of ['task_add', 'task_update']) {
+    expect(propertiesOf(engine, name)).toMatchObject({
+      kind: { type: 'string', enum: ['claude', 'codex'] },
+      kindReason: { type: 'string' },
+      kindNote: { type: 'integer', minimum: 1 },
+    })
+  }
+  const added = await call($, 'mcp__conductor__task_add', { id: 'trial', title: 'Trial', tier: 'sonnet',
+    tierReason: 'implementation', kind: 'codex', kindReason: 'standalone', kindNote: 1 })
+  expect(added.isError).not.toBe(true)
+  expect(task(files, 'trial')).toMatchObject({ kind: 'codex', kindWhy: 'trial' })
+  const updated = await call($, 'mcp__conductor__task_update', { task: 't392-2',
+    kind: 'codex', kindReason: 'standalone implementation', kindNote: 1 })
+  expect(updated.isError).not.toBe(true)
+  expect(task(files, 't392-2')).toMatchObject({ kind: 'codex', kindWhy: 'trial', kindReason: 'standalone implementation' })
+  files[ledgerPath('plain')] = file({ ...LEDGER, run: { ...LEDGER.run, id: 'plain' } }, 2)
+  await board($, 'plain')
+  expect((await command($, 'worker', 't392-1 codex')).text).toContain('off for this run')
+  for (const name of ['task_add', 'task_update']) {
+    for (const key of ['kind', 'kindReason', 'kindNote']) expect(Object.keys(propertiesOf(engine, name))).not.toContain(key)
+  }
+  await board($, 'demo')
+  expect(Object.keys(propertiesOf(engine, 'task_add'))).toContain('kind')
+  await board($, 'none')
+  expect(Object.keys(propertiesOf(engine, 'task_add'))).not.toContain('kind')
+})
+
+test('a viewed ready run does not expose worker-kind fields until it is bound', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  const engine = world(on, { [PATH]: file(codexReady, 1) })
+  await start($)
+  for (const name of ['task_add', 'task_update']) {
+    expect(Object.keys(propertiesOf(engine, name))).not.toContain('kind')
+  }
+})
+
+test('restoring a ready run binding exposes worker-kind schemas at session start', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  const engine = world(on, { [PATH]: file(codexReady, 1) })
+  engine.store['bound:session-1'] = { run: 'demo', root: '/repo', at: new Date(NOW).toISOString() }
+  await start($)
+  for (const name of ['task_add', 'task_update']) expect(Object.keys(propertiesOf(engine, name))).toContain('kind')
+})
+
+test('off-run schemas are restored exactly after a ready run', async ($, on) => {
+  const { files, engine } = await bound($, on)
+  const before = ['task_add', 'task_update'].map(name => engine.schemas[name])
+  files[PATH] = file(codexReady, 2)
+  await board($, 'demo')
+  expect(Object.keys(propertiesOf(engine, 'task_update'))).toContain('kind')
+  files[PATH] = file({ ...LEDGER, run: { ...LEDGER.run, codex: { ready: false, why: 'not installed' } } }, 3)
+  await board($, 'demo')
+  expect(['task_add', 'task_update'].map(name => engine.schemas[name])).toEqual(before)
+})

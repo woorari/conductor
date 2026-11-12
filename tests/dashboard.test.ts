@@ -236,3 +236,29 @@ describe('dashboardSvg', () => {
     expect(draw(LEDGER, WIDTH, 'auto').source).toContain('fill="#ECE9E2"')
   })
 })
+
+test('dashboard shows worker kind after every displayed tier, including queued tasks waiting on a dependency', () => {
+  for (const status of ['blocked', 'failed', 'building', 'returned', 'queued'] as const) {
+    for (const kindWhy of ['spread', 'trial'] as const) {
+      const task: Task = { id: 'a', title: 'Build', tier: 'sonnet', status, kind: 'codex', kindWhy }
+      const expected = `sonnet · codex${kindWhy === 'trial' ? ' · trial' : ''}`
+      const ledger: Ledger = { ...LEDGER, tasks: [task], problems: [] }
+      const source = draw(ledger, 560).source
+      expect(source, `${status}, ${kindWhy}`).toContain(expected)
+      if (kindWhy !== 'trial') expect(source).not.toContain(' · trial')
+      if (status === 'queued') {
+        const waiting = draw({ ...ledger, tasks: [{ ...task, dependsOn: ['gate'] }] }, 560).source
+        expect(waiting, `waiting, ${kindWhy}`).toContain(expected)
+      }
+    }
+  }
+})
+
+test('dashboard output for explicit Claude workers is identical to the default worker kind', () => {
+  const explicit: Ledger = {
+    ...LEDGER,
+    tasks: LEDGER.tasks.map(task => ({ ...task, kind: 'claude', kindWhy: 'trial' })),
+  }
+  expect(draw(explicit)).toEqual(draw())
+  expect(draw().source).not.toContain(' · codex')
+})
