@@ -4,10 +4,13 @@ import path from 'node:path';
 import http from 'node:http';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { complexityOf, selectModel } from './core/models.mjs';
 import { parseLedger, RUN_ID } from './core/ledger.mjs';
 import { boardView, detail, problemDetail, timeline, runMinutes, elapsedShort } from './core/board.mjs';
 import { preflight } from './core/router.mjs';
 import { pendingLinear } from './linear.mjs';
+
+export const BOARD_PROTOCOL = 2;
 
 export const serverFile = (root, id) => {
   if (typeof id !== 'string' || !RUN_ID.test(id)) throw new Error('Invalid run id.');
@@ -21,9 +24,10 @@ export function snapshot(file, offset = 0) {
   const ledger = parsed.ledger;
   const now = Date.now();
   const view = boardView(ledger, now);
-  const task = row => ({ id: row.id, title: row.title, status: row.status, tier: row.tier,
+  const task = row => ({ id: row.id, title: row.title, status: row.status, tier: row.tier, complexity: complexityOf(row.tier),
+    modelSelection: row.status === 'done' ? undefined : selectModel('codex', row.tier, raw.codex?.models), recordedModel: row.model,
     files: row.files ?? [], dependsOn: row.dependsOn ?? [], note: row.note, ticket: row.ticket,
-    detail: detail(row) });
+    detail: detail(row, complexityOf) });
   const groups = Object.fromEntries(['attention', 'building', 'returned', 'review', 'next', 'waiting', 'done'].map(key => [key, view[key].map(task)]));
   const minutes = runMinutes(ledger, now);
   return {
@@ -44,6 +48,8 @@ export async function startServer(root, id, { idleMs = 30 * 60_000 } = {}) {
   const ledger = path.join(path.dirname(descriptor), 'ledger.json');
   snapshot(ledger); // Refuse missing/invalid runs before opening a socket.
   const assets = fileURLToPath(new URL('../assets/board/', import.meta.url));
+  // A skill update must not mix a running server's old data shape with new browser assets.
+  const content = Object.fromEntries(['index.html', 'board.js', 'board.css'].map(name => [name, fs.readFileSync(path.join(assets, name))]));
   const token = randomBytes(32).toString('hex');
   let lastRequest = Date.now();
   let port;
@@ -60,7 +66,7 @@ export async function startServer(root, id, { idleMs = 30 * 60_000 } = {}) {
       const expected = Buffer.from(`Bearer ${token}`);
       if (given.length !== expected.length || !timingSafeEqual(given, expected)) { send(401, 'application/json', '{"error":"Board access expired. Reopen it with $conductor board."}'); return; }
       lastRequest = Date.now();
-      if (req.method === 'GET' && url.pathname === '/api/health') { send(200, 'application/json', JSON.stringify({ protocol: 1, root, run: id })); return; }
+      if (req.method === 'GET' && url.pathname === '/api/health') { send(200, 'application/json', JSON.stringify({ protocol: BOARD_PROTOCOL, root, run: id })); return; }
       if (req.method === 'POST' && url.pathname === '/api/stop') {
         res.setHeader('Connection', 'close'); send(200, 'application/json', '{"stopped":true}');
         setImmediate(() => { server.close(); server.closeIdleConnections(); }); return;
@@ -77,12 +83,11 @@ export async function startServer(root, id, { idleMs = 30 * 60_000 } = {}) {
     if (req.method !== 'GET') { send(405, 'text/plain', 'Method not allowed'); return; }
     const asset = { '/': ['index.html', 'text/html; charset=utf-8'], '/board.js': ['board.js', 'text/javascript; charset=utf-8'], '/board.css': ['board.css', 'text/css; charset=utf-8'] }[url.pathname];
     if (!asset) { send(404, 'text/plain', 'Not found'); return; }
-    try { send(200, asset[1], fs.readFileSync(path.join(assets, asset[0]))); }
-    catch { send(503, 'text/plain', 'Board assets are unavailable. Update the Conductor skill and reopen the board.'); }
+    send(200, asset[1], content[asset[0]]);
   });
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
   port = server.address().port;
-  const info = { protocol: 1, pid: process.pid, root, run: id, port, token };
+  const info = { protocol: BOARD_PROTOCOL, pid: process.pid, root, run: id, port, token };
   const temporary = `${descriptor}.${process.pid}.tmp`;
   try { fs.writeFileSync(temporary, JSON.stringify(info), { mode: 0o600 }); fs.renameSync(temporary, descriptor); }
   catch (error) { server.close(); fs.rmSync(temporary, { force: true }); throw error; }

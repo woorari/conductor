@@ -188,6 +188,8 @@ export function reserved(raw: Raw, at: string, claim: { taskId: string; name: st
   if (claim.builtOn !== undefined) task.builtOn = claim.builtOn
   task.startedAt ??= at
   delete task.finishedAt
+  // The previous worker's model is history, never an assignment for the next host.
+  delete task.model
   task.activity = { at, text: 'starting' } satisfies Activity
 
   return before

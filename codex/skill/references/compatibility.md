@@ -7,7 +7,7 @@ This package adapts Conductor's workflow to a Codex skill and local CLI. Origina
 | Plan, propose, user approval | Persistent ledger with enforced start gate |
 | Task dependencies, file overlap, capacity | Original Conductor router and preflight logic |
 | Isolated Git workers | Actual Git worktrees and Codex collaboration subagents |
-| Worker tier labels | Retained labels; current model inherited unless user supplies a mapping |
+| Worker tier labels | Portable complexity keys; board separates complexity from current-session inheritance or an explicit owner mapping |
 | Board, findings, questions, rulings, problems | Live local board in the desktop right panel, plus Markdown approval board; orchestrator reads and forwards messages |
 | GitHub merge policy | Original checks and policy; live GH reads, exact-head merge, repository lock, uncertain-outcome reconciliation |
 | Pause and resume | Persistent hold checked before worker reservation and merge |

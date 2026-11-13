@@ -44,6 +44,12 @@ Replies follow the user's conversation language. A bare issue key or path defaul
 - This is a skill/CLI adapter, not Claude's function-hook runtime. The [compatibility table](skill/references/compatibility.md) lists automatic hooks, Lore provisioning/merges and other remaining differences.
 - Installing does not change Codex's model, permissions, MCP configuration or Claude's installation. Unreal and Blender connections are separate machine-local configuration and are not shipped in this repository.
 
+## Models on host handover
+
+Task complexity survives a handover; provider model assignments do not. The portable tier keys stay `opus`/`sonnet`/`haiku` for ledger compatibility, but Codex displays architecture/implementation/simple and shows **current Codex model** as the default next-worker selection. Workers inherit the model selected in the receiving chat. Claude resolves the same complexity keys to its native tier aliases. A prior worker’s recorded model is shown separately as history, and a new reservation clears that record until the new engine reports its actual model.
+
+On a host takeover, `model_policy` with input `{}` resets future Codex assignments to session inheritance. An explicit owner-supplied mapping is stored with `model_policy --caller owner` and input `{"models":{"sonnet":"<available Codex model>"}}`; unmapped tiers inherit. Workers cannot change this policy. Approval, task progress, existing agents and completed history are preserved. This is model handling, not automatic ledger or workspace migration between the two hosts.
+
 ## Live desktop board
 
 The board runs locally with the same Node.js runtime as the adapter, without npm dependencies or API keys. It shows progress, task states, measured worker timelines, open problems/questions, rulings, pending Linear transitions, and the full plan with tiers, dependencies and expected files. Approval and resume buttons copy commands to send in chat; viewing or clicking the board never approves or changes a run.

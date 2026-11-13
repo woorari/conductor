@@ -1,4 +1,5 @@
 import type { Ledger, ModelTier, Task } from '../types'
+import { selectModel } from './models'
 
 /**
  * Which model a new agent runs on in a session bound to a run. Pure: the
@@ -194,5 +195,5 @@ export function route(ledger: Ledger, spawn: Spawn): Route {
   let slot = 1
   while (taken.has(slot)) slot += 1
 
-  return { kind: 'worker', taskId: task.id, model: task.tier, slot, ...(ready.base === undefined ? {} : { base: ready.base }) }
+  return { kind: 'worker', taskId: task.id, model: selectModel('claude', task.tier).model, slot, ...(ready.base === undefined ? {} : { base: ready.base }) }
 }

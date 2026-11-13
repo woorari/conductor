@@ -62,7 +62,7 @@ function render(data) {
   const queued = [...data.groups.next, ...data.groups.waiting];
   if (queued.length) {
     const s = section('Up next', `${queued.length} queued`); const chips = el('div', undefined, 'queue');
-    for (const task of queued) { const chip = el('span', undefined, `chip${task.dependsOn.some(id => !data.groups.done.some(t => t.id === id) && !data.groups.review.some(t => t.id === id && t.status === 'green')) ? ' waiting' : ''}`); chip.title = `${task.title}\n${task.detail}`; chip.append(document.createTextNode(task.id + ' '), el('small', task.tier)); chips.append(chip); }
+    for (const task of queued) { const chip = el('span', undefined, `chip${task.dependsOn.some(id => !data.groups.done.some(t => t.id === id) && !data.groups.review.some(t => t.id === id && t.status === 'green')) ? ' waiting' : ''}`); chip.title = `${task.title}\n${task.detail}`; chip.append(document.createTextNode(task.id + ' '), el('small', task.complexity)); chips.append(chip); }
     s.append(chips); sections.push(s);
   }
   if (data.groups.done.length) {
@@ -74,7 +74,9 @@ function render(data) {
   const plan = [];
   if (data.planChecks.length) { const checks = section('Plan checks', data.planChecks.length); data.planChecks.forEach(text => checks.append(el('p', text, 'detail'))); plan.push(checks); }
   for (const task of Object.values(data.groups).flat()) {
-    const node = el('div', undefined, 'plan-task'); node.append(el('p', `${task.id} · ${task.title}`), el('p', `${task.status} · ${task.tier}${task.dependsOn.length ? ' · after ' + task.dependsOn.join(', ') : ''}`, 'detail'), el('p', task.files.join('\n') || 'No expected files recorded', 'files'));
+    const node = el('div', undefined, 'plan-task'); node.append(el('p', `${task.id} · ${task.title}`), el('p', `${task.status} · ${task.complexity}${task.dependsOn.length ? ' · after ' + task.dependsOn.join(', ') : ''}`, 'detail'), el('p', task.files.join('\n') || 'No expected files recorded', 'files'));
+    if (task.modelSelection) node.append(el('p', `Next worker: ${task.modelSelection.label}`, 'detail'));
+    if (task.recordedModel) node.append(el('p', `Recorded worker: ${task.recordedModel}`, 'detail'));
     if (task.note) node.append(el('p', task.note, 'detail')); plan.push(node);
   }
   $('plan-body').replaceChildren(...plan); $('plan-count').textContent = `${data.total} tasks`;
