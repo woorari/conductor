@@ -10,7 +10,7 @@ import { boardView, detail, problemDetail, timeline, runMinutes, elapsedShort } 
 import { preflight } from './core/router.mjs';
 import { pendingLinear } from './linear.mjs';
 
-export const BOARD_PROTOCOL = 3;
+export const BOARD_PROTOCOL = 4;
 
 export const serverFile = (root, id, host = 'codex') => {
   if (!['claude', 'codex'].includes(host)) throw new Error('Invalid board host.');
@@ -28,6 +28,7 @@ export function snapshot(file, offset = 0, host = 'codex') {
   const task = row => ({ id: row.id, title: row.title, status: row.status, tier: row.tier, complexity: host === 'claude' ? row.tier : complexityOf(row.tier),
     modelSelection: row.status === 'done' ? undefined : selectModel(host, row.tier, host === 'codex' ? raw.codex?.models : undefined), recordedModel: row.model,
     files: row.files ?? [], dependsOn: row.dependsOn ?? [], note: row.note, ticket: row.ticket,
+    activity: row.activity && Number.isFinite(Date.parse(row.activity.at)) ? { ...row.activity, ageMinutes: Math.max(0, Math.floor((now - Date.parse(row.activity.at)) / 60_000)) } : undefined,
     detail: host === 'claude' ? detail(row) : detail(row, complexityOf) });
   const groups = Object.fromEntries(['attention', 'building', 'returned', 'review', 'next', 'waiting', 'done'].map(key => [key, view[key].map(task)]));
   const minutes = runMinutes(ledger, now);

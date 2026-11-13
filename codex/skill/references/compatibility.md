@@ -13,7 +13,8 @@ This package adapts Conductor's workflow to a Codex skill and local CLI. Origina
 | Pause and resume | Persistent hold checked before worker reservation and merge |
 | Handover | Saved Markdown checkpoint; read after compaction/restart |
 | Claude slash commands and live pane | Use `$conductor <command>`; local browser panel with automatic refresh, plus Markdown fallback |
-| Automatic tool interception, activity/tokens, routing overrides | Not installed; agents follow skill instructions rather than Claude runtime interception |
+| Activity reports | Timestamped task notes attributed to worker/orchestrator; liveness is checked through collaboration tools, not inferred from the board connection |
+| Automatic tool interception, activity/tokens, routing overrides | No automatic tool/token telemetry; agents follow skill instructions rather than Claude runtime interception |
 | Automatic compaction, timer and post-merge CI watcher | Not installed; Codex handles its context, orchestrator checks CI during the run |
 | Lore workspaces/merges and exact-revision approve-main | Not ported; no claim of runtime-enforced equivalence |
 | Folder-home workspace selection | Select a concrete repository first; no automatic places routing |

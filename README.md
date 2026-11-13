@@ -14,7 +14,7 @@ The main session orchestrates; isolated task workers write code. The orchestrato
 
 For GitHub main/base merges, review the PR and checks, then approve its full head with `/approve-merge <task> <full SHA>` in Claude, or `approve_merge --caller owner` in Codex. A changed PR, head or target base needs new approval. An unchanged approval is retained across a refused/uncertain request and cleared once completion is verified. Lore retains its existing exact-revision `/approve-main` gate.
 
-Automatic cleanup is reversible: kept Lore workspaces and obsolete copied files move into the project’s `_deleted`; Git worktrees move there with Git’s registration updated. Cleanup never falls back to deleting when a move fails. `_deleted` is retained until the owner separately approves permanent deletion.
+Automatic cleanup is reversible: kept Lore workspaces and obsolete copied files move into `_deleted` under the ignored run directory; Git worktrees move into the project’s `_deleted` with Git’s registration updated. Cleanup never falls back to deleting when a move fails. Quarantine contents are local recovery material, excluded from normal Git staging, and must never be force-added or published. They remain until the owner separately approves permanent deletion.
 
 ## Shared HTML board
 

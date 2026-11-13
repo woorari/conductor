@@ -18,8 +18,21 @@ function noLinks(root, file) {
   for (const part of path.relative(root, file).split(path.sep).filter(Boolean)) { current = path.join(current, part); if (fs.lstatSync(current).isSymbolicLink()) throw new Error('Quarantine cannot follow symbolic links.'); }
 }
 
+function ignoreQuarantine(root) {
+  let exclude;
+  try { exclude = execFileSync('git', ['-C', root, 'rev-parse', '--git-path', 'info/exclude'], { encoding: 'utf8', stdio: 'pipe' }).trim(); }
+  catch { return; } // Folder and Lore projects have no Git metadata.
+  exclude = path.resolve(root, exclude);
+  if (protectedPath(exclude)) throw new Error('Git quarantine exclusions cannot access protected files.');
+  const parent = fs.realpathSync(path.dirname(exclude));
+  if (protectedPath(parent) || (fs.existsSync(exclude) && fs.lstatSync(exclude).isSymbolicLink())) throw new Error('Git quarantine exclusions cannot follow protected paths or links.');
+  const existing = fs.existsSync(exclude) ? fs.readFileSync(exclude, 'utf8') : '';
+  // Local metadata shared by linked worktrees; never add retained private files to a task PR.
+  if (!existing.split(/\r?\n/).includes('_deleted/')) fs.appendFileSync(exclude, `${existing.endsWith('\n') || !existing ? '' : '\n'}# Conductor: retained local files\n_deleted/\n`);
+}
+
 /** Move aside reversibly. Validate every source before moving the first; never overwrite or delete. */
-export function quarantine(root, files, managed = [], gitWorktree = false) {
+export function quarantine(root, files, managed = [], gitWorktree = false, deletedDirectory) {
   if (protectedPath(root)) throw new Error('System files and ~/Library are outside automatic quarantine.');
   const originalRoot = path.resolve(root);
   root = fs.realpathSync(root);
@@ -43,11 +56,17 @@ export function quarantine(root, files, managed = [], gitWorktree = false) {
     const parent = roots.find(folder => inside(folder, source)); noLinks(parent, source);
     if (sources.some(other => other !== source && inside(source, other))) throw new Error('Do not list both a folder and its contents.');
   }
-  const deleted = path.join(root, '_deleted');
-  if (fs.existsSync(deleted)) noLinks(root, deleted);
+  const requested = path.resolve(originalRoot, deletedDirectory ?? '_deleted');
+  if (!inside(originalRoot, requested) || path.basename(requested) !== '_deleted' || protectedPath(requested)) throw new Error('The quarantine destination must be an _deleted folder inside the project.');
+  const deleted = path.join(root, path.relative(originalRoot, requested));
+  let existingParent = deleted;
+  while (!fs.existsSync(existingParent)) existingParent = path.dirname(existingParent);
+  noLinks(root, existingParent);
+  if (sources.some(source => inside(source, deleted))) throw new Error('The quarantine destination cannot be inside a source.');
   const destination = path.join(deleted, `${Date.now()}-${randomBytes(6).toString('hex')}`);
   const planned = sources.map((source, index) => ({ from: source, to: path.join(destination, inside(root, source) ? path.relative(root, source) : path.join('workspaces', String(index), path.basename(source))) }));
   if (planned.some((one, index) => planned.some((other, otherIndex) => index !== otherIndex && inside(one.to, other.to)))) throw new Error('Quarantine destinations overlap; move those items separately.');
+  ignoreQuarantine(root);
   fs.mkdirSync(deleted, { recursive: true });
   fs.mkdirSync(destination); // Reserve the destination; never replace a previous quarantine.
   const moved = [];
@@ -61,7 +80,7 @@ export function quarantine(root, files, managed = [], gitWorktree = false) {
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const args = process.argv.slice(2); let root; let gitWorktree = false; const managed = []; const files = [];
-  while (args.length) { const key = args.shift(); if (key === '--git') gitWorktree = true; else if (key === '--root') root = args.shift(); else if (key === '--managed') managed.push(args.shift()); else if (key === '--') { files.push(...args); break; } else throw new Error('Use --root <project> [--managed <workspace-parent>] -- <files...>.'); }
-  try { console.log(JSON.stringify(quarantine(root, files, managed, gitWorktree))); } catch (error) { console.error(error.message); process.exitCode = 1; }
+  const args = process.argv.slice(2); let root; let deletedDirectory; let gitWorktree = false; const managed = []; const files = [];
+  while (args.length) { const key = args.shift(); if (key === '--git') gitWorktree = true; else if (key === '--root') root = args.shift(); else if (key === '--destination') deletedDirectory = args.shift(); else if (key === '--managed') managed.push(args.shift()); else if (key === '--') { files.push(...args); break; } else throw new Error('Use --root <project> [--managed <workspace-parent>] [--destination <project/_deleted>] -- <files...>.'); }
+  try { console.log(JSON.stringify(quarantine(root, files, managed, gitWorktree, deletedDirectory))); } catch (error) { console.error(error.message); process.exitCode = 1; }
 }

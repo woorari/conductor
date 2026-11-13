@@ -32,4 +32,20 @@ test('a Git workspace moves into _deleted while Git retains its correct worktree
   assert.equal(fs.existsSync(source), false); assert.equal(fs.readFileSync(path.join(result.moved[0].to, 'uncommitted.txt'), 'utf8'), 'retain even unfinished content');
   assert.ok(git(['worktree', 'list', '--porcelain']).includes(result.moved[0].to.replaceAll('\\', '/')));
   assert.equal(fs.readFileSync(path.join(root, 'code.txt'), 'utf8'), 'approved code');
+  assert.equal(git(['ls-files', '--others', '--exclude-standard']).trim(), '');
+  const active = path.join(parent, 'active'); git(['worktree', 'add', '-b', 'another-task', active]);
+  fs.writeFileSync(path.join(active, 'private.txt'), 'private retained content');
+  const { moved } = quarantine(active, ['private.txt']);
+  assert.equal(fs.readFileSync(moved[0].to, 'utf8'), 'private retained content');
+  assert.equal(execFileSync('git', ['-C', active, 'ls-files', '--others', '--exclude-standard'], { encoding: 'utf8' }).trim(), '');
+});
+
+test('an ignored native run can retain cleanup files without widening source or destination scope', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'conductor-native-quarantine-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(root, 'old.txt'), 'retained');
+  assert.throws(() => quarantine(root, ['old.txt'], [], false, '../_deleted'), /inside the project/);
+  const result = quarantine(root, ['old.txt'], [], false, '.claude/conductor/runs/run/_deleted');
+  assert.ok(result.moved[0].to.includes(path.join('.claude', 'conductor', 'runs', 'run', '_deleted')));
+  assert.equal(fs.readFileSync(result.moved[0].to, 'utf8'), 'retained');
 });

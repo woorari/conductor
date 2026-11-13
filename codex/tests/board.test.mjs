@@ -52,6 +52,20 @@ test('live board reads current saved state without mutating approval, tasks or C
   assert.equal(fs.readFileSync(path.join(root, '.claude/conductor/runs/untouched'), 'utf8'), 'Claude board');
 });
 
+test('worker hand-back and orchestrator review publish fresh, attributed reports without implying liveness', async t => {
+  const { app, base, headers } = await fixture(t);
+  const caller = { kind: 'worker', taskId: 'one' };
+  await app.apply('run', 'task_update', { task: 'one', status: 'review', note: 'Tests passed; ready for review.' }, caller);
+  let board = await (await fetch(base + '/api/board', { headers })).json();
+  assert.equal(board.groups.building.length, 0);
+  assert.equal(board.groups.review[0].activity.text, 'Worker: Tests passed; ready for review.');
+  assert.equal(board.groups.review[0].activity.ageMinutes, 0);
+  await app.apply('run', 'task_update', { task: 'one', note: 'Reviewing the safety evidence; checking remaining gates.' });
+  board = await (await fetch(base + '/api/board', { headers })).json();
+  assert.match(board.groups.review[0].activity.text, /^Orchestrator: Reviewing/);
+  assert.ok(Number.isFinite(Date.parse(board.groups.review[0].activity.at)));
+});
+
 test('loopback board protects saved data with a token, host and origin checks, and has no run writes', async t => {
   const { app, base, headers, server } = await fixture(t);
   assert.equal(server.address().address, '127.0.0.1');

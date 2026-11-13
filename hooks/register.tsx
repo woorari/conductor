@@ -901,7 +901,9 @@ async function runProgram($: EngineInterface, argv: readonly string[], timeoutMs
       if (!home) return { exitCode: 1, stdout: '', stderr: 'No project root for quarantine.', out: 'No project root for quarantine.' }
       const sources = argv.slice(1).filter(word => !word.startsWith('-'))
       const managed = [...new Set(sources.map(source => source.slice(0, source.lastIndexOf('/'))).filter(Boolean))]
-      argv = ['node', `${$.plugin.root}/codex/skill/scripts/quarantine.mjs`, '--root', home, ...managed.flatMap(folder => ['--managed', folder]), '--', ...sources]
+      const run = await read($, pinnedRun)
+      if (!run) return { exitCode: 1, stdout: '', stderr: 'No run for retained cleanup files.', out: 'No run for retained cleanup files.' }
+      argv = ['node', `${$.plugin.root}/codex/skill/scripts/quarantine.mjs`, '--root', home, '--destination', `${home}/${RUNS_DIR}/${run}/_deleted`, ...managed.flatMap(folder => ['--managed', folder]), '--', ...sources]
     }
     const ran = await $.process.run([...argv], { timeoutMs, ...(env === undefined ? {} : { env }) })
 

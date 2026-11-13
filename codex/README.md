@@ -50,6 +50,10 @@ The main chat is the sole orchestrator: it plans, dispatches isolated workers, r
 
 Workers use `quarantine --caller worker:<id>` with `{"paths":["relative/file"]}` to move obsolete approved-scope files into their worktree’s `_deleted` without deleting their contents. Orchestrators cannot use that command to perform implementation changes. Permanent deletion requires explicit deletion approval. System files must never be deleted or quarantined, and reading/writing/searching `~/Library`, including through links, requires explicit user approval for that access. The helper refuses system/Library paths, traversal, symlinks and scope escapes.
 
+Quarantine adds `_deleted/` to local Git exclusions shared by linked worktrees. Never force-add or publish retained files. Claude’s copied-workspace cleanup uses `_deleted` inside its ignored run directory.
+
+The HTML board displays timestamped worker and orchestrator reports from `task_update` notes. Review rows mean a hand-back awaits orchestration, not that a worker is running. The connected indicator describes the board connection; agents check actual worker status and report meaningful progress and waiting states in chat at least every 60 seconds during ongoing work.
+
 This is the same orchestration concept as Claude, implemented with Codex collaboration agents and a local CLI. The skill and role checks control the workflow; they do not globally intercept arbitrary tools outside it. Without a worker capability, retain the plan and report the host limitation rather than implementing in the orchestrator.
 
 ## Models on host handover
