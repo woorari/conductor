@@ -10,7 +10,7 @@ import { boardView, detail, problemDetail, timeline, runMinutes, elapsedShort } 
 import { preflight } from './core/router.mjs';
 import { pendingLinear } from './linear.mjs';
 
-export const BOARD_PROTOCOL = 4;
+export const BOARD_PROTOCOL = 5;
 
 export const serverFile = (root, id, host = 'codex') => {
   if (!['claude', 'codex'].includes(host)) throw new Error('Invalid board host.');
