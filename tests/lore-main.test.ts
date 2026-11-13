@@ -1,3 +1,4 @@
+import { programCalls, isQuarantine } from './world'
 import { expect, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
@@ -159,9 +160,9 @@ test("at the end of the run, what the copies took along from the owner's workspa
   engine.dirs.push(`${LORE_ROOT}/.claude`, `${t1}/.claude`, `${RUN_WS}/.claude`)
   engine.lore.unshift(answers(['status', '--scan'], ok(STATUS_COPIED), t1), answers(['status', '--scan'], ok(STATUS_COPIED), RUN_WS))
 
-  expect((await approveMain($)).text).toContain('Its workspaces are removed.')
-  const removed = engine.calls.map(one => one.argv).filter(argv => argv[0] === 'rm')
-  expect(removed).toEqual([['rm', '-rf', '--', t1], ['rm', '-rf', '--', RUN_WS]])
+  expect((await approveMain($)).text).toContain('Its workspaces were moved into _deleted.')
+  const removed = programCalls(engine).filter(argv => argv[0] === 'quarantine')
+  expect(removed).toEqual([['quarantine', '--', t1], ['quarantine', '--', RUN_WS]])
 })
 
 test('across a whole run, no Lore write ran in the owner\'s workspace', async ($, on) => {

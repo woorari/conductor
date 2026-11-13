@@ -692,3 +692,7 @@ export const spawn = (
     ...(name === undefined ? {} : { name }),
     ...(parent === undefined ? {} : { parentAgentId: parent }),
   })
+
+/** Destructive cleanup has become a reversible Node quarantine request. */
+export const isQuarantine = (argv: readonly string[]): boolean => argv[0] === 'node' && (argv[1]?.endsWith('/codex/skill/scripts/quarantine.mjs') ?? false)
+export const programCalls = (engine: World): string[][] => engine.calls.map(({ argv }) => isQuarantine(argv) ? ['quarantine', '--', ...argv.slice(argv.indexOf('--') + 1)] : argv)

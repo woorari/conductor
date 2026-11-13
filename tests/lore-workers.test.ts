@@ -1,3 +1,4 @@
+import { programCalls, isQuarantine } from './world'
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
@@ -43,8 +44,8 @@ test('workspace paths with spaces travel as single arguments, and Saved is never
     ['.lore', '.claude', 'Content', 'Source', 'Game.uproject'].map(entry => ['cp', '-c', '-R', `${LORE_ROOT}/${entry}`, `${BASE}/ABC-12/t1/`]),
   )
   expect(copies.every(one => one.timeoutMs === 600_000), 'a copy may take minutes').toBe(true)
-  const removed = engine.calls.filter(one => one.argv[0] === 'rm').map(one => one.argv)
-  expect(removed, 'the log the listing found comes out of the copy').toContainEqual(['rm', '-rf', '--', `${BASE}/ABC-12/t1/Source/build.log`])
+  const removed = programCalls(engine).filter(argv => argv[0] === 'quarantine')
+  expect(removed, 'the log the listing found comes out of the copy').toContainEqual(['quarantine', '--', `${BASE}/ABC-12/t1/Source/build.log`])
   const shell = engine.calls.find(one => one.argv[0] === '/bin/sh')?.argv ?? []
   expect(shell.slice(3), 'paths reach the shell as parameters, never inside its script').toEqual(['sh', `${BASE}/ABC-12/t1`, `${LORE_RUNS}/ABC-12/listing-t1.txt`])
   expect(shell[2]).not.toContain('Big Game')
@@ -56,7 +57,7 @@ test('what lore finds untracked in the copy is removed', async ($, on) => {
   engine.agentIds.push('a1')
 
   await spawn($, 't1')
-  expect(engine.calls.map(one => one.argv)).toContainEqual(['rm', '-f', '--', `${BASE}/ABC-12/t1/untracked.txt`])
+  expect(programCalls(engine)).toContainEqual(['quarantine', '--', `${BASE}/ABC-12/t1/untracked.txt`])
 })
 
 test('two starts in one message get one workspace each', async ($, on) => {
@@ -77,7 +78,7 @@ test('a failed copy releases the task and leaves no half workspace', async ($, o
   const said = await spawn($, 't1')
   expect((said as { deny?: string }).deny).toContain('No space left on device')
   expect(stored(files).tasks[0]?.status).toBe('queued')
-  expect(engine.calls.map(one => one.argv)).toContainEqual(['rm', '-rf', '--', `${BASE}/ABC-12/t1`])
+  expect(programCalls(engine)).toContainEqual(['quarantine', '--', `${BASE}/ABC-12/t1`])
   expect(engine.spawns, 'no agent was started').toEqual([])
 })
 
@@ -88,7 +89,7 @@ test('a folder that is there already and is no Lore workspace is never touched',
 
   const said = await spawn($, 't1')
   expect((said as { deny?: string }).deny).toContain('is there already')
-  expect(engine.calls.some(one => one.argv[0] === 'rm' || one.argv[0] === 'cp'), 'nothing copied into it, nothing removed').toBe(false)
+  expect(engine.calls.some(one => isQuarantine(one.argv) || one.argv[0] === 'cp'), 'nothing copied into it, nothing removed').toBe(false)
   expect(stored(files).tasks[0]?.status).toBe('queued')
 })
 
@@ -169,7 +170,7 @@ test('a half-made workspace (its .lore copied, never finished) is made again; a 
   const { files, engine } = await lored($, on)
   engine.dirs.push(`${BASE}/ABC-12/t1`, `${BASE}/ABC-12/t1/.lore`)
   engine.programs.unshift({
-    match: argv => argv[0] === 'rm' && argv[1] === '-rf',
+    match: argv => isQuarantine(argv),
     answer: argv => {
       const gone = argv.at(-1) ?? ''
       engine.dirs.splice(0, engine.dirs.length, ...engine.dirs.filter(one => one !== gone && !one.startsWith(`${gone}/`)))
@@ -180,7 +181,7 @@ test('a half-made workspace (its .lore copied, never finished) is made again; a 
   engine.agentIds.push('a1', 'a2')
 
   await spawn($, 't1')
-  expect(engine.calls.map(one => one.argv)).toContainEqual(['rm', '-rf', '--', `${BASE}/ABC-12/t1`])
+  expect(programCalls(engine)).toContainEqual(['quarantine', '--', `${BASE}/ABC-12/t1`])
   expect(engine.calls.some(one => one.argv[0] === 'cp' && one.argv.at(-1) === `${BASE}/ABC-12/t1/`), 'and copied afresh').toBe(true)
   expect(files[`${LORE_RUNS}/ABC-12/ready-t1`], 'a finished workspace is marked').toBeDefined()
 
@@ -212,7 +213,7 @@ function realListing(engine: World, files: Files): void {
       },
     },
     {
-      match: argv => argv[0] === 'rm',
+      match: argv => isQuarantine(argv),
       answer: argv => {
         for (const gone of argv.slice(argv.indexOf('--') + 1)) delete files[gone]
 

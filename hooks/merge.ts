@@ -420,6 +420,8 @@ export function onMain(raw: Raw, at: string, commit: string, base: string, how: 
   if (task === undefined) return refused('No merge is in flight.')
   const pr = flight === undefined ? how.pr : Number(flight.pr)
   task.status = 'done'
+  const approvals = (raw.run as { mergeApprovals?: Record<string, unknown> }).mergeApprovals
+  if (approvals !== undefined) delete approvals[task.id]
   task.finishedAt ??= at
   task.mergeCommit = commit
   task.mergedAt = at
@@ -498,6 +500,8 @@ export function ownerSaysMerged(raw: Raw, at: string, taskId: string): Outcome {
   const flight = flightOf(raw)
   if (flight !== undefined && flight.task === taskId) delete raw.merge
   task.status = 'done'
+  const approvals = (raw.run as { mergeApprovals?: Record<string, unknown> }).mergeApprovals
+  if (approvals !== undefined) delete approvals[task.id]
   task.finishedAt ??= at
   task.mergedAt ??= at
   task.note = "merged, by the owner's word"

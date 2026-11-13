@@ -1,3 +1,4 @@
+import { programCalls, isQuarantine } from './world'
 import { expect, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
@@ -149,7 +150,7 @@ test('a green task is merged into the run branch, pinned to its judged revision'
   const { files, engine } = await green($, on)
 
   const said = await call($, 'merge', MERGE)
-  expect(said.text).toBe(`Merged: t1 is on ${RUN_BRANCH} as ${REV_RUN.slice(0, 7)}, and the task is done. Its workspace is removed: everything in it is in Lore. Go on at once: start what can start and merge the next green task.`)
+  expect(said.text).toBe(`Merged: t1 is on ${RUN_BRANCH} as ${REV_RUN.slice(0, 7)}, and the task is done. Its workspace was moved into _deleted: everything in it is in Lore. Go on at once: start what can start and merge the next green task.`)
   const ran = ranIn(engine, RUN_WS)
   expect(ran).toContain(`branch switch ${RUN_BRANCH} --reset`)
   expect(ran).toContain(`branch merge ${T1_BRANCH} --message=t1: Task t1`)
@@ -160,7 +161,7 @@ test('a green task is merged into the run branch, pinned to its judged revision'
   expect(t1?.workspace).toBeUndefined()
   expect(stored(files).merge).toBeUndefined()
   expect(stored(files).run.lore?.head, 'the board knows what it put on the run branch').toBe(REV_RUN)
-  expect(engine.calls.map(one => one.argv)).toContainEqual(['rm', '-rf', '--', T1_WS])
+  expect(programCalls(engine)).toContainEqual(['quarantine', '--', T1_WS])
   expect(engine.linear.updated).toEqual([{ id: 'issue-ABC-13', input: { stateId: 's-done' } }])
 })
 
@@ -238,7 +239,7 @@ test('a dirty workspace is kept after the merge, and the orchestrator is told wh
 
   const said = await call($, 'merge', MERGE)
   expect(said.text).toContain('Its workspace is kept')
-  expect(engine.calls.map(one => one.argv)).not.toContainEqual(['rm', '-rf', '--', T1_WS])
+  expect(programCalls(engine)).not.toContainEqual(['quarantine', '--', T1_WS])
   expect(stored(files).tasks[0]?.workspace).toBe(T1_WS)
 })
 
@@ -263,8 +264,8 @@ test("what the copy took along from the owner's workspace is not the worker's: t
   copiedAlong(world)
 
   const said = await call($, 'merge', MERGE)
-  expect(said.text).toContain('Its workspace is removed: everything in it is in Lore.')
-  expect(world.engine.calls.map(one => one.argv)).toContainEqual(['rm', '-rf', '--', T1_WS])
+  expect(said.text).toContain('Its workspace was moved into _deleted: everything in it is in Lore.')
+  expect(programCalls(world.engine)).toContainEqual(['quarantine', '--', T1_WS])
   expect(stored(world.files).tasks[0]?.workspace).toBeUndefined()
 })
 
@@ -274,7 +275,7 @@ test('a file the worker changed after the copy is its own, and keeps the workspa
 
   const said = await call($, 'merge', MERGE)
   expect(said.text).toContain('it holds changes that are not pushed (.claude/, .claude/settings.local.json)')
-  expect(world.engine.calls.map(one => one.argv)).not.toContainEqual(['rm', '-rf', '--', T1_WS])
+  expect(programCalls(world.engine)).not.toContainEqual(['quarantine', '--', T1_WS])
   expect(stored(world.files).tasks[0]?.workspace).toBe(T1_WS)
 })
 
@@ -284,7 +285,7 @@ test("a file the owner's workspace does not hold is the worker's, and keeps the 
   delete world.files[`${LORE_ROOT}/.claude/settings.local.json`]
 
   expect((await call($, 'merge', MERGE)).text).toContain('it holds changes that are not pushed (.claude/, .claude/settings.local.json)')
-  expect(world.engine.calls.map(one => one.argv)).not.toContainEqual(['rm', '-rf', '--', T1_WS])
+  expect(programCalls(world.engine)).not.toContainEqual(['quarantine', '--', T1_WS])
 })
 
 test('bytes the engine does not hand back as base64 are never taken for the same, and keep the workspace', async ($, on) => {
@@ -293,7 +294,7 @@ test('bytes the engine does not hand back as base64 are never taken for the same
   world.engine.isBytesWithoutBase64 = true
 
   expect((await call($, 'merge', MERGE)).text).toContain('it holds changes that are not pushed (.claude/, .claude/settings.local.json)')
-  expect(world.engine.calls.map(one => one.argv)).not.toContainEqual(['rm', '-rf', '--', T1_WS])
+  expect(programCalls(world.engine)).not.toContainEqual(['quarantine', '--', T1_WS])
 })
 
 /** As copiedAlong, with Lore listing the untracked folder by itself; the copy's folder holds `inside`. */
@@ -308,8 +309,8 @@ test("a folder Lore lists by itself is the owner's only when every file in it is
   const world = await green($, on)
   folderAlong(world, [{ name: 'settings.local.json', kind: 'file' }])
 
-  expect((await call($, 'merge', MERGE)).text).toContain('Its workspace is removed: everything in it is in Lore.')
-  expect(world.engine.calls.map(one => one.argv)).toContainEqual(['rm', '-rf', '--', T1_WS])
+  expect((await call($, 'merge', MERGE)).text).toContain('Its workspace was moved into _deleted: everything in it is in Lore.')
+  expect(programCalls(world.engine)).toContainEqual(['quarantine', '--', T1_WS])
 })
 
 test("a file the worker added inside a folder the copy took along keeps the workspace, though Lore lists only the folder", async ($, on) => {
@@ -321,7 +322,7 @@ test("a file the worker added inside a folder the copy took along keeps the work
   world.files[`${T1_WS}/.claude/notes.md`] = { text: 'the worker\'s own\n', mtimeMs: 1 }
 
   expect((await call($, 'merge', MERGE)).text).toContain('it holds changes that are not pushed (.claude/)')
-  expect(world.engine.calls.map(one => one.argv)).not.toContainEqual(['rm', '-rf', '--', T1_WS])
+  expect(programCalls(world.engine)).not.toContainEqual(['quarantine', '--', T1_WS])
 })
 
 test('a Lore task is handed back with its revision; with one it is done only by merging', async ($, on) => {
@@ -383,7 +384,7 @@ test('a workspace path written on the task is never what gets removed: the mod d
   engine.lore.unshift(answers(['status', '--scan'], ok(STATUS_CLEAN)))
 
   await call($, 'merge', MERGE)
-  const removed = engine.calls.filter(one => one.argv[0] === 'rm').map(one => one.argv.at(-1))
+  const removed = programCalls(engine).filter(argv => argv[0] === 'quarantine').map(argv => argv.at(-1))
   expect(removed).not.toContain('/work/Big Game 5.8')
   expect(removed.every(one => (one ?? '').startsWith(`${BASE}/`))).toBe(true)
 })
@@ -392,5 +393,5 @@ test('a run whose workspaces folder reads as / removes nothing', async ($, on) =
   const { engine } = await green($, on, { ...GREEN, run: { ...GREEN.run, config: { lore: { workspaces: '/' } } } })
 
   await call($, 'merge', MERGE)
-  expect(engine.calls.filter(one => one.argv[0] === 'rm' && one.argv[1] === '-rf')).toEqual([])
+  expect(engine.calls.filter(one => isQuarantine(one.argv))).toEqual([])
 })

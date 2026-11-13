@@ -31,7 +31,7 @@ async function bound($: Engine, on: Parameters<typeof world>[0], ledger: Ledger 
   forge.pulls[548] = pull(HEAD, { title: 'Daily cap thresholds', body: 'Two thresholds per UTC day.\n\nCloses #395' })
   forge.checks[HEAD] = ci('success')
   await start($)
-  if (isBound) await board($, 'demo')
+  if (isBound) { await board($, 'demo'); await command($, 'approve-merge', `t395-1 ${HEAD}`) }
 
   return { clock, files, engine, forge }
 }
@@ -245,6 +245,7 @@ test('after a merge the checks on the base branch are watched: a failure is one 
   forge.checks['d'.repeat(40)] = ci('success')
   await call($, 'task_update', { task: 't393-1', status: 'green' })
   expect((await call($, 'merge', { task: 't393-1', told: [] })).text).toContain(`The checks on main failed for ${COMMIT.slice(0, 7)} (test)`)
+  await command($, 'approve-merge', `t393-1 ${'d'.repeat(40)}`)
   expect((await call($, 'merge', { task: 't393-1', told: [], onRedMain: true })).text).toMatch(/^Merged: PR 547/)
 
   // The repair's checks go green: the watch is over.
@@ -371,4 +372,16 @@ test('/merged finishes a task by the owner\'s word, when the board cannot see fo
   expect((await command($, 'merged', 't395-1')).text).toBe('t395-1 is done, by your word that its pull request is merged.')
   expect(task(files, 't395-1')).toMatchObject({ status: 'done', note: "merged, by the owner's word" })
   expect((await command($, 'merged', 't999')).text).toBe('There is no task t999 in this run.')
+})
+
+test('plan approval does not authorize main: the owner approves the exact reviewed head separately', async ($, on) => {
+  const { files, forge } = await bound($, on)
+  const raw = stored(files); delete raw.run.mergeApprovals; files[PATH] = file(raw, (files[PATH]?.mtimeMs ?? 1) + 1)
+  const denied = await call($, 'merge', MERGE)
+  expect(denied.text).toContain('/approve-merge t395-1')
+  expect(forge.merges).toHaveLength(0)
+  await command($, 'approve-merge', `t395-1 ${HEAD}`)
+  expect((await call($, 'merge', MERGE)).isError).toBeUndefined()
+  expect(forge.merges).toHaveLength(1)
+  expect(stored(files).run.mergeApprovals?.['t395-1']).toBeUndefined()
 })

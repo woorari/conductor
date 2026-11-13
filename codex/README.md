@@ -44,6 +44,14 @@ Replies follow the user's conversation language. A bare issue key or path defaul
 - This is a skill/CLI adapter, not Claude's function-hook runtime. The [compatibility table](skill/references/compatibility.md) lists automatic hooks, Lore provisioning/merges and other remaining differences.
 - Installing does not change Codex's model, permissions, MCP configuration or Claude's installation. Unreal and Blender connections are separate machine-local configuration and are not shipped in this repository.
 
+## Approved delivery and worker roles
+
+The main chat is the sole orchestrator: it plans, dispatches isolated workers, reviews diffs/checks and manages the board. Implementation and conflict fixes go to workers; the orchestrator never writes implementation code. Approved work includes tests, commits, task-branch pushes and PR creation without a second publishing approval. Main/base merges need separate approval for the reviewed PR head, recorded with `approve_merge --caller owner` and `{"task":"id","head":"<full SHA>"}`. Approval already explicitly given for that change stands.
+
+Workers use `quarantine --caller worker:<id>` with `{"paths":["relative/file"]}` to move obsolete approved-scope files into their worktree’s `_deleted` without deleting their contents. Orchestrators cannot use that command to perform implementation changes. Permanent deletion requires explicit deletion approval. System files must never be deleted or quarantined, and reading/writing/searching `~/Library`, including through links, requires explicit user approval for that access. The helper refuses system/Library paths, traversal, symlinks and scope escapes.
+
+This is the same orchestration concept as Claude, implemented with Codex collaboration agents and a local CLI. The skill and role checks control the workflow; they do not globally intercept arbitrary tools outside it. Without a worker capability, retain the plan and report the host limitation rather than implementing in the orchestrator.
+
 ## Models on host handover
 
 Task complexity survives a handover; provider model assignments do not. The portable tier keys stay `opus`/`sonnet`/`haiku` for ledger compatibility, but Codex displays architecture/implementation/simple and shows **current Codex model** as the default next-worker selection. Workers inherit the model selected in the receiving chat. Claude resolves the same complexity keys to its native tier aliases. A prior worker’s recorded model is shown separately as history, and a new reservation clears that record until the new engine reports its actual model.
