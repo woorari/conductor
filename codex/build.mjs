@@ -5,7 +5,7 @@ import { stripTypeScriptTypes } from 'node:module';
 import { execFileSync } from 'node:child_process';
 
 export const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const modules = ['models', 'signals', 'ledger', 'lore', 'problems', 'plan', 'linear', 'router', 'posts', 'pause', 'store', 'board', 'merge', 'handover'];
+const modules = ['delivery', 'models', 'signals', 'ledger', 'lore', 'problems', 'plan', 'linear', 'router', 'posts', 'pause', 'store', 'board', 'merge', 'handover'];
 
 export function checkRuntime(version = process.versions.node) {
   const [major, minor] = version.split('.').map(Number);

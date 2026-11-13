@@ -287,6 +287,8 @@ export type Ledger = {
     pausedAt?: string
     /** The most workers that may be building at once; 3 when absent. */
     maxParallel?: number
+    /** Owner consent for a reviewed main/base merge, keyed by task id. */
+    mergeApprovals?: Record<string, { pr: number; head: string; base: string }>
     /**
      * A worker whose context holds this many tokens is asked to hand back at its
      * next green step. Absent, no worker is asked: the mod cannot see how large

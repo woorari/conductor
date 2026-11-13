@@ -31,6 +31,7 @@ import type { Config, Facts, Flight, Look, Verdict } from './merge'
 import { DONE_SHOWN, boardView, clock, detail, orchestratorLine, problemDetail, runMinutes, summary, timeline } from './board'
 import type { TaskRow } from './board'
 import { dashboardSvg } from './dashboard'
+import { approveMerge, mergeApproved, DELIVERY, ORCHESTRATOR_ROLE } from './delivery'
 import { launchHtmlBoard, boardRequest, htmlActions } from './html-board'
 import { KEEP, ROTATE_AT, carried, handover } from './handover'
 import { LINEAR_KEY, RUN_ID, STATUSES, TIERS, parseLedger } from './ledger'
@@ -895,6 +896,15 @@ const LIST_SCRIPT = 'find "$1" -mindepth 1 -type d -exec printf "%s/\\n" {} + > 
 /** Runs a program without a shell. Never throws: one that could not run, or ran out of time, answers a non-zero exit with why. */
 async function runProgram($: EngineInterface, argv: readonly string[], timeoutMs = 30_000, env?: Record<string, string>): Promise<Ran> {
   try {
+    if (/(^|[\\/])rm(?:\.exe)?$/.test(argv[0] ?? '')) {
+      const home = (await read($, pinnedRoot)) ?? root
+      if (!home) return { exitCode: 1, stdout: '', stderr: 'No project root for quarantine.', out: 'No project root for quarantine.' }
+      const sources = argv.slice(1).filter(word => !word.startsWith('-'))
+      const managed = [...new Set(sources.map(source => source.slice(0, source.lastIndexOf('/'))).filter(Boolean))]
+      const run = await read($, pinnedRun)
+      if (!run) return { exitCode: 1, stdout: '', stderr: 'No run for retained cleanup files.', out: 'No run for retained cleanup files.' }
+      argv = ['node', `${$.plugin.root}/codex/skill/scripts/quarantine.mjs`, '--root', home, '--destination', `${home}/${RUNS_DIR}/${run}/_deleted`, ...managed.flatMap(folder => ['--managed', folder]), '--', ...sources]
+    }
     const ran = await $.process.run([...argv], { timeoutMs, ...(env === undefined ? {} : { env }) })
 
     return { exitCode: ran.exitCode, stdout: ran.stdout, stderr: ran.stderr, out: `${ran.stdout}${ran.stderr === '' ? '' : `\n${ran.stderr}`}` }
@@ -951,7 +961,7 @@ async function prepareWorkspace($: EngineInterface, at: Making): Promise<{ path:
   }
   const rules = ignoreRules((await textAt($, `${at.root}/.loreignore`)) ?? '')
   const entries = (await $.fs.list(at.root)).map(one => ({ name: one.name, isDir: one.kind === 'dir' }))
-  for (const entry of topLevel(entries, rules, at.carry)) {
+  for (const entry of topLevel(entries.filter(entry => entry.name !== '_deleted'), rules, at.carry)) {
     const copied = await runProgram($, ['cp', '-c', '-R', `${at.root}/${entry}`, `${at.path}/`], LONG_MS)
     if (copied.exitCode !== 0) return fail(`${entry} could not be copied: ${lastLine(copied)}`)
   }
@@ -1426,7 +1436,7 @@ async function retireWorktree($: EngineInterface, ledger: Ledger, taskId: string
   // Only the folder the mod derives for this task, never a path read off the ledger alone.
   const derived = workspaceOf(workspacesOf(workspace.root, undefined), ledger.run.id, taskId)
   if (task.workspace !== derived) return
-  await runProgram($, ['git', '-C', workspace.root, 'worktree', 'remove', derived], LONG_MS)
+  await runProgram($, ['node', `${$.plugin.root}/codex/skill/scripts/quarantine.mjs`, '--root', workspace.root, '--managed', derived.slice(0, derived.lastIndexOf('/')), '--git', '--', derived], LONG_MS)
 }
 
 /** A worker's workspace made and not handed to the engine yet, by task. */
@@ -2592,12 +2602,14 @@ async function landOnBase($: EngineInterface, job: ApproveJob): Promise<string> 
     const here = await backendOf($)
     const isOwn = here !== null && isRemovable(here.root, ledger, folder)
     const left = scanned === undefined || here === null || !isOwn ? undefined : notInLore(scanned, await copiedIn($, here.root, folder, scanned.untracked))
-    if (left !== undefined && left.length === 0) await runProgram($, ['rm', '-rf', '--', folder], LONG_MS)
-    else kept.push(folder)
+    if (left !== undefined && left.length === 0) {
+      const moved = await runProgram($, ['rm', '-rf', '--', folder], LONG_MS)
+      if (moved.exitCode !== 0) kept.push(folder)
+    } else kept.push(folder)
   }
   const tail = [
     notArchived.length === 0 ? "Its tasks' branches are archived." : `The branches of ${notArchived.join(', ')} could not be archived.`,
-    kept.length === 0 ? 'Its workspaces are removed.' : `Kept, with changes not pushed: ${kept.join(', ')}.`,
+    kept.length === 0 ? 'Its workspaces were moved into _deleted.' : `Kept for inspection or a retry: ${kept.join(', ')}.`,
   ].join(' ')
 
   return `${done?.text ?? `Merged: run ${ledger.run.id} is on ${base} as ${rev7(landed)}.`} ${tail}${protectLine}`
@@ -2628,7 +2640,7 @@ async function whyKept($: EngineInterface, root: string, folder: string, isOwn: 
   return left.length === 0 ? 'it holds nothing of its own, only what the copy took along' : `it holds changes that are not pushed (${someOf(left)})`
 }
 
-const LISTED = '/cleanup <task id> removes one, /cleanup all every one listed; what is not pushed in it is lost. Nothing was removed.'
+const LISTED = '/cleanup <task id> or /cleanup all moves these workspaces into _deleted. Nothing is permanently deleted.'
 
 /**
  * `/cleanup`: the workspaces a Lore run kept for its done tasks, each with
@@ -2677,7 +2689,7 @@ async function cleanupRun($: EngineInterface, args: string, origin: string): Pro
       const isThere = await $.fs.exists(folder).catch(() => true)
       const failed = isThere ? await runProgram($, ['rm', '-rf', '--', folder], LONG_MS).then(ran => (ran.exitCode === 0 ? undefined : lastLine(ran))) : undefined
       if (failed === undefined) removed.set(taskId, folder)
-      else refused.push(`${taskId} (rm did not remove it: ${failed})`)
+      else refused.push(`${taskId} (quarantine could not move it: ${failed})`)
     }
   }
   if (removed.size > 0) {
@@ -2701,7 +2713,7 @@ async function cleanupRun($: EngineInterface, args: string, origin: string): Pro
   const ids = [...removed.keys()]
 
   return [
-    ids.length === 0 ? '' : `Removed the workspace${ids.length === 1 ? '' : 's'} of ${ids.join(', ')}.`,
+    ids.length === 0 ? '' : `Cleared workspace records for ${ids.join(', ')}; existing folders moved into _deleted.`,
     refused.length === 0 ? '' : `Not removed: ${refused.join(', ')}.`,
     typeof free === 'number' ? `${free} GB are free now on the disk that holds ${here.root}.` : '',
   ]
@@ -2930,14 +2942,14 @@ async function landLore($: EngineInterface, job: LoreLanding): Promise<Said> {
     const own = hereNow !== null && derived !== undefined && derived === task.workspace ? { root: hereNow.root, folder: derived } : undefined
     const left = status === undefined ? undefined : notInLore(status, own === undefined ? new Set() : await copiedIn($, own.root, own.folder, status.untracked))
     if (left !== undefined && left.length === 0 && own !== undefined) {
-      await runProgram($, ['rm', '-rf', '--', own.folder], LONG_MS)
-      workspaceLine = 'Its workspace is removed: everything in it is in Lore.'
+      const moved = await runProgram($, ['rm', '-rf', '--', own.folder], LONG_MS)
+      workspaceLine = moved.exitCode === 0 ? 'Its workspace was moved into _deleted: everything in it is in Lore.' : `Its workspace is kept at ${own.folder}: quarantine could not move it (${lastLine(moved)}).`
     } else {
       const why = left === undefined ? 'lore could not read it' : left.length > 0 ? `it holds changes that are not pushed (${someOf(left)})` : 'it is not the folder the mod made for this task'
       workspaceLine = `Its workspace is kept at ${task.workspace}: ${why}. Look at it before you remove it.`
     }
   }
-  const removed = workspaceLine.startsWith('Its workspace is removed')
+  const removed = workspaceLine.startsWith('Its workspace was moved into _deleted')
   const done = await settle($, path, raw => {
     const result = onRunBranch(raw, iso(now), id, sent.revision, runLore.branch, workspaceLine)
     const kept = raw.tasks.find(one => one.id === id)
@@ -3021,6 +3033,8 @@ async function mergeTool(
   if (blocks.length > 0) return fail(`Nothing was merged. ${id} cannot merge now:\n${blocks.map(one => `- ${one}`).join('\n')}`)
 
   const claimed = await mutate($, path, raw => {
+    const current = parseLedger(JSON.stringify(raw)).ledger
+    if (current === undefined || !mergeApproved(current, id, pull.head, base)) return { value: { isChanged: false, isError: true, text: `Main/base merge needs owner approval: /approve-merge ${id} ${pull.head}.` }, isChanged: false }
     const outcome = startMerge(raw, iso(now), { task: id, pr: asked.pr, head: pull.head, told: asked.told, closes: asked.closes })
 
     return { value: outcome, isChanged: outcome.isChanged }
@@ -3606,6 +3620,7 @@ async function switchOn($: EngineInterface): Promise<void> {
     },
     isDeferred: false,
   })
+  await listCommand($, { name: 'approve-merge', description: 'Approve one reviewed PR head for merging into the main/base branch', argumentHint: '<task id> <full head SHA>' })
   await listCommand($, { name: 'pause', description: 'Hold the bound run: no worker starts and nothing is merged until /unpause; what is under way finishes' })
   await listCommand($, { name: 'unpause', description: 'End the pause of the bound run: workers may start and pull requests may merge again' })
   await listCommand($, {
@@ -3615,7 +3630,7 @@ async function switchOn($: EngineInterface): Promise<void> {
   })
   await listCommand($, {
     name: 'cleanup',
-    description: 'List the workspaces the bound Lore run kept for its done tasks and what keeps each; with task ids or all, remove them, changes not pushed and all',
+    description: 'List kept Lore workspaces; with task ids or all, move them into _deleted without permanent deletion',
     argumentHint: '[<task id>… | all]',
   })
   await listCommand($, {
@@ -3968,6 +3983,9 @@ export const register: Register = (on, options) => {
   // What a worker is doing, from its own tool calls: remembered here, written by the flush.
   // And the way board news reaches its reader: with the result of the reader's own call.
   on('tool.call', async ($, e, next) => {
+    if (['Edit', 'Write', 'NotebookEdit', 'apply_patch'].includes(e.tool) && (e as unknown as ToolCall).agentId === undefined && (await boundLedger($).catch(() => undefined)) !== undefined) {
+      return { deny: 'conductor: the orchestrator never edits implementation code. Delegate this change or fix to the task worker in its isolated workspace.' }
+    }
     const call = e as unknown as ToolCall
     // A worker the orchestrator took its task back from may still run: it changes nothing more, the board included.
     const takenFrom = call.agentId === undefined ? undefined : retired.get(call.agentId)
@@ -4223,6 +4241,8 @@ export const register: Register = (on, options) => {
         : []),
       `- The mod writes the ledger. Never edit ledger.json: change it with ${TOOL_ADD}, ${TOOL_UPDATE}, ${TOOL_REPORT} and ${TOOL_RESOLVE}.`,
       `- A run starts with a plan. Until you have proposed it with ${TOOL_PLAN} and the owner has approved it with /approve, no worker starts. Once they have, start the tasks that can start. ${PLANNING}`,
+      ORCHESTRATOR_ROLE,
+      DELIVERY,
       `- Every worker is a task. Add it with ${TOOL_ADD}, tagged with a tier and why: opus for architecture and design, sonnet for challenging development, haiku for easy jobs. The owner may change a tier before the task starts; their choice stands.`,
       "- A task's worker is a background agent in a worktree of its own (isolation: \"worktree\"), started with the task's id as its `name` (or the name the task lists as its worker). The mod starts it on the task's tier whatever model the call names, marks the task building, records what the worker is doing from its tool calls, and marks it handed back when its turn ends.",
       `- A task starts once everything it waits for is green (reviewed, its checks green) or done: it does not wait for the merge. Start it then; the mod tells its worker to build on the green task's branch, which works for one unmerged branch at a time. ${isHere ? `${TOOL_MERGE} takes a task only after everything it waits for is done, so merge in that order.` : 'A task is merged only after everything it waits for is done, so merge in that order.'}`,
@@ -4496,6 +4516,17 @@ export const register: Register = (on, options) => {
     isRotateAsked = true
 
     return { text: 'Compaction asked for: it runs once no turn is running.' }
+  })
+
+  on('command.run', { command: 'approve-merge' }, async ($, e) => {
+    if (!OWNER_ORIGINS.has(e.origin.kind)) return { text: 'Only the owner approves a main/base merge.' }
+    const [task, head, ...extra] = e.args.trim().split(/\s+/)
+    if (!task || !head || extra.length) return { text: 'Use /approve-merge <task id> <full reviewed PR head SHA>.' }
+    const path = await boundLedger($)
+    if (path === undefined) return { text: await unbound($) }
+    const base = await runBase($)
+    const written = await mutate($, path, raw => { const outcome = approveMerge(raw, task, head, base); return { value: outcome, isChanged: outcome.isChanged } })
+    return { text: written.error ?? written.value.text }
   })
 
   on('command.run', { command: 'tier' }, async ($, e) => {

@@ -148,6 +148,22 @@ function optionalKey(from: Fields, key: string, where: string): string | undefin
   return value
 }
 
+function mergeApprovals(value: unknown): Ledger['run']['mergeApprovals'] {
+  if (value === undefined) return undefined
+  const from = fields(value, 'run.mergeApprovals')
+  const result: NonNullable<Ledger['run']['mergeApprovals']> = {}
+  for (const [id, entry] of Object.entries(from)) {
+    if (!RUN_ID.test(id)) refuse('run.mergeApprovals', 'task ids', id)
+    const approval = fields(entry, `run.mergeApprovals.${id}`)
+    const head = text(approval, 'head', 'merge approval')
+    if (!/^[a-f0-9]{40}$/.test(head)) refuse('merge approval.head', 'a full Git head SHA', head)
+    const pr = approval.pr
+    if (typeof pr !== 'number' || !Number.isInteger(pr) || pr < 1) refuse('merge approval.pr', 'a PR number', pr)
+    result[id] = { pr: pr as number, head, base: text(approval, 'base', 'merge approval') }
+  }
+  return result
+}
+
 function optionalRevision(from: Fields, key: string, where: string): string | undefined {
   const value = optionalText(from, key, where)
   if (value !== undefined && !REVISION.test(value)) refuse(`${where}.${key}`, 'a Lore revision (64 hex)', value)
@@ -509,6 +525,7 @@ export function parseLedger(source: string): Parsed {
         startedAt: optionalTime(run, 'startedAt', 'run'),
         plan: run.plan === undefined ? undefined : oneOf(run, 'plan', 'run', ['draft', 'proposed', 'approved'] as const),
         maxParallel: optionalNumber(run, 'maxParallel', 'run'),
+        mergeApprovals: mergeApprovals(run.mergeApprovals),
         workerHandbackTokens: optionalNumber(run, 'workerHandbackTokens', 'run'),
         pausedAt: optionalTime(run, 'pausedAt', 'run'),
         tickets: run.tickets === undefined ? undefined : oneOf(run, 'tickets', 'run', ['github', 'linear'] as const),

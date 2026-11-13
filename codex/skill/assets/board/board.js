@@ -2,6 +2,7 @@ const $ = id => document.getElementById(id);
 const token = location.hash.slice(1);
 const el = (tag, text, className) => { const node = document.createElement(tag); if (text !== undefined) node.textContent = text; if (className) node.className = className; return node; };
 let previous;
+const reportAge = activity => activity.ageMinutes < 1 ? 'less than a minute ago' : `${activity.ageMinutes} min ago`;
 function section(title, count) {
   const node = el('section'); const heading = el('h2', title);
   if (count !== undefined) heading.append(el('span', String(count), 'section-count'));
@@ -12,6 +13,7 @@ function row(item, kind = item.status) {
   const content = el('div'); const title = el('p', undefined, 'row-title');
   title.append(el('span', item.id, 'row-id'), document.createTextNode(item.title ?? item.text));
   content.append(title); if (item.detail) content.append(el('p', item.detail, 'detail'));
+  if (item.activity && !['done', 'queued'].includes(item.status)) content.append(el('p', `Last report ${reportAge(item.activity)} · ${item.activity.text}`, 'detail'));
   node.append(content); return node;
 }
 function notice(title, message, command, warn = false) {
@@ -38,12 +40,14 @@ function render(data) {
   else if (data.run.plan === 'draft') state.push(notice('Drafting the plan', 'Tasks can still change. Work starts after the proposed plan is approved.'));
   if (!data.total) state.push(notice('Your board is ready', 'Tasks appear here as the plan takes shape.'));
   if (data.total && data.completed === data.total) state.push(notice(data.problems.length || data.questions.length || data.pending.length ? 'Tasks complete · follow-up remains' : 'All tasks complete', 'Final integration and ticket state are confirmed in chat.'));
+  const latest = Object.values(data.groups).flat().filter(task => task.activity && !['done', 'queued'].includes(task.status)).sort((a, b) => Date.parse(b.activity.at) - Date.parse(a.activity.at))[0];
+  if (latest) state.push(notice('Latest reported activity', `${latest.id} · ${latest.activity.text} · ${reportAge(latest.activity)}. Reports describe saved progress; worker liveness is checked by the orchestrator.`));
   $('state').replaceChildren(...state);
   const sections = [];
   if (data.problems.length) { const s = section('Problems', `${data.problems.length} open`); data.problems.forEach(p => s.append(row(p, p.severity))); sections.push(s); }
   if (data.questions.length) { const s = section('Questions', data.questions.length); data.questions.forEach(q => s.append(row({ ...q, detail: 'from ' + q.from }, 'warning'))); sections.push(s); }
   if (data.pending.length) { const s = section('Linear updates pending', data.pending.length); data.pending.forEach(p => s.append(row({ id: p.issue, text: `Move to ${p.target}`, detail: p.warning ?? (p.waitingFor?.length ? `Waiting for ${p.waitingFor.join(', ')}` : 'Waiting for synchronization') }, 'warning'))); sections.push(s); }
-  for (const [key, label] of [['attention', 'Needs a decision'], ['building', 'Working now'], ['returned', 'Handed back'], ['review', 'Review & merge']]) {
+  for (const [key, label] of [['attention', 'Needs a decision'], ['building', 'Worker tasks'], ['returned', 'Handed back'], ['review', 'Awaiting orchestrator review / merge']]) {
     const tasks = data.groups[key]; if (!tasks.length) continue;
     const s = section(label, tasks.length); tasks.forEach(t => s.append(row(t))); sections.push(s);
   }
@@ -115,7 +119,7 @@ async function poll() {
     const data = await response.json(); if (!response.ok) throw new Error(data.error);
     // Keep expanded sections, focus and scroll stable between saves.
     if (!previous || JSON.stringify({ ...data, elapsed: undefined, timeline: undefined }) !== JSON.stringify({ ...previous, elapsed: undefined, timeline: undefined }) || data.elapsed !== previous.elapsed) render(data);
-    $('connection').textContent = 'Live'; $('connection').className = 'live'; $('error').hidden = true;
+    $('connection').textContent = 'Board connected'; $('connection').className = 'live'; $('error').hidden = true;
   } catch (error) {
     $('connection').textContent = 'Reconnecting'; $('connection').className = 'offline';
     $('error').textContent = `${error.message || 'Board disconnected.'} Last shown data may be out of date. Retrying…`; $('error').hidden = false;

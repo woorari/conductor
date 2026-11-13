@@ -1,3 +1,4 @@
+import { isQuarantine } from './world'
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
@@ -87,15 +88,17 @@ test("a git worker without a worktree of its own cannot write in a folder home",
   expect((await bash($, 'touch x', 'a1')).deny).toBeUndefined()
 })
 
-test("a done task's worktree is removed with git worktree remove", async ($, on) => {
+test("a done task's worktree is quarantined without git worktree remove", async ($, on) => {
   const path = `${GIT_WS}.conductor/demo/t395-1`
   const ledger: Ledger = { ...LEDGER, tasks: LEDGER.tasks.map(one => (one.id === 't395-1' ? { ...one, workspace: path } : one)) }
   const { engine } = await gitBound($, on, { ledger })
   engine.forge.pulls[548] = pull(HEAD, { title: 'Daily cap thresholds', body: 'Two thresholds per UTC day.\n\nCloses #395' })
   engine.forge.checks[HEAD] = ci('success')
+  await $.command.run({ command: 'approve-merge', args: `t395-1 ${HEAD}`, origin: { kind: 'composer' } })
   const said = await call($, 'merge', { task: 't395-1', told: ['Triage issues'], closes: [395] })
   expect(said.text?.startsWith('Merged: PR 548 (t395-1) is on main'), said.text).toBe(true)
-  expect(gitRan(engine)).toContainEqual(['git', '-C', GIT_WS, 'worktree', 'remove', path])
+  expect(engine.calls.some(one => isQuarantine(one.argv) && one.argv.includes('--git') && one.argv.at(-1) === path)).toBe(true)
+  expect(gitRan(engine)).not.toContainEqual(['git', '-C', GIT_WS, 'worktree', 'remove', path])
 })
 
 test("a place's base is the run's base", async ($, on) => {

@@ -6,6 +6,16 @@ It also works in a **Lore** workspace (Epic's version control system) and takes 
 
 It is built on Claude Code's mod API (function hooks), which is early access and changes between releases. This version was built and tested on Claude Code 2.1.317.
 
+## Approved delivery and orchestration
+
+An approved task/plan includes implementation, tests, commits, task-branch pushes and PR creation. The orchestrator carries that work through without asking for another publishing approval. There are two action boundaries: main/base merges need the owner’s separate approval of the reviewed PR head; permanent file deletion needs explicit deletion approval. Files removed from active use go into `_deleted` instead. System files must never be deleted or quarantined, and `~/Library` must not be accessed without explicit approval for that access.
+
+The main session orchestrates; isolated task workers write code. The orchestrator reviews changes and sends fixes or conflicts back to a worker. Claude refuses the orchestrator’s direct Edit/Write calls in a bound run. Codex applies this rule through its skill, worker-only file-moving command and role checks; it does not install a global edit/shell interceptor.
+
+For GitHub main/base merges, review the PR and checks, then approve its full head with `/approve-merge <task> <full SHA>` in Claude, or `approve_merge --caller owner` in Codex. A changed PR, head or target base needs new approval. An unchanged approval is retained across a refused/uncertain request and cleared once completion is verified. Lore retains its existing exact-revision `/approve-main` gate.
+
+Automatic cleanup is reversible: kept Lore workspaces and obsolete copied files move into `_deleted` under the ignored run directory; Git worktrees move into the project’s `_deleted` with Git’s registration updated. Cleanup never falls back to deleting when a move fails. Quarantine contents are local recovery material, excluded from normal Git staging, and must never be force-added or published. They remain until the owner separately approves permanent deletion.
+
 ## Shared HTML board
 
 Claude and Codex use the same local HTML board. In Claude, `/conduct` and `/board <run>` start or reuse the Claude view and show an **Open HTML board** link. `/board html` retrieves the link again. Claude’s current plugin API cannot embed HTML inside its dock, so the HTML view opens in your browser; the native dock remains available as a fallback.
@@ -98,7 +108,7 @@ A run lives in `.claude/conductor/runs/<run id>/`: its `ledger.json`, and `hando
 | `/merged <task>` | Mark a task done by your word: its pull request is merged |
 | `/rotate` | Compact the orchestrator's session with a handover now |
 | `/approve-main` | In Lore: approve the run branch for the base branch; the mod merges exactly that revision now |
-| `/cleanup [<task>… \| all]` | In Lore: list the workspaces kept for done tasks and what keeps each; with task ids or `all`, remove them |
+| `/cleanup [<task>… \| all]` | In Lore: list the workspaces kept for done tasks and what keeps each; with task ids or `all`, move them into `_deleted` |
 
 The orchestrator and the workers change the board only through the mod's tools: `task_add`, `task_update`, `run_plan`, `board_post`, `board_rule`, `board_read`, `problem_report`, `problem_resolve`, `problem_assign`, `merge_check` and `merge`. A Lore workspace adds `run_sync_base`; a project with Linear tickets adds `ticket_read` and `ticket_file`.
 
@@ -264,10 +274,10 @@ A folder home normally has to lie inside your home folder, by its path and by wh
 ### Merging in Lore
 
 - A worker commits and pushes its own branch and hands back with the revision it pushed (`task_update` with `revision`). A new revision on a green task sends it back to review.
-- `merge` merges a green task's branch into the run branch, pinned to that revision, one at a time, in the run's own workspace. A conflict is never resolved by the mod: the merge is aborted, and the task comes back blocked, with the files named. A worker workspace is removed afterwards when everything in it is pushed. Files the copy took along unchanged from your workspace, such as `.claude/settings.local.json`, don't count. A workspace that is kept names what keeps it.
+- `merge` merges a green task's branch into the run branch, pinned to that revision, one at a time, in the run's own workspace. A conflict is never resolved by the mod: the merge is aborted, and the task comes back blocked, with the files named. A worker workspace is moved into `_deleted` afterwards when everything in it is pushed. Files the copy took along unchanged from your workspace, such as `.claude/settings.local.json`, don't count. A workspace that is kept names what keeps it.
 - A merge of a large branch may take long. The steps that move a branch (`lore branch switch`, `lore branch merge`, `lore push`) may each run up to 60 minutes, past the ten minutes the engine gives one program; short commands such as `lore branch info` keep their short limit. A merge still running after 60 minutes is stopped and aborted, nothing is pushed, and the merge may be tried again.
 - A merge that is not done within a few seconds goes on in the background. `merge` then answers that the task is merging, and the orchestrator is told on the board when the merge has landed, or why it did not. Bringing the base branch in with `run_sync_base` and the merge `/approve-main` starts go on in the background the same way. A Stop or a message typed while it runs does not end it; a reload of the session does. A merge claim is let go as stuck only after 210 minutes unheard, so a merge running in another session is not taken from it.
-- `/cleanup` lists the workspaces kept for done tasks and what keeps each. `/cleanup <task>…` or `/cleanup all` removes them, changes not pushed and all. Only you can, from the terminal, the desktop app or Remote Control, and only the folder the mod made for that task is removed.
+- `/cleanup` lists the workspaces kept for done tasks and what keeps each. `/cleanup <task>…` or `/cleanup all` moves them into `_deleted`, preserving changes not pushed. Only you can, from the terminal, the desktop app or Remote Control, and only the folder the mod made for that task is moved.
 - When every task is merged and no blocker or warning is open, you type `/approve-main`. It records your approval of the run branch's revision, unprotects the base branch, merges the run branch into it on the server (`lore branch merge into`), and protects it again, whatever happened.
 - If the base branch moved since the run branch last took it in, `/approve-main` refuses: the orchestrator brings it in with `run_sync_base`, and you approve again.
 - `/approve-main` is taken only from you: the terminal, the desktop app or Remote Control, never another session or a scheduled run.

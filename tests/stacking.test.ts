@@ -146,6 +146,9 @@ test('a task behind a green one starts on its branch, is built and reviewed whil
   expect((await call($, 'merge', { task: 't395-2', told: [] })).text).toMatch(/^Not done\. Nothing was merged\. t395-2 cannot merge now:\n- t395-2 waits for t395-1 \(green\)/)
   expect(forge.merges).toEqual([])
 
+  await $.command.run({ command: 'approve-merge', args: `t395-1 ${HEAD}`, origin: { kind: 'composer' } })
+  await $.command.run({ command: 'approve-merge', args: `t395-2 ${HEAD2}`, origin: { kind: 'composer' } })
+
   // The one below merges first, and is done once GitHub has merged it.
   expect((await call($, 'merge', { task: 't395-1', told: [] })).text).toMatch(/^Merged: PR 548/)
   expect(of(stored(), 't395-1').status).toBe('done')

@@ -1,3 +1,4 @@
+import { DELIVERY } from './delivery'
 import type { Base } from './router'
 import type { Ledger, Post, Ruling, Task } from '../types'
 import { changed, covers, fileList, normalise, overlap, refused, tidy } from './signals'
@@ -337,6 +338,7 @@ export function briefing(ledger: Ledger, task: Task, project?: { brief: string; 
           `- The worker before you was stopped before it handed back, so what it did may not be committed or pushed: start with ${own === undefined ? 'git status and git diff' : 'lore status --scan and lore diff in your workspace'}, keep what serves the task, and commit and push it.`,
         ]),
     ...(known.length > 0 ? ['- From the board, for you:', ...known.map(line => `  ${line}`)] : []),
+    DELIVERY,
     ...rules,
   ].join('\n')
 }

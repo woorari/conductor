@@ -163,6 +163,7 @@ test('on GitHub nothing of this applies, whichever way the origin is written', a
   expect(told).not.toContain('is not on GitHub')
   expect((await call($, 'board_read', {})).text).toContain('- A green task is merged with mcp__conductor__merge, one at a time;')
   expect((await bash($, `curl -sS -X PUT "${API}/pulls/548/merge"`)).deny).toMatch(/^conductor: this command merges a pull request by hand\./)
+  await command($, 'approve-merge', `t395-1 ${HEAD}`)
   expect((await call($, 'merge', MERGE)).text).toMatch(/^Merged: PR 548 \(t395-1\) is on main as /)
   expect(forge.merges).toEqual([{ pr: 548, body: { sha: HEAD, merge_method: 'merge' } }])
   expect(HOME).toBe('/home/owner')

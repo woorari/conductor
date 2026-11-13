@@ -165,6 +165,7 @@ test('/pause holds the run in the mod itself: no start, no merge, what is under 
   await clock.advance(5000)
   expect(engine.woke.at(-1)).toBe(UNPAUSED)
   expect((await spawn($, 't392-1') as Ran).agentId, 'and a worker starts again').toBe('sub1')
+  await command($, 'approve-merge', `t393-1 ${'d'.repeat(40)}`)
   expect((await call($, 'merge', { task: 't393-1', told: [] })).text).toMatch(/^Merged: PR 547/)
   expect((await command($, 'unpause')).text).toBe('Run demo is not paused.')
 })

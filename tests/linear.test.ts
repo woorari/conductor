@@ -166,6 +166,8 @@ describe('Linear states the mod moves itself', () => {
       engine.forge.checks['c'.repeat(40)] = ci('success')
       await command($, 'approve')
 
+      await command($, 'approve-merge', `t1 ${'b'.repeat(40)}`)
+      await command($, 'approve-merge', `t2 ${'c'.repeat(40)}`)
       await call($, 'merge', { task: 't1', told: [], closes: [] })
       expect(engine.linear.updated.filter(one => one.input.stateId === 's-done'), 'the other task still has work to do').toEqual([])
 
@@ -265,6 +267,7 @@ describe('Linear states the mod moves itself', () => {
     await start($)
     await board($, 'demo')
 
+    await command($, 'approve-merge', `t395-1 ${'b'.repeat(40)}`)
     const said = await call($, 'merge', { task: 't395-1', told: ['Triage issues'], closes: [395] })
     expect(said.text).toContain(`is on main as ${mergeCommit(548).slice(0, 7)}`)
     expect(engine.linear.updated).toEqual([{ id: 'issue-ABC-13', input: { stateId: 's-done' } }])
@@ -284,6 +287,7 @@ describe('Linear states the mod moves itself', () => {
     await start($)
     await board($, 'demo')
 
+    await command($, 'approve-merge', `t395-1 ${'b'.repeat(40)}`)
     await call($, 'merge', { task: 't395-1', told: [], closes: [395] })
     expect(engine.linear.updated).toEqual([
       { id: 'issue-ABC-13', input: { stateId: 's-done' } },

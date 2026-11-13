@@ -1,3 +1,4 @@
+import { programCalls, isQuarantine } from './world'
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
@@ -15,7 +16,7 @@ const cleanup = ($: Engine, args = '', kind = 'composer') =>
 const T1_WS = `${BASE}/ABC-12/t1`
 const T2_WS = `${BASE}/ABC-12/t2`
 const T3_WS = `${BASE}/ABC-12/t3`
-const LISTED = '/cleanup <task id> removes one, /cleanup all every one listed; what is not pushed in it is lost. Nothing was removed.'
+const LISTED = '/cleanup <task id> or /cleanup all moves these workspaces into _deleted. Nothing is permanently deleted.'
 const FREE = `87 GB are free now on the disk that holds ${LORE_ROOT}.`
 
 /** A Lore run that kept the workspaces of two done tasks, t1 with a file of its worker's and t2 with only what its copy took along, while t3 still builds. */
@@ -39,7 +40,7 @@ async function kept($: Engine, on: Parameters<typeof lored>[1], ledger: Ledger =
   return made
 }
 
-const removed = (engine: World): string[][] => engine.calls.map(one => one.argv).filter(argv => argv[0] === 'rm')
+const removed = (engine: World): string[][] => programCalls(engine).filter(argv => argv[0] === 'quarantine')
 
 test('/cleanup lists the kept workspaces of done tasks and what keeps each, and removes nothing', async ($, on) => {
   const { files, engine } = await kept($, on)
@@ -59,16 +60,16 @@ test('/cleanup lists the kept workspaces of done tasks and what keeps each, and 
 test('/cleanup with a task id removes that done task\'s workspace, changes not pushed and all, and the board forgets it', async ($, on) => {
   const { files, engine } = await kept($, on)
 
-  expect((await cleanup($, 't1')).text).toBe(`Removed the workspace of t1. ${FREE}`)
-  expect(removed(engine)).toEqual([['rm', '-rf', '--', T1_WS]])
+  expect((await cleanup($, 't1')).text).toBe(`Cleared workspace records for t1; existing folders moved into _deleted. ${FREE}`)
+  expect(removed(engine)).toEqual([['quarantine', '--', T1_WS]])
   expect(stored(files).tasks.map(one => one.workspace)).toEqual([undefined, T2_WS, T3_WS, undefined])
 })
 
 test('/cleanup all removes every kept workspace of a done task, never one whose task is still at work', async ($, on) => {
   const { files, engine } = await kept($, on)
 
-  expect((await cleanup($, 'all')).text).toBe(`Removed the workspaces of t1, t2. ${FREE}`)
-  expect(removed(engine)).toEqual([['rm', '-rf', '--', T1_WS], ['rm', '-rf', '--', T2_WS]])
+  expect((await cleanup($, 'all')).text).toBe(`Cleared workspace records for t1, t2; existing folders moved into _deleted. ${FREE}`)
+  expect(removed(engine)).toEqual([['quarantine', '--', T1_WS], ['quarantine', '--', T2_WS]])
   expect(stored(files).tasks.map(one => one.workspace)).toEqual([undefined, undefined, T3_WS, undefined])
 })
 
@@ -107,16 +108,16 @@ test('a workspace that is gone already is listed so, and /cleanup forgets it wit
   engine.dirs.splice(engine.dirs.indexOf(T1_WS), 1)
 
   expect((await cleanup($)).text).toContain(`- t1 at ${T1_WS}: it is gone already`)
-  expect((await cleanup($, 't1')).text).toBe(`Removed the workspace of t1. ${FREE}`)
+  expect((await cleanup($, 't1')).text).toBe(`Cleared workspace records for t1; existing folders moved into _deleted. ${FREE}`)
   expect(removed(engine)).toEqual([])
   expect(stored(files).tasks[0]?.workspace).toBeUndefined()
 })
 
 test('a removal that fails keeps the workspace on the board and says why', async ($, on) => {
   const { files, engine } = await kept($, on)
-  engine.programs.unshift({ match: argv => argv[0] === 'rm', answer: { exitCode: 1, stdout: 'rm: Directory not empty' } })
+  engine.programs.unshift({ match: argv => isQuarantine(argv), answer: { exitCode: 1, stdout: 'rm: Directory not empty' } })
 
-  expect((await cleanup($, 't1')).text).toBe(`Not removed: t1 (rm did not remove it: rm: Directory not empty). ${FREE}`)
+  expect((await cleanup($, 't1')).text).toBe(`Not removed: t1 (quarantine could not move it: rm: Directory not empty). ${FREE}`)
   expect(stored(files).tasks[0]?.workspace).toBe(T1_WS)
 })
 

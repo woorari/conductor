@@ -182,6 +182,7 @@ async function githubFixture(t) {
   git('remote', 'add', 'origin', 'https://github.com/example/project.git');
   await add(app, 'one'); await propose(app); await approve(app);
   await app.apply('run', 'task_update', { task: 'one', pr: 1, status: 'green' });
+  await app.apply('run', 'approve_merge', { task: 'one', head: 'a'.repeat(40) }, owner);
   const state = { head: 'a'.repeat(40), baseHead: 'b'.repeat(40), mergeSha: 'c'.repeat(40), writes: [], merged: false, noChecks: false, failBase: false, uncertain: false };
   app.githubApi = async (endpoint, method = 'GET', body) => {
     if (endpoint.endsWith('/merge')) {
@@ -282,4 +283,27 @@ test('owner model mappings are explicit and a host takeover can reset them witho
   assert.equal(app.load('run').tasks[0].model, 'gpt-owner-choice');
   assert.deepEqual(app.load('run').codex.models, {});
   assert.match(board(app.load('run')), /current Codex model/);
+});
+
+test('main merge requires a separate owner approval and consumes it only for the approved head', async t => {
+  const { app, state } = await githubFixture(t);
+  const raw = app.load('run'); delete raw.run.mergeApprovals; app.save('run', raw);
+  const checked = await app.github('run', { task: 'one' }); assert.equal(checked.approvalRequired, true);
+  await assert.rejects(() => app.github('run', { task: 'one', head: state.head, told: [] }, true), /separate owner approval/);
+  assert.equal(state.writes.length, 0);
+  await assert.rejects(() => app.apply('run', 'approve_merge', { task: 'one', head: state.head }), /owner/);
+  await app.apply('run', 'approve_merge', { task: 'one', head: state.head }, owner);
+  await app.github('run', { task: 'one', head: state.head, told: [] }, true);
+  assert.equal(state.writes.length, 1); assert.equal(app.load('run').run.mergeApprovals.one, undefined);
+});
+
+test('only the reserved worker can quarantine its approved files, with contents preserved', async t => {
+  const { app } = await started(t);
+  await add(app, 'one', ['old.txt']); await propose(app); await approve(app);
+  const work = await app.worktree('run', { task: 'one' }); fs.writeFileSync(path.join(work.workspace, 'old.txt'), 'keep this content');
+  await assert.rejects(() => app.quarantine('run', { paths: ['old.txt'] }, { kind: 'orchestrator' }), /orchestrator delegates/);
+  await assert.rejects(() => app.quarantine('run', { paths: ['source.txt'] }, worker('one')), /approved file scope/);
+  const result = await app.quarantine('run', { paths: ['old.txt'] }, worker('one'));
+  assert.equal(fs.existsSync(path.join(work.workspace, 'old.txt')), false);
+  assert.match(result.moved[0].to, /_deleted/); assert.equal(fs.readFileSync(result.moved[0].to, 'utf8'), 'keep this content');
 });
