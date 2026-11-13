@@ -151,6 +151,9 @@ export type LoreAnswer = {
 
 /** What the world hands back for the engine's side of things a test wants to steer or read. */
 export type World = {
+  /** Optional local HTML transport, separate from the pretend GitHub. */
+  htmlHttp?: (url: string, init?: { method?: string; headers?: Record<string, string>; body?: string }) => { status: number; json: unknown } | undefined
+
   /** The agent ids the next spawns are given, in order. */
   agentIds: string[]
   /** When set, the engine starts no agent and says this instead. */
@@ -405,6 +408,8 @@ export function world(on: On, files: Files, repo: { root: string } | null = { ro
   })
   on('store.keys', () => ({ value: Object.keys(state.store) }))
   on('http.fetch', (_$, e) => {
+    const html = state.htmlHttp?.(e.url, e.init)
+    if (html) return { value: { status: html.status, ok: html.status >= 200 && html.status < 300, headers: {}, text: JSON.stringify(html.json) } }
     if (e.url === LINEAR_URL) return linearAnswer(state.linear, e.init)
     const { forge } = state
     const method = e.init?.method ?? 'GET'

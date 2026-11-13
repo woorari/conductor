@@ -15,7 +15,7 @@ const { openBoard, closeBoard } = await import(pathToFileURL(path.join(skill, 's
 process.on('exit', () => fs.rmSync(built, { recursive: true, force: true }));
 async function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'conductor board project '));
-  t.after(async () => { for (const id of fs.readdirSync(path.join(root, '.codex/conductor/runs'))) await closeBoard(root, id); await new Promise(r => setTimeout(r, 100)); fs.rmSync(root, { recursive: true, force: true }); });
+  t.after(async () => { for (const host of ['codex', 'claude']) { const runs = path.join(root, `.${host}/conductor/runs`); if (fs.existsSync(runs)) for (const id of fs.readdirSync(runs)) await closeBoard(root, id, host); } await new Promise(r => setTimeout(r, 100)); fs.rmSync(root, { recursive: true, force: true }); });
   const app = new Conductor(root); app.init();
   await app.conduct({ id: 'run', source: 'Build a live board', title: 'Board <script>alert(1)</script>' });
   await app.apply('run', 'task_add', { id: 'one', title: 'First task', tier: 'sonnet', tierReason: 'Implementation', files: ['src/board.js'] });
@@ -152,4 +152,43 @@ test('a skill update replaces an authenticated older board server instead of kee
   const snapshot = await (await fetch(upgraded.url.split('/#')[0] + '/api/board', { headers: { Authorization: `Bearer ${info.token}` } })).json();
   assert.equal(snapshot.groups.next[0].complexity, 'implementation');
   assert.equal(snapshot.groups.next[0].modelSelection.kind, 'inherit');
+});
+
+test('Claude shares the HTML board but its model choices are queued for the native owner controls', async t => {
+  const { root, app } = await fixture(t);
+  const native = path.join(root, '.claude/conductor/runs/run'); fs.mkdirSync(native, { recursive: true });
+  const file = path.join(native, 'ledger.json'); const raw = app.load('run'); fs.writeFileSync(file, JSON.stringify(raw));
+  const before = fs.readFileSync(app.ledgerFile('run'), 'utf8');
+  const { info } = await startServer(root, 'run', { host: 'claude' });
+  const base = `http://127.0.0.1:${info.port}`; const headers = { Authorization: `Bearer ${info.token}`, 'Content-Type': 'application/json' };
+  const initial = await (await fetch(base + '/api/board', { headers })).json();
+  assert.equal(initial.host, 'claude'); assert.equal(initial.commands.approve, '/approve'); assert.equal(initial.groups.next[0].modelSelection.model, 'sonnet');
+  assert.equal(initial.tierEditable, false);
+  assert.equal((await fetch(base + '/api/tier', { method: 'POST', headers, body: JSON.stringify({ task: 'one', tier: 'opus' }) })).status, 409);
+  await fetch(base + '/api/actions', { headers });
+  const queued = await (await fetch(base + '/api/tier', { method: 'POST', headers, body: JSON.stringify({ task: 'one', tier: 'opus' }) })).json();
+  assert.match(queued.id, /^[a-f0-9]{24}$/);
+  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).tasks[0].tier, 'sonnet');
+  const action = await (await fetch(base + '/api/actions', { headers })).json(); assert.equal(action[0].tier, 'opus');
+  assert.deepEqual(await (await fetch(base + '/api/actions', { headers })).json(), []);
+  assert.equal((await fetch(base + `/api/actions/${queued.id}`, { method: 'POST', headers, body: JSON.stringify({ status: 'applied', message: 'Changed' }) })).status, 409);
+  raw.tasks[0].tier = 'opus'; raw.tasks[0].tierBy = 'owner'; fs.writeFileSync(file, JSON.stringify(raw));
+  assert.equal((await fetch(base + `/api/actions/${queued.id}`, { method: 'POST', headers, body: JSON.stringify({ status: 'applied', message: 'Changed by owner' }) })).status, 200);
+  const observed = await (await fetch(base + '/api/board', { headers })).json(); assert.equal(observed.groups.next[0].tier, 'opus'); assert.equal(observed.actions[0].status, 'applied');
+  raw.tasks[0].status = 'building'; fs.writeFileSync(file, JSON.stringify(raw));
+  assert.equal((await fetch(base + '/api/tier', { method: 'POST', headers, body: JSON.stringify({ task: 'one', tier: 'haiku' }) })).status, 409);
+  assert.equal((await fetch(base + '/api/approve', { method: 'POST', headers, body: '{}' })).status, 405);
+  assert.equal(fs.readFileSync(app.ledgerFile('run'), 'utf8'), before);
+});
+
+test('the Claude entry builds its local runtime once and reuses its host-specific HTML board', async t => {
+  const { root, app } = await fixture(t);
+  const native = path.join(root, '.claude/conductor/runs/run'); fs.mkdirSync(native, { recursive: true });
+  fs.writeFileSync(path.join(native, 'ledger.json'), JSON.stringify(app.load('run')));
+  const entry = path.resolve('codex/board.mjs');
+  const invoke = () => JSON.parse(execFileSync(process.execPath, [entry, '--root', root, '--run', 'run'], { encoding: 'utf8' }));
+  const first = invoke(); const second = invoke();
+  assert.equal(first.boardView.url, second.boardView.url); assert.equal(second.boardView.reused, true);
+  assert.equal(fs.readdirSync(native).filter(name => name.startsWith('.html-runtime-')).length, 1);
+  const info = JSON.parse(fs.readFileSync(serverFile(root, 'run', 'claude'), 'utf8')); assert.equal(info.host, 'claude');
 });

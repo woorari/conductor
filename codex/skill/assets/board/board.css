@@ -330,3 +330,8 @@ footer p {
 [hidden] {
   display:none!important;
 }
+
+.model-picker { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 12px; font-family: "SFMono-Regular", Consolas, monospace; font-size: 12px; }
+.model-picker select { background: var(--panel); color: var(--fg); border: 1px solid var(--line); border-radius: 5px; padding: 7px 12px; font: inherit; }
+.model-picker select:disabled { opacity: .5; }
+.model-picker select:focus-visible { outline: 2px solid var(--green); outline-offset: 3px; }

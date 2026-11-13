@@ -31,6 +31,7 @@ import type { Config, Facts, Flight, Look, Verdict } from './merge'
 import { DONE_SHOWN, boardView, clock, detail, orchestratorLine, problemDetail, runMinutes, summary, timeline } from './board'
 import type { TaskRow } from './board'
 import { dashboardSvg } from './dashboard'
+import { launchHtmlBoard, boardRequest, htmlActions } from './html-board'
 import { KEEP, ROTATE_AT, carried, handover } from './handover'
 import { LINEAR_KEY, RUN_ID, STATUSES, TIERS, parseLedger } from './ledger'
 import { approvedMain, baseBroughtIn, conflicted, letGo, loreReady, onBase, onRunBranch, readyForBase, rev7, startLoreMerge, syncEnded } from './lore-merge'
@@ -139,6 +140,9 @@ const PX_PER_COLUMN = 8.4
 const EMPTY: BoardState = { runId: null, ledger: null, error: null }
 
 const board = atom({ plugin: 'conductor', key: 'board' } as const, EMPTY)
+const htmlBoard = atom({ plugin: 'conductor', key: 'htmlBoard' } as const, null)
+const htmlSeen = new Map<string, { status: string; message: string }>()
+let htmlBusy = false
 const nowMs = atom({ plugin: 'conductor', key: 'nowMs' } as const, 0)
 const pinnedRun = atom({ plugin: 'conductor', key: 'pinnedRun' } as const, null)
 const pinnedRoot = atom({ plugin: 'conductor', key: 'pinnedRoot' } as const, null)
@@ -3322,10 +3326,50 @@ async function refresh($: EngineInterface, rescan: boolean): Promise<void> {
   }
 }
 
+async function openHtml($: EngineInterface): Promise<void> {
+  const runId = await read($, pinnedRun)
+  const home = await read($, pinnedRoot)
+  if (runId === null || home === null) { await update($, htmlBoard, () => null); return }
+  const result = await launchHtmlBoard($, home, runId)
+  await update($, htmlBoard, () => result)
+  await pollHtml($)
+}
+
+/** Browser choices are owner inputs; apply them through the same serialized native mutation as the pane. */
+async function pollHtml($: EngineInterface): Promise<void> {
+  if (htmlBusy) return
+  htmlBusy = true
+  try {
+    const current = await read($, htmlBoard)
+    const bound = await read($, pinnedRun)
+    if (!current?.url || current.runId !== bound) return
+    const path = await boundLedger($)
+    if (path === undefined) return
+    const actions = htmlActions(await boardRequest($, current.url, '/api/actions'))
+    for (const action of actions) {
+      let result = htmlSeen.get(action.id)
+      if (result === undefined) {
+        const written = await mutate($, path, raw => {
+          const outcome = ownerSetsTier(raw, action.task, action.tier)
+          return { value: outcome, isChanged: outcome.isChanged }
+        })
+        result = written.error !== undefined ? { status: 'error', message: written.error } : { status: written.value.isError ? 'error' : 'applied', message: written.value.text }
+        htmlSeen.set(action.id, result)
+        if (htmlSeen.size > 64) htmlSeen.delete(htmlSeen.keys().next().value!)
+        seen = undefined
+        await refresh($, false)
+      }
+      await boardRequest($, current.url, `/api/actions/${action.id}`, result)
+    }
+  } catch { /* A stopped viewer or bridge never stops the run; reopen with /board html. */ }
+  finally { htmlBusy = false }
+}
+
 async function tick($: EngineInterface): Promise<void> {
   if (isTicking) return
   isTicking = true
   try {
+    await pollHtml($)
     const isUp = (await $.ui.panes()).some(pane => pane.id === PANE)
     if (!isUp) return
     ticks += 1
@@ -3688,6 +3732,7 @@ async function switchOn($: EngineInterface): Promise<void> {
   await rebind($)
   const path = await boundLedger($).catch(() => undefined)
   if (path !== undefined) await remember($, path)
+  if (path !== undefined) await openHtml($)
   // A reload forgets the last reading of the context: taken again here, so a compaction that was due stays due.
   if (path !== undefined) void gaugeNow($)
 }
@@ -4212,6 +4257,11 @@ export const register: Register = (on, options) => {
 
   on('command.run', { command: 'board' }, async ($, e) => {
     // A run started from an issue is named by its number, so `/board #12` means run 12.
+    if (e.args.trim() === 'html') {
+      await openHtml($)
+      const live = await read($, htmlBoard)
+      return { text: live?.url ? `Open the [live HTML board](${live.url}). The native pane remains available; model tiers can be changed in either view.` : live?.error ?? 'Bind a run first with /board <run id>.' }
+    }
     const asked = e.args.trim().replace(/^#(?=\d+$)/, '')
     if (asked !== '' && !RUN_ID.test(asked)) {
       return { text: `"${asked}" is not a run id: letters, digits, _ and -, at most 64.` }
@@ -4227,6 +4277,7 @@ export const register: Register = (on, options) => {
     seen = undefined
     await refresh($, true)
     await $.ui.open({ id: PANE, title: TITLE })
+    await openHtml($)
 
     const state = await read($, board)
     if (state.ledger === null) {
@@ -4236,7 +4287,9 @@ export const register: Register = (on, options) => {
       bound === null
         ? `Viewing only: /board ${state.ledger.run.id} binds this session to the run, so its workers are recorded.`
         : `This session is bound to run ${bound}.`
-    const line = `${state.ledger.run.title}: ${summary(boardView(state.ledger, now))}. ${binding}`
+    const live = await read($, htmlBoard)
+    const htmlLink = live?.url ? ` [Open HTML board](${live.url}).` : ''
+    const line = `${state.ledger.run.title}: ${summary(boardView(state.ledger, now))}. ${binding}${htmlLink}`
 
     return { text: state.error === null ? line : `${line} The newest read failed: ${state.error}` }
   })
@@ -4302,9 +4355,9 @@ export const register: Register = (on, options) => {
       if (!isThere) return { text: `There is no file ${source} here, so there is nothing to start a run from. For an issue, give its number: /conduct #12.` }
     }
     const configText = await textAt($, `${root}/${CONFIG_PATH}`)
-    const read = parseConfig(configText)
-    if ('error' in read) return { text: `No run was started: ${read.error}` }
-    const project = read.config
+    const configRead = parseConfig(configText)
+    if ('error' in configRead) return { text: `No run was started: ${configRead.error}` }
+    const project = configRead.config
     // A home that is not a repository: the run's workspace comes from its ticket or spec, and its settings from the place.
     const placed = (await isFolderHome($)) ? await placeRun($, root, asked, project) : undefined
     if (placed !== undefined && 'error' in placed) return { text: placed.error }
@@ -4353,6 +4406,7 @@ export const register: Register = (on, options) => {
     seen = undefined
     await refresh($, true)
     await $.ui.open({ id: PANE, title: TITLE })
+    await openHtml($)
     asks.push(planning(id, source, title))
 
     // The mod runs the project's check itself, without Claude Code's permission prompt: the owner sees the program now.
@@ -4360,8 +4414,10 @@ export const register: Register = (on, options) => {
     const check = placed === undefined ? project.check : placed.workspace?.kind === 'lore' ? placed.config.check : undefined
     const checkLine = check === undefined ? '' : ` Its check command, which the mod runs on each judged revision: ${check.argv.join(' ')}.`
 
+    const live = await read($, htmlBoard)
+    const htmlLink = live?.url ? ` [Open HTML board](${live.url}).` : ''
     return {
-      text: `Run ${id} is started from ${source}${title === undefined ? '' : `, called "${title}"`}. The plan comes next; nothing starts before you /approve it.${checkLine}`,
+      text: `Run ${id} is started from ${source}${title === undefined ? '' : `, called "${title}"`}. The plan comes next; nothing starts before you /approve it.${checkLine}${htmlLink}`,
     }
   })
 
@@ -4497,6 +4553,9 @@ export const register: Register = (on, options) => {
       )
     }
 
+    const Markdown = $.ui.resolve(e).Markdown
+    const live = await read($, htmlBoard)
+    const htmlLink = live?.runId === state.ledger.run.id && live.url ? <Box marginBottom={1}><Markdown source={`[Open live HTML board](${live.url})`} /></Box> : null
     const view = boardView(state.ledger, now)
     const failure = state.error !== null && (
       <Box flexDirection="column" marginBottom={1}>
@@ -4547,6 +4606,7 @@ export const register: Register = (on, options) => {
         <Box flexDirection="column">
           {failure}
           <Svg source={picture.source} alt={picture.alt} />
+          {htmlLink}
           {Select !== undefined && pickers(Select)}
         </Box>
       )
@@ -4603,6 +4663,7 @@ export const register: Register = (on, options) => {
             <Text dimColor>{`${view.resolved} ${view.resolved === 1 ? 'problem' : 'problems'} resolved`}</Text>
           </Box>
         )}
+        {htmlLink}
         {pickers($.ui.resolve(e).Select)}
         {orchestratorLine(view.orchestrator) !== undefined && (
           <Box marginTop={1}>

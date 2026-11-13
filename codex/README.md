@@ -52,6 +52,8 @@ On a host takeover, `model_policy` with input `{}` resets future Codex assignmen
 
 ## Live desktop board
 
+Claude and Codex share these HTML assets and the local server; Claude’s entry is `node codex/board.mjs --root <project> --run <id>`. It reads `.claude/conductor/runs/`, uses Claude’s native commands and supports queued-task tier changes through the active Claude session. The Codex view remains backed by `.codex/conductor/runs/`.
+
 The board runs locally with the same Node.js runtime as the adapter, without npm dependencies or API keys. It shows progress, task states, measured worker timelines, open problems/questions, rulings, pending Linear transitions, and the full plan with tiers, dependencies and expected files. Approval and resume buttons copy commands to send in chat; viewing or clicking the board never approves or changes a run.
 
 The desktop browser panel accepts HTTP/HTTPS pages, so an HTML file beside the ledger cannot open there directly. The local server exposes only the board assets and authenticated run snapshot; it is not a general file server.

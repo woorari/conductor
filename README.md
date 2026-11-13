@@ -6,6 +6,14 @@ It also works in a **Lore** workspace (Epic's version control system) and takes 
 
 It is built on Claude Code's mod API (function hooks), which is early access and changes between releases. This version was built and tested on Claude Code 2.1.317.
 
+## Shared HTML board
+
+Claude and Codex use the same local HTML board. In Claude, `/conduct` and `/board <run>` start or reuse the Claude view and show an **Open HTML board** link. `/board html` retrieves the link again. Claude’s current plugin API cannot embed HTML inside its dock, so the HTML view opens in your browser; the native dock remains available as a fallback.
+
+The HTML view retains Claude’s queued-task model tier pickers. Choices are sent to the active Claude session and applied through its existing owner controls, then confirmed from the saved ledger. Started tasks cannot change tiers. If the Claude session disconnects, the HTML board still shows progress while model controls disable until the session reconnects. The native dock’s pickers remain available. Approval and resume buttons copy `/approve` and `/unpause` to send in Claude; they never approve work directly.
+
+The HTML view needs Node.js 22.18+ on PATH and no npm install or API key. If Node is unavailable or startup fails, the native board continues working. Each host reads its own run directory, and the server listens only on loopback with a private access token. Closing the browser allows the server to stop after 30 minutes without a viewer; the native bridge alone does not keep it alive.
+
 ## Codex
 
 A Codex skill adapter is included alongside the Claude mod, with a live run board in the desktop app’s right-hand browser panel. On macOS or Windows, install it from this checkout with `node codex/install.mjs` (Node.js 22.18+). See [Codex setup and compatibility](codex/README.md).

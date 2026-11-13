@@ -33,8 +33,8 @@ function render(data) {
   $('progress').setAttribute('aria-valuemax', String(data.total || 1)); $('progress').setAttribute('aria-valuenow', String(data.completed));
   $('progress').firstElementChild.style.width = `${data.total ? data.completed / data.total * 100 : 0}%`;
   const state = [];
-  if (data.run.pausedAt) state.push(notice('Run paused', 'No new tasks start or merge while the run is on hold.', '$conductor unpause', true));
-  if (data.run.plan === 'proposed') state.push(notice('Plan ready for your approval', 'Review the tasks and expected files below, then send the approval command in chat.', '$conductor approve'));
+  if (data.run.pausedAt) state.push(notice('Run paused', 'No new tasks start or merge while the run is on hold.', data.commands.unpause, true));
+  if (data.run.plan === 'proposed') state.push(notice('Plan ready for your approval', 'Review the tasks and expected files below, then send the approval command in chat.', data.commands.approve));
   else if (data.run.plan === 'draft') state.push(notice('Drafting the plan', 'Tasks can still change. Work starts after the proposed plan is approved.'));
   if (!data.total) state.push(notice('Your board is ready', 'Tasks appear here as the plan takes shape.'));
   if (data.total && data.completed === data.total) state.push(notice(data.problems.length || data.questions.length || data.pending.length ? 'Tasks complete · follow-up remains' : 'All tasks complete', 'Final integration and ticket state are confirmed in chat.'));
@@ -64,6 +64,29 @@ function render(data) {
     const s = section('Up next', `${queued.length} queued`); const chips = el('div', undefined, 'queue');
     for (const task of queued) { const chip = el('span', undefined, `chip${task.dependsOn.some(id => !data.groups.done.some(t => t.id === id) && !data.groups.review.some(t => t.id === id && t.status === 'green')) ? ' waiting' : ''}`); chip.title = `${task.title}\n${task.detail}`; chip.append(document.createTextNode(task.id + ' '), el('small', task.complexity)); chips.append(chip); }
     s.append(chips); sections.push(s);
+  }
+  if (data.host === 'claude' && queued.length) {
+    const s = section('Model tier before a task starts', queued.length);
+    if (!data.tierEditable) s.append(el('p', 'Open this run in Claude to change model tiers. The board still updates while Claude is disconnected.', 'detail'));
+    for (const task of queued) {
+      const label = el('label', undefined, 'model-picker'); label.append(el('span', task.id));
+      const select = el('select'); select.setAttribute('aria-label', `Model tier for ${task.id}`);
+      for (const tier of ['opus', 'sonnet', 'haiku']) { const option = el('option', tier); option.value = tier; select.append(option); }
+      const action = data.actions?.filter(one => one.task === task.id).at(-1);
+      select.value = action?.status === 'pending' ? action.tier : task.tier;
+      select.disabled = !data.tierEditable || action?.status === 'pending';
+      const status = el('span', action?.status === 'pending' ? 'Waiting for Claude…' : action?.message ?? '', 'detail'); status.setAttribute('role', 'status');
+      select.addEventListener('change', async () => {
+        select.disabled = true; status.textContent = 'Sending model choice…';
+        try {
+          const response = await fetch('/api/tier', { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ task: task.id, tier: select.value }), signal: AbortSignal.timeout(5000) });
+          const result = await response.json(); if (!response.ok) throw new Error(result.error);
+          status.textContent = 'Waiting for Claude…';
+        } catch (error) { status.textContent = error.message; select.value = task.tier; select.disabled = !data.tierEditable; }
+      });
+      label.append(select); s.append(label, status);
+    }
+    sections.push(s);
   }
   if (data.groups.done.length) {
     const s = el('details', undefined, 'done-list'); s.id = 'done-list'; s.open = $('done-list')?.open ?? false;

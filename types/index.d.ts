@@ -370,6 +370,7 @@ declare module 'claude-code' {
   interface PluginState {
     conductor: {
       board: BoardState
+      htmlBoard: { runId: string; url?: string; error?: string } | null
       /** The clock as last ticked, for elapsed times; 0 before the first tick. */
       nowMs: number
       /**
