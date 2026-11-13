@@ -22,6 +22,8 @@ Claude and Codex use the same local HTML board. In Claude, `/conduct` and `/boar
 
 The HTML view retains Claude’s queued-task model tier pickers. Choices are sent to the active Claude session and applied through its existing owner controls, then confirmed from the saved ledger. Started tasks cannot change tiers. If the Claude session disconnects, the HTML board still shows progress while model controls disable until the session reconnects. The native dock’s pickers remain available. Approval and resume buttons copy `/approve` and `/unpause` to send in Claude; they never approve work directly.
 
+The shared HTML board adapts Afterglow Logbook’s Night design: a floating Navy sheet, raised panels, tinted status tags, a compact progress overview and locally bundled brand fonts. The timeline uses Pink for active work, Turquoise for completion, Paper outlines for review, yellow for warnings and Zinnober for failures. Ready-to-merge is a Turquoise outline; done is solid. A named legend and solid, hollow and dashed bars distinguish states without relying on hue alone. See [the board design and color language](docs/board-colors.md).
+
 The HTML view needs Node.js 22.18+ on PATH and no npm install or API key. If Node is unavailable or startup fails, the native board continues working. Each host reads its own run directory, and the server listens only on loopback with a private access token. Closing the browser allows the server to stop after 30 minutes without a viewer; the native bridge alone does not keep it alive.
 
 ## Codex

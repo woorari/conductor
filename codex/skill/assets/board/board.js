@@ -2,9 +2,16 @@ const $ = id => document.getElementById(id);
 const token = location.hash.slice(1);
 const el = (tag, text, className) => { const node = document.createElement(tag); if (text !== undefined) node.textContent = text; if (className) node.className = className; return node; };
 let previous;
+const taskStates = { queued: 'Queued', building: 'Building', returned: 'Handed back', review: 'In review', green: 'Ready to merge', done: 'Done', blocked: 'Blocked', failed: 'Failed' };
+// Same restrained 24px stroke vocabulary as Logbook, rebuilt for board sections.
+const sectionIcons = { timeline: 'M4 5h16M4 12h9M4 19h13M2 3v18', building: 'M22 12h-4l-3 9L9 3l-3 9H2', review: 'M5 12l5 5 9-10', attention: 'M12 3L2 21h20L12 3M12 9v5M12 17h.01', returned: 'M9 5l-7 7 7 7M2 12h15a5 5 0 0 1 5 5', default: 'M4 5h16M4 12h16M4 19h10' };
+function sectionIcon(kind) {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); svg.setAttribute('viewBox', '0 0 24 24'); svg.setAttribute('aria-hidden', 'true'); svg.setAttribute('class', 'section-icon');
+  const path = document.createElementNS(svg.namespaceURI, 'path'); path.setAttribute('d', sectionIcons[kind] ?? sectionIcons.default); svg.append(path); return svg;
+}
 const reportAge = activity => activity.ageMinutes < 1 ? 'less than a minute ago' : `${activity.ageMinutes} min ago`;
-function section(title, count) {
-  const node = el('section'); const heading = el('h2', title);
+function section(title, count, kind = 'default') {
+  const node = el('section', undefined, `board-panel panel-${kind}`); const heading = el('h2'); heading.append(sectionIcon(kind), el('span', title, 'section-title'));
   if (count !== undefined) heading.append(el('span', String(count), 'section-count'));
   node.append(heading); return node;
 }
@@ -12,7 +19,12 @@ function row(item, kind = item.status) {
   const node = el('div', undefined, 'row'); node.append(el('span', undefined, `dot ${kind ?? ''}`));
   const content = el('div'); const title = el('p', undefined, 'row-title');
   title.append(el('span', item.id, 'row-id'), document.createTextNode(item.title ?? item.text));
-  content.append(title); if (item.detail) content.append(el('p', item.detail, 'detail'));
+  content.append(title);
+  const label = taskStates[kind] ?? ({ warning: 'Warning', blocker: 'Blocker', note: 'Note' })[kind];
+  if (label) content.append(el('span', label, `state-tag state-${kind}`));
+  const prefix = taskStates[kind]?.toLowerCase() + ' · ';
+  const detail = item.detail?.startsWith(prefix) ? item.detail.slice(prefix.length) : item.detail;
+  if (detail) content.append(el('p', detail, 'detail'));
   if (item.activity && !['done', 'queued'].includes(item.status)) content.append(el('p', `Last report ${reportAge(item.activity)} · ${item.activity.text}`, 'detail'));
   node.append(content); return node;
 }
@@ -30,6 +42,8 @@ function notice(title, message, command, warn = false) {
 function render(data) {
   document.title = `${data.run.id} · Conductor`;
   $('title').textContent = data.run.title; $('run-id').textContent = data.run.id;
+  $('plan-state').textContent = data.run.pausedAt ? 'Paused' : data.run.plan === 'approved' ? 'Plan approved' : data.run.plan === 'proposed' ? 'Approval needed' : 'Draft plan';
+  $('worker-count').textContent = data.groups.building.length; $('review-count').textContent = data.groups.review.length;
   $('completed').textContent = data.completed; $('total').textContent = ` of ${data.total} done`;
   $('elapsed').textContent = data.elapsed ? `${data.elapsed} elapsed` : '';
   $('progress').setAttribute('aria-valuemax', String(data.total || 1)); $('progress').setAttribute('aria-valuenow', String(data.completed));
@@ -47,21 +61,31 @@ function render(data) {
   if (data.problems.length) { const s = section('Problems', `${data.problems.length} open`); data.problems.forEach(p => s.append(row(p, p.severity))); sections.push(s); }
   if (data.questions.length) { const s = section('Questions', data.questions.length); data.questions.forEach(q => s.append(row({ ...q, detail: 'from ' + q.from }, 'warning'))); sections.push(s); }
   if (data.pending.length) { const s = section('Linear updates pending', data.pending.length); data.pending.forEach(p => s.append(row({ id: p.issue, text: `Move to ${p.target}`, detail: p.warning ?? (p.waitingFor?.length ? `Waiting for ${p.waitingFor.join(', ')}` : 'Waiting for synchronization') }, 'warning'))); sections.push(s); }
-  for (const [key, label] of [['attention', 'Needs a decision'], ['building', 'Worker tasks'], ['returned', 'Handed back'], ['review', 'Awaiting orchestrator review / merge']]) {
-    const tasks = data.groups[key]; if (!tasks.length) continue;
-    const s = section(label, tasks.length); tasks.forEach(t => s.append(row(t))); sections.push(s);
-  }
   if (data.timeline) {
-    const s = section('Worker timeline'); const axis = el('div', undefined, 'axis');
+    const s = section('Worker timeline', `${data.timeline.lanes.length} workers`, 'timeline'); const axis = el('div', undefined, 'axis');
     axis.append(el('span', new Date(data.timeline.startMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })), el('span', 'now')); s.append(axis);
     const grid = el('div', undefined, 'timeline');
     for (const lane of data.timeline.lanes) {
       const label = el('span', lane.worker, 'lane-label'); label.title = lane.worker; grid.append(label);
       const track = el('div', undefined, 'lane');
-      for (const bar of lane.bars) { const b = el('span', undefined, `bar ${bar.status}`); b.style.left = `${bar.from * 100}%`; b.style.width = `${(bar.to - bar.from) * 100}%`; b.title = `${bar.taskId}: ${bar.status}`; track.append(b); }
+      for (const at of [25, 50, 75, 100]) { const tick = el('span', undefined, 'tick'); tick.style.left = `${at}%`; tick.setAttribute('aria-hidden', 'true'); track.append(tick); }
+      for (const bar of lane.bars) {
+        const b = el('span', undefined, `bar ${bar.status}`); b.style.left = `${bar.from * 100}%`; b.style.width = `${(bar.to - bar.from) * 100}%`;
+        b.title = `${bar.taskId}: ${taskStates[bar.status] ?? bar.status}`; b.setAttribute('role', 'img'); b.setAttribute('aria-label', b.title); b.tabIndex = 0; track.append(b);
+      }
       grid.append(track);
     }
-    s.append(grid); if (data.timeline.hidden) s.append(el('p', `and ${data.timeline.hidden} earlier workers`, 'detail')); sections.push(s);
+    const drawn = new Set(data.timeline.lanes.flatMap(lane => lane.bars.map(bar => bar.status)));
+    const legend = el('ul', undefined, 'timeline-legend'); legend.setAttribute('aria-label', 'Timeline status legend');
+    for (const [status, label] of Object.entries(taskStates)) {
+      if (!drawn.has(status)) continue;
+      const item = el('li'); const sample = el('span', undefined, `bar ${status}`); sample.setAttribute('aria-hidden', 'true'); item.append(sample, document.createTextNode(label)); legend.append(item);
+    }
+    s.append(grid, legend); if (data.timeline.hidden) s.append(el('p', `and ${data.timeline.hidden} earlier workers`, 'detail')); sections.push(s);
+  }
+  for (const [key, label] of [['attention', 'Needs a decision'], ['building', 'Worker tasks'], ['returned', 'Handed back'], ['review', 'Review & integration']]) {
+    const tasks = data.groups[key]; if (!tasks.length) continue;
+    const s = section(label, tasks.length, key); tasks.forEach(t => s.append(row(t))); sections.push(s);
   }
   const queued = [...data.groups.next, ...data.groups.waiting];
   if (queued.length) {

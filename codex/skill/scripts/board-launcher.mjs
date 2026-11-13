@@ -8,7 +8,7 @@ const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function running(root, id, host = 'codex') {
   try {
     const info = JSON.parse(fs.readFileSync(serverFile(root, id, host), 'utf8'));
-    if (![1, 2, 3, BOARD_PROTOCOL].includes(info.protocol) || (info.host ?? 'codex') !== host || info.root !== root || info.run !== id || !Number.isInteger(info.port) || info.port < 1 || info.port > 65535 || !/^[a-f0-9]{64}$/.test(info.token)) return;
+    if (![1, 2, 3, 4, BOARD_PROTOCOL].includes(info.protocol) || (info.host ?? 'codex') !== host || info.root !== root || info.run !== id || !Number.isInteger(info.port) || info.port < 1 || info.port > 65535 || !/^[a-f0-9]{64}$/.test(info.token)) return;
     const response = await fetch(`http://127.0.0.1:${info.port}/api/health`, { headers: { Authorization: `Bearer ${info.token}` }, signal: AbortSignal.timeout(500) });
     const health = await response.json();
     if (response.ok && health.protocol === info.protocol && (health.host ?? 'codex') === host && health.root === root && health.run === id) return info;
