@@ -30,7 +30,8 @@ test('a Git workspace moves into _deleted while Git retains its correct worktree
   fs.writeFileSync(path.join(source, 'uncommitted.txt'), 'retain even unfinished content');
   const result = quarantine(root, [source], [parent], true);
   assert.equal(fs.existsSync(source), false); assert.equal(fs.readFileSync(path.join(result.moved[0].to, 'uncommitted.txt'), 'utf8'), 'retain even unfinished content');
-  assert.ok(git(['worktree', 'list', '--porcelain']).includes(result.moved[0].to.replaceAll('\\', '/')));
+  const registered = git(['worktree', 'list', '--porcelain', '-z']).split('\0').filter(line => line.startsWith('worktree ')).map(line => fs.realpathSync(line.slice(9)));
+  assert.ok(registered.some(folder => path.relative(folder, fs.realpathSync(result.moved[0].to)) === ''), `Moved worktree must stay registered: ${JSON.stringify(registered)}`);
   assert.equal(fs.readFileSync(path.join(root, 'code.txt'), 'utf8'), 'approved code');
   assert.equal(git(['ls-files', '--others', '--exclude-standard']).trim(), '');
   const active = path.join(parent, 'active'); git(['worktree', 'add', '-b', 'another-task', active]);
