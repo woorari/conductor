@@ -2,11 +2,14 @@
 <html lang="en">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Conductor · Run board</title><link rel="stylesheet" href="/board.css"><script src="/board.js" defer></script></head>
 <body>
-<header><span class="brand"><span class="mark" aria-hidden="true">◫</span> CONDUCTOR</span><span id="connection" role="status">Connecting…</span></header>
+<header><span class="brand"><span class="mark" aria-hidden="true">◫</span> Conductor <span class="brand-context">/ Run board</span></span><span id="connection" role="status">Connecting…</span></header>
 <main id="board" aria-busy="true">
-  <div class="heading"><p id="run-id" class="eyebrow">RUN BOARD</p><h1 id="title">Opening your run</h1></div>
-  <div class="overview"><div><span id="completed" class="number">—</span><span id="total" class="muted"> tasks complete</span></div><span id="elapsed" class="muted"></span></div>
-  <div id="progress" role="progressbar" aria-label="Tasks completed" aria-valuemin="0"><span></span></div>
+  <div class="heading"><p class="eyebrow"><span class="run-tag">RUN</span><span id="run-id">RUN BOARD</span><span id="plan-state" class="plan-state"></span></p><h1 id="title">Opening your run</h1><p class="page-description">From planned work to verified delivery.</p></div>
+  <div class="overview-grid">
+    <section class="metric metric-progress" aria-label="Delivery progress"><div class="metric-label">Delivery progress <span id="elapsed"></span></div><div class="overview"><span id="completed" class="number">—</span><span id="total" class="muted"> tasks complete</span></div><div id="progress" role="progressbar" aria-label="Tasks completed" aria-valuemin="0"><span></span></div></section>
+    <section class="metric" aria-label="Assigned worker tasks"><div class="metric-label">Worker tasks</div><strong id="worker-count" class="metric-number">—</strong><p class="metric-note">Assigned for building</p></section>
+    <section class="metric" aria-label="Tasks awaiting review or merge"><div class="metric-label">To integrate</div><strong id="review-count" class="metric-number">—</strong><p class="metric-note">Review or merge</p></section>
+  </div>
   <div id="state"></div>
   <p id="error" class="notice error" role="alert" hidden></p>
   <div id="sections"></div>

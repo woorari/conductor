@@ -70,6 +70,13 @@ test('loopback board protects saved data with a token, host and origin checks, a
   const { app, base, headers, server } = await fixture(t);
   assert.equal(server.address().address, '127.0.0.1');
   const before = fs.readFileSync(app.ledgerFile('run'), 'utf8');
+  for (const font of ['figtree-latin', 'spline-sans-mono-latin']) {
+    const response = await fetch(`${base}/fonts/${font}.woff2`);
+    assert.equal(response.status, 200); assert.equal(response.headers.get('content-type'), 'font/woff2');
+    assert.match(response.headers.get('content-security-policy'), /font-src 'self'/);
+    assert.equal(Buffer.from(await response.arrayBuffer()).subarray(0, 4).toString(), 'wOF2');
+  }
+  assert.equal((await fetch(base + '/fonts/unknown.woff2')).status, 404);
   assert.equal((await fetch(base + '/api/board')).status, 401);
   assert.equal((await fetch(base + '/api/board', { headers: { Authorization: 'Bearer wrong' } })).status, 401);
   assert.equal((await fetch(base + '/api/board', { headers: { ...headers, Origin: 'https://example.com' } })).status, 403);

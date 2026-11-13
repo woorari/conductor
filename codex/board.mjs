@@ -15,7 +15,7 @@ const run = path.join(root, '.claude/conductor/runs', options.run);
 if (!fs.existsSync(path.join(run, 'ledger.json'))) throw new Error('No Claude run ledger exists.');
 const hash = createHash('sha256');
 for (const folder of ['hooks', 'codex/skill']) {
-  const files = fs.readdirSync(path.join(repository, folder), { recursive: true }).filter(name => /\.(?:ts|mjs|js|html|css)$/.test(name)).sort();
+  const files = fs.readdirSync(path.join(repository, folder), { recursive: true }).filter(name => /\.(?:ts|mjs|js|html|css|woff2)$/.test(name)).sort();
   for (const file of files) hash.update(file).update(fs.readFileSync(path.join(repository, folder, file)));
 }
 const destination = path.join(run, `.html-runtime-${hash.digest('hex').slice(0, 16)}`);

@@ -52,14 +52,18 @@ export async function startServer(root, id, { idleMs = 30 * 60_000, host = 'code
   snapshot(ledger, 0, host); // Refuse missing/invalid runs before opening a socket.
   const assets = fileURLToPath(new URL('../assets/board/', import.meta.url));
   // A skill update must not mix a running server's old data shape with new browser assets.
-  const content = Object.fromEntries(['index.html', 'board.js', 'board.css'].map(name => [name, fs.readFileSync(path.join(assets, name))]));
+  const routes = {
+    '/': ['index.html', 'text/html; charset=utf-8'], '/board.js': ['board.js', 'text/javascript; charset=utf-8'], '/board.css': ['board.css', 'text/css; charset=utf-8'],
+    '/fonts/figtree-latin.woff2': ['fonts/figtree-latin.woff2', 'font/woff2'], '/fonts/spline-sans-mono-latin.woff2': ['fonts/spline-sans-mono-latin.woff2', 'font/woff2'],
+  };
+  const content = Object.fromEntries(Object.values(routes).map(([name]) => [name, fs.readFileSync(path.join(assets, name))]));
   const token = randomBytes(32).toString('hex');
   let lastRequest = Date.now();
   let port;
   let bridgeSeen = 0;
   const actions = new Map();
   const headers = { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer',
-    'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'" };
+    'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'" };
   const server = http.createServer((req, res) => {
     const send = (status, type, body) => { res.writeHead(status, { ...headers, 'Content-Type': type }); res.end(body); };
     if (req.headers.host !== `127.0.0.1:${port}` || (req.headers.origin && req.headers.origin !== `http://127.0.0.1:${port}`)) {
@@ -121,7 +125,7 @@ export async function startServer(root, id, { idleMs = 30 * 60_000, host = 'code
       send(405, 'application/json', '{"error":"This board is read-only. Use chat for run actions."}'); return;
     }
     if (req.method !== 'GET') { send(405, 'text/plain', 'Method not allowed'); return; }
-    const asset = { '/': ['index.html', 'text/html; charset=utf-8'], '/board.js': ['board.js', 'text/javascript; charset=utf-8'], '/board.css': ['board.css', 'text/css; charset=utf-8'] }[url.pathname];
+    const asset = Object.hasOwn(routes, url.pathname) ? routes[url.pathname] : undefined;
     if (!asset) { send(404, 'text/plain', 'Not found'); return; }
     send(200, asset[1], content[asset[0]]);
   });
