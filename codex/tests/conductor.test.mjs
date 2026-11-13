@@ -9,13 +9,14 @@ import { buildSkill } from '../build.mjs';
 const built = fs.mkdtempSync(path.join(os.tmpdir(), 'conductor-built-'));
 const skillPath = buildSkill(path.join(built, 'conductor'));
 const { Conductor, board } = await import(pathToFileURL(path.join(skillPath, 'scripts', 'conductor.mjs')).href);
+const { closeBoard } = await import(pathToFileURL(path.join(skillPath, 'scripts/board-launcher.mjs')).href);
 process.on('exit', () => fs.rmSync(built, { recursive: true, force: true }));
 
 const owner = { kind: 'owner' };
 const worker = id => ({ kind: 'worker', taskId: id });
 function fixture(t) {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'conductor-codex-test-'));
-  t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  t.after(async () => { if (fs.existsSync(root)) await closeBoard(root, 'run'); await new Promise(r => setTimeout(r, 100)); fs.rmSync(parent, { recursive: true, force: true }); });
   const root = path.join(parent, 'project');
   fs.mkdirSync(root);
   const git = (...args) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();

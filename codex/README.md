@@ -30,7 +30,7 @@ Use `--target` for a custom skill directory. Quote paths with spaces. The path m
 node codex/install.mjs --target "C:\Users\Your Name\.codex\skills\conductor"
 ```
 
-Start a new Codex chat in the project you want to work on, then send `$conductor STU-123`, `$conductor conduct #12`, `$conductor conduct docs/spec.md`, or a natural-language request to use Conductor. As soon as the plan is proposed, Conductor displays the full board in chat with task titles, tiers, dependencies and expected files, then waits for approval. `$conductor approve` starts the approved work. `$conductor board` displays the board again at any time. Revised proposals display the updated board before approval too.
+Start a new Codex chat in the project you want to work on, then send `$conductor STU-123`, `$conductor conduct #12`, `$conductor conduct docs/spec.md`, or a natural-language request to use Conductor. Conductor automatically opens a live board in the desktop app’s right-hand browser panel when the run starts. Tasks, problems, questions and the queue refresh from the saved run while you work. As soon as the plan is proposed, Conductor also displays the full board in chat with task titles, tiers, dependencies and expected files, then waits for approval. `$conductor approve` starts the approved work. `$conductor board` displays the board again at any time. Revised proposals display the updated board before approval too.
 
 Backups stay outside the skills folder so Codex discovers only the current skill. Updating also relocates backups made beside the skill by older installers, preserving their contents. Use `--backup-dir` to override the backup location; it must be outside the skills directory.
 
@@ -41,8 +41,18 @@ Replies follow the user's conversation language. A bare issue key or path defaul
 - Git must be on PATH for isolated Git worktrees. GitHub integration additionally needs an authenticated `gh` CLI.
 - The host must expose subagent tools for parallel workers. The skill adapts to the host's available slots.
 - Run ledgers are project-local under `.codex/conductor/runs/`; they do not modify `.claude/conductor/runs/`.
-- This is a skill/CLI adapter, not Claude's function-hook runtime. The [compatibility table](skill/references/compatibility.md) lists the missing live pane, automatic hooks, Lore provisioning/merges and other differences.
+- This is a skill/CLI adapter, not Claude's function-hook runtime. The [compatibility table](skill/references/compatibility.md) lists automatic hooks, Lore provisioning/merges and other remaining differences.
 - Installing does not change Codex's model, permissions, MCP configuration or Claude's installation. Unreal and Blender connections are separate machine-local configuration and are not shipped in this repository.
+
+## Live desktop board
+
+The board runs locally with the same Node.js runtime as the adapter, without npm dependencies or API keys. It shows progress, task states, measured worker timelines, open problems/questions, rulings, pending Linear transitions, and the full plan with tiers, dependencies and expected files. Approval and resume buttons copy commands to send in chat; viewing or clicking the board never approves or changes a run.
+
+The desktop browser panel accepts HTTP/HTTPS pages, so an HTML file beside the ledger cannot open there directly. The local server exposes only the board assets and authenticated run snapshot; it is not a general file server.
+
+The CLI returns `boardView.url` after `conduct` and `run_plan`. The skill opens that URL in the desktop app beside the chat. `$conductor board` reopens the view on resume. If a host lacks the desktop panel tool, the Markdown board and local URL remain available.
+
+For manual recovery, run the installed `scripts/conductor.mjs` with `board_open --root <original-project-root> --run <id>`. Use `board_close` with the same arguments to stop only the board server. These commands are orchestrator actions. The server is reused per run, listens only on `127.0.0.1`, protects run data with a random access token in the URL fragment, and exits after 30 minutes without a viewer. After a restart, `board_open` recovers a stopped or stale server. Do not publish the access URL.
 
 ## Linear status updates
 
@@ -60,6 +70,6 @@ node codex/test.mjs
 
 The included GitHub Actions workflow runs this suite on macOS and Windows with Node.js 22.18 and 24 after the changes are pushed. Local success alone does not establish a Windows pass.
 
-Tests build a fresh skill into a temporary directory. They exercise install/update/backup and paths with spaces, the actual Git worktree lifecycle, approval/pause/dependency gates, persistence, GitHub merge-policy checks and uncertain-outcome recovery. GitHub transport is simulated; no credentials or live merge are used.
+Tests build a fresh skill into a temporary directory. They exercise install/update/backup and paths with spaces, the actual Git worktree lifecycle, approval/pause/dependency gates, persistence, GitHub merge-policy checks and uncertain-outcome recovery, local board authentication, concurrent server reuse, live updates and recovery. GitHub transport is simulated; no credentials or live merge are used.
 
 To remove the skill, delete only the installed `conductor` folder. To restore an update backup, close active runs, remove the current skill folder and move the saved backup from `skill-backups` back to the skills directory as `conductor`. Project ledgers and retained worktrees are independent of the installation.
