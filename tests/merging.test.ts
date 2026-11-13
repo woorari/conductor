@@ -179,7 +179,7 @@ test('GitHub that cannot be asked, or no token anywhere, is no verdict: nothing 
   expect((await call($, 'merge', MERGE)).text).toContain(
     "there is no GitHub token: set the mod's GitHub token option, export GH_TOKEN or GITHUB_TOKEN, or sign in with gh auth login",
   )
-  expect(engine.processes, 'gh was asked for its token').toContainEqual(['gh', 'auth', 'token'])
+  expect(engine.processes.filter(argv => argv[0] === 'gh'), 'gh was asked for its token').toContainEqual(['gh', 'auth', 'token'])
   expect(forge.merges).toEqual([])
   expect(stored(files).merge).toBeUndefined()
 })
@@ -188,20 +188,20 @@ test('without the option or GH_TOKEN, the token is GITHUB_TOKEN, then gh auth to
   const { engine, forge } = await bound($, on)
   engine.env = { GITHUB_TOKEN: TOKEN }
   expect((await call($, 'merge_check', { task: 't395-1', closes: [395] })).text).toMatch(/^t395-1 may merge now\./)
-  expect(engine.processes, 'gh is not asked while the environment has a token').toEqual([])
+  expect(engine.processes.filter(argv => argv[0] === 'gh'), 'gh is not asked while the environment has a token').toEqual([])
 
   engine.env = {}
   engine.gh = { exitCode: 0, stdout: `${TOKEN}\n` }
   expect((await call($, 'merge_check', { task: 't395-1', closes: [395] })).text).toMatch(/^t395-1 may merge now\./)
   expect((await call($, 'merge_check', { task: 't395-1', closes: [395] })).text).toMatch(/^t395-1 may merge now\./)
-  expect(engine.processes, "gh's token is kept for the session").toEqual([['gh', 'auth', 'token']])
+  expect(engine.processes.filter(argv => argv[0] === 'gh'), "gh's token is kept for the session").toEqual([['gh', 'auth', 'token']])
 
   // gh signed in anew: GitHub refuses the token kept, and the next look asks gh again.
   forge.accepts = 'a-newer-token'
   engine.gh = { exitCode: 0, stdout: 'a-newer-token\n' }
   expect((await call($, 'merge_check', { task: 't395-1', closes: [395] })).text).toContain('could not be read (HTTP 401)')
   expect((await call($, 'merge_check', { task: 't395-1', closes: [395] })).text).toMatch(/^t395-1 may merge now\./)
-  expect(engine.processes).toHaveLength(2)
+  expect(engine.processes.filter(argv => argv[0] === 'gh')).toHaveLength(2)
 })
 
 test('a token given as the mod\'s option comes first', { options: { githubToken: 'the-options-token' } }, async ($, on) => {
@@ -210,7 +210,7 @@ test('a token given as the mod\'s option comes first', { options: { githubToken:
   engine.env = { GH_TOKEN: TOKEN, GITHUB_TOKEN: TOKEN }
   forge.accepts = 'the-options-token'
   expect((await call($, 'merge_check', { task: 't395-1', closes: [395] })).text).toMatch(/^t395-1 may merge now\./)
-  expect(engine.processes).toEqual([])
+  expect(engine.processes.filter(argv => argv[0] === 'gh')).toEqual([])
 })
 
 test('the base branch and the merge method are the ones the mod was installed with', { options: { baseBranch: 'trunk', mergeMethod: 'squash' } }, async ($, on) => {

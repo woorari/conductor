@@ -5,22 +5,22 @@ import { fileURLToPath } from 'node:url';
 import { BOARD_PROTOCOL, serverFile } from './board-server.mjs';
 
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
-async function running(root, id) {
+async function running(root, id, host = 'codex') {
   try {
-    const info = JSON.parse(fs.readFileSync(serverFile(root, id), 'utf8'));
-    if (![1, BOARD_PROTOCOL].includes(info.protocol) || info.root !== root || info.run !== id || !Number.isInteger(info.port) || info.port < 1 || info.port > 65535 || !/^[a-f0-9]{64}$/.test(info.token)) return;
+    const info = JSON.parse(fs.readFileSync(serverFile(root, id, host), 'utf8'));
+    if (![1, 2, BOARD_PROTOCOL].includes(info.protocol) || (info.host ?? 'codex') !== host || info.root !== root || info.run !== id || !Number.isInteger(info.port) || info.port < 1 || info.port > 65535 || !/^[a-f0-9]{64}$/.test(info.token)) return;
     const response = await fetch(`http://127.0.0.1:${info.port}/api/health`, { headers: { Authorization: `Bearer ${info.token}` }, signal: AbortSignal.timeout(500) });
     const health = await response.json();
-    if (response.ok && health.protocol === info.protocol && health.root === root && health.run === id) return info;
+    if (response.ok && health.protocol === info.protocol && (health.host ?? 'codex') === host && health.root === root && health.run === id) return info;
   } catch { /* Missing or stale descriptor; never kill a PID from a file. */ }
 }
 const view = (info, reused) => ({ url: `http://127.0.0.1:${info.port}/#${info.token}`, reused });
 
-export async function openBoard(root, id) {
+export async function openBoard(root, id, host = 'codex') {
   root = fs.realpathSync(root);
-  const file = serverFile(root, id);
+  const file = serverFile(root, id, host);
   if (!fs.existsSync(path.join(path.dirname(file), 'ledger.json'))) throw new Error('No saved run to display.');
-  const existing = await running(root, id);
+  const existing = await running(root, id, host);
   if (existing?.protocol === BOARD_PROTOCOL) return view(existing, true);
   const lock = path.join(path.dirname(file), '.board-start.lock');
   let acquired = false;
@@ -34,7 +34,7 @@ export async function openBoard(root, id) {
     catch (error) {
       if (acquired) { fs.rmSync(lock, { recursive: true, force: true }); throw error; }
       if (error.code !== 'EEXIST') throw error;
-      const ready = await running(root, id);
+      const ready = await running(root, id, host);
       if (ready?.protocol === BOARD_PROTOCOL) return view(ready, true);
       // Recover an abandoned startup lock, never a live launcher or server.
       try {
@@ -52,15 +52,15 @@ export async function openBoard(root, id) {
   }
   if (!acquired) throw new Error('Board startup is busy. Retry board_open.');
   try {
-    const ready = await running(root, id);
+    const ready = await running(root, id, host);
     if (ready?.protocol === BOARD_PROTOCOL) return view(ready, true);
     if (ready) await stop(ready);
-    const child = spawn(process.execPath, [fileURLToPath(new URL('./board-server.mjs', import.meta.url)), root, id], { detached: true, stdio: 'ignore', windowsHide: true });
+    const child = spawn(process.execPath, [fileURLToPath(new URL('./board-server.mjs', import.meta.url)), root, id, host], { detached: true, stdio: 'ignore', windowsHide: true });
     let failure;
     child.on('error', error => { failure = error; }); child.unref();
     for (let attempt = 0; attempt < 100; attempt++) {
       if (failure) throw failure;
-      const info = await running(root, id);
+      const info = await running(root, id, host);
       if (info?.protocol === BOARD_PROTOCOL) return view(info, false);
       if (child.exitCode !== null) throw new Error('The board server could not start.');
       await wait(100);
@@ -69,9 +69,9 @@ export async function openBoard(root, id) {
   } finally { fs.rmSync(lock, { recursive: true, force: true }); }
 }
 
-export async function closeBoard(root, id) {
+export async function closeBoard(root, id, host = 'codex') {
   root = fs.realpathSync(root);
-  const info = await running(root, id);
+  const info = await running(root, id, host);
   if (!info) return { stopped: false };
   await stop(info);
   return { stopped: true };

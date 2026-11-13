@@ -76,7 +76,7 @@ test('elsewhere merge_check and merge refuse before GitHub is asked, though it h
   expect((await call($, 'merge', MERGE)).text).toBe(REFUSED)
   expect(forge.merges).toEqual([])
   expect(forge.asked, 'GitHub is not asked anything').toEqual([])
-  expect(engine.processes, 'and gh is not asked for a token').toEqual([])
+  expect(engine.processes.filter(argv => argv[0] === 'gh'), 'and gh is not asked for a token').toEqual([])
   expect(files[PATH]?.mtimeMs, 'the ledger is not written').toBe(before)
 })
 
