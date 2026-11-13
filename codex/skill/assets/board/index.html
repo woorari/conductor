@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Conductor · Run board</title><link rel="stylesheet" href="/board.css"><script src="/board.js" defer></script></head>
+<body>
+<header><span class="brand"><span class="mark" aria-hidden="true">◫</span> CONDUCTOR</span><span id="connection" role="status">Connecting…</span></header>
+<main id="board" aria-busy="true">
+  <div class="heading"><p id="run-id" class="eyebrow">RUN BOARD</p><h1 id="title">Opening your run</h1></div>
+  <div class="overview"><div><span id="completed" class="number">—</span><span id="total" class="muted"> tasks complete</span></div><span id="elapsed" class="muted"></span></div>
+  <div id="progress" role="progressbar" aria-label="Tasks completed" aria-valuemin="0"><span></span></div>
+  <div id="state"></div>
+  <p id="error" class="notice error" role="alert" hidden></p>
+  <div id="sections"></div>
+  <details id="plan"><summary>Plan details <span id="plan-count"></span></summary><div id="plan-body"></div></details>
+  <footer><span id="updated">Waiting for saved run…</span><span id="counts"></span><p>Run actions stay in chat. This board follows the saved run.</p></footer>
+</main>
+</body></html>

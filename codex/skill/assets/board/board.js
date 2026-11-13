@@ -1,0 +1,99 @@
+const $ = id => document.getElementById(id);
+const token = location.hash.slice(1);
+const el = (tag, text, className) => { const node = document.createElement(tag); if (text !== undefined) node.textContent = text; if (className) node.className = className; return node; };
+let previous;
+function section(title, count) {
+  const node = el('section'); const heading = el('h2', title);
+  if (count !== undefined) heading.append(el('span', String(count), 'section-count'));
+  node.append(heading); return node;
+}
+function row(item, kind = item.status) {
+  const node = el('div', undefined, 'row'); node.append(el('span', undefined, `dot ${kind ?? ''}`));
+  const content = el('div'); const title = el('p', undefined, 'row-title');
+  title.append(el('span', item.id, 'row-id'), document.createTextNode(item.title ?? item.text));
+  content.append(title); if (item.detail) content.append(el('p', item.detail, 'detail'));
+  node.append(content); return node;
+}
+function notice(title, message, command, warn = false) {
+  const node = el('div', undefined, `notice${warn ? ' warn' : ''}`); node.append(el('strong', title), el('p', message));
+  if (command) {
+    const button = el('button', 'Copy ' + command);
+    button.addEventListener('click', async () => {
+      try { await navigator.clipboard.writeText(command); button.textContent = 'Copied — send it in chat'; }
+      catch { button.textContent = 'Send in chat: ' + command; }
+    }); node.append(button);
+  }
+  return node;
+}
+function render(data) {
+  document.title = `${data.run.id} · Conductor`;
+  $('title').textContent = data.run.title; $('run-id').textContent = data.run.id;
+  $('completed').textContent = data.completed; $('total').textContent = ` of ${data.total} done`;
+  $('elapsed').textContent = data.elapsed ? `${data.elapsed} elapsed` : '';
+  $('progress').setAttribute('aria-valuemax', String(data.total || 1)); $('progress').setAttribute('aria-valuenow', String(data.completed));
+  $('progress').firstElementChild.style.width = `${data.total ? data.completed / data.total * 100 : 0}%`;
+  const state = [];
+  if (data.run.pausedAt) state.push(notice('Run paused', 'No new tasks start or merge while the run is on hold.', '$conductor unpause', true));
+  if (data.run.plan === 'proposed') state.push(notice('Plan ready for your approval', 'Review the tasks and expected files below, then send the approval command in chat.', '$conductor approve'));
+  else if (data.run.plan === 'draft') state.push(notice('Drafting the plan', 'Tasks can still change. Work starts after the proposed plan is approved.'));
+  if (!data.total) state.push(notice('Your board is ready', 'Tasks appear here as the plan takes shape.'));
+  if (data.total && data.completed === data.total) state.push(notice(data.problems.length || data.questions.length || data.pending.length ? 'Tasks complete · follow-up remains' : 'All tasks complete', 'Final integration and ticket state are confirmed in chat.'));
+  $('state').replaceChildren(...state);
+  const sections = [];
+  if (data.problems.length) { const s = section('Problems', `${data.problems.length} open`); data.problems.forEach(p => s.append(row(p, p.severity))); sections.push(s); }
+  if (data.questions.length) { const s = section('Questions', data.questions.length); data.questions.forEach(q => s.append(row({ ...q, detail: 'from ' + q.from }, 'warning'))); sections.push(s); }
+  if (data.pending.length) { const s = section('Linear updates pending', data.pending.length); data.pending.forEach(p => s.append(row({ id: p.issue, text: `Move to ${p.target}`, detail: p.warning ?? (p.waitingFor?.length ? `Waiting for ${p.waitingFor.join(', ')}` : 'Waiting for synchronization') }, 'warning'))); sections.push(s); }
+  for (const [key, label] of [['attention', 'Needs a decision'], ['building', 'Working now'], ['returned', 'Handed back'], ['review', 'Review & merge']]) {
+    const tasks = data.groups[key]; if (!tasks.length) continue;
+    const s = section(label, tasks.length); tasks.forEach(t => s.append(row(t))); sections.push(s);
+  }
+  if (data.timeline) {
+    const s = section('Worker timeline'); const axis = el('div', undefined, 'axis');
+    axis.append(el('span', new Date(data.timeline.startMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })), el('span', 'now')); s.append(axis);
+    const grid = el('div', undefined, 'timeline');
+    for (const lane of data.timeline.lanes) {
+      const label = el('span', lane.worker, 'lane-label'); label.title = lane.worker; grid.append(label);
+      const track = el('div', undefined, 'lane');
+      for (const bar of lane.bars) { const b = el('span', undefined, `bar ${bar.status}`); b.style.left = `${bar.from * 100}%`; b.style.width = `${(bar.to - bar.from) * 100}%`; b.title = `${bar.taskId}: ${bar.status}`; track.append(b); }
+      grid.append(track);
+    }
+    s.append(grid); if (data.timeline.hidden) s.append(el('p', `and ${data.timeline.hidden} earlier workers`, 'detail')); sections.push(s);
+  }
+  const queued = [...data.groups.next, ...data.groups.waiting];
+  if (queued.length) {
+    const s = section('Up next', `${queued.length} queued`); const chips = el('div', undefined, 'queue');
+    for (const task of queued) { const chip = el('span', undefined, `chip${task.dependsOn.some(id => !data.groups.done.some(t => t.id === id) && !data.groups.review.some(t => t.id === id && t.status === 'green')) ? ' waiting' : ''}`); chip.title = `${task.title}\n${task.detail}`; chip.append(document.createTextNode(task.id + ' '), el('small', task.tier)); chips.append(chip); }
+    s.append(chips); sections.push(s);
+  }
+  if (data.groups.done.length) {
+    const s = el('details', undefined, 'done-list'); s.id = 'done-list'; s.open = $('done-list')?.open ?? false;
+    s.append(el('summary', `Completed · ${data.groups.done.length}`)); data.groups.done.forEach(t => s.append(row(t))); sections.push(s);
+  }
+  if (data.rulings.length) { const s = section('Latest rulings', data.rulings.length); data.rulings.slice(-3).forEach(r => s.append(row(r))); sections.push(s); }
+  $('sections').replaceChildren(...sections);
+  const plan = [];
+  if (data.planChecks.length) { const checks = section('Plan checks', data.planChecks.length); data.planChecks.forEach(text => checks.append(el('p', text, 'detail'))); plan.push(checks); }
+  for (const task of Object.values(data.groups).flat()) {
+    const node = el('div', undefined, 'plan-task'); node.append(el('p', `${task.id} · ${task.title}`), el('p', `${task.status} · ${task.tier}${task.dependsOn.length ? ' · after ' + task.dependsOn.join(', ') : ''}`, 'detail'), el('p', task.files.join('\n') || 'No expected files recorded', 'files'));
+    if (task.note) node.append(el('p', task.note, 'detail')); plan.push(node);
+  }
+  $('plan-body').replaceChildren(...plan); $('plan-count').textContent = `${data.total} tasks`;
+  if (data.run.plan === 'proposed' && previous?.run.plan !== 'proposed') $('plan').open = true;
+  $('updated').textContent = `Saved ${new Date(data.updatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+  $('counts').textContent = `${data.findings} findings · ${data.rulings.length} rulings`;
+  $('board').setAttribute('aria-busy', 'false'); previous = data;
+}
+async function poll() {
+  try {
+    if (!/^[a-f0-9]{64}$/.test(token)) throw new Error('Reopen this board with $conductor board to restore access.');
+    const response = await fetch('/api/board?offset=' + -new Date().getTimezoneOffset(), { headers: { Authorization: `Bearer ${token}` }, cache: 'no-store', signal: AbortSignal.timeout(5000) });
+    const data = await response.json(); if (!response.ok) throw new Error(data.error);
+    // Keep expanded sections, focus and scroll stable between saves.
+    if (!previous || JSON.stringify({ ...data, elapsed: undefined, timeline: undefined }) !== JSON.stringify({ ...previous, elapsed: undefined, timeline: undefined }) || data.elapsed !== previous.elapsed) render(data);
+    $('connection').textContent = 'Live'; $('connection').className = 'live'; $('error').hidden = true;
+  } catch (error) {
+    $('connection').textContent = 'Reconnecting'; $('connection').className = 'offline';
+    $('error').textContent = `${error.message || 'Board disconnected.'} Last shown data may be out of date. Retrying…`; $('error').hidden = false;
+  } finally { setTimeout(poll, 1500); }
+}
+poll();

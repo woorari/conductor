@@ -8,7 +8,7 @@ It is built on Claude Code's mod API (function hooks), which is early access and
 
 ## Codex
 
-A Codex skill adapter is included alongside the Claude mod. On macOS or Windows, install it from this checkout with `node codex/install.mjs` (Node.js 22.18+). See [Codex setup and compatibility](codex/README.md).
+A Codex skill adapter is included alongside the Claude mod, with a live run board in the desktop app’s right-hand browser panel. On macOS or Windows, install it from this checkout with `node codex/install.mjs` (Node.js 22.18+). See [Codex setup and compatibility](codex/README.md).
 
 ## Install
 

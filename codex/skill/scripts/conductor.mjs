@@ -11,6 +11,7 @@ import { post, rule, digest } from './core/posts.mjs';
 import { pauseRun, unpauseRun } from './core/pause.mjs';
 import * as merges from './core/merge.mjs';
 import { linearKeyOf } from './core/linear.mjs';
+import { openBoard, closeBoard } from './board-launcher.mjs';
 import { issueFromSource, refreshLinear, pendingLinear, linearApiFromEnvironment, synchronizeLinear, acknowledgeLinear } from './linear.mjs';
 
 const now = () => new Date().toISOString();
@@ -332,7 +333,7 @@ export class Conductor {
 export async function main(argv = process.argv.slice(2)) {
   const command = argv.shift();
   if (!command || command === 'help' || command === '--help') {
-    console.log('conductor.mjs <init|conduct|list|board|digest|brief|worktree|handover|task_add|task_update|run_plan|approve|tier|pause|unpause|merged|board_post|board_rule|problem_report|problem_assign|problem_resolve|merge_check|merge|reconcile|linear_sync|linear_ack> --root <project> [--run <id>] [--input <JSON file>] [--caller orchestrator|owner|worker:<task>]\nJSON input may also be read from stdin with --input -. Approval commands require --caller owner after the user explicitly requests them.');
+    console.log('conductor.mjs <init|conduct|list|board|board_open|board_close|digest|brief|worktree|handover|task_add|task_update|run_plan|approve|tier|pause|unpause|merged|board_post|board_rule|problem_report|problem_assign|problem_resolve|merge_check|merge|reconcile|linear_sync|linear_ack> --root <project> [--run <id>] [--input <JSON file>] [--caller orchestrator|owner|worker:<task>]\nJSON input may also be read from stdin with --input -. Approval commands require --caller owner after the user explicitly requests them.');
     return;
   }
   const options = {};
@@ -356,6 +357,11 @@ export async function main(argv = process.argv.slice(2)) {
     console.log(JSON.stringify(fs.existsSync(dir) ? fs.readdirSync(dir).filter(one => RUN_ID.test(one)) : [])); return;
   } else {
     const id = validId(options.run);
+    if (command === 'board_open' || command === 'board_close') {
+      if (caller.kind !== 'orchestrator') fail('Only the orchestrator manages the live board.');
+      app.load(id);
+      console.log(JSON.stringify(command === 'board_open' ? { boardView: await openBoard(app.root, id) } : await closeBoard(app.root, id), null, 2)); return;
+    }
     if (command === 'board') { console.log(board(app.load(id))); return; }
     if (command === 'digest') { console.log(digest(parsed(app.load(id)), caller)); return; }
     if (command === 'brief') { console.log(app.brief(id, input.task)); return; }
@@ -372,6 +378,10 @@ export async function main(argv = process.argv.slice(2)) {
   if (!result.isError && result.isChanged && runId && command !== 'linear_ack') {
     try { result.linear = await app.linearSync(runId); }
     catch { result.linear = { warning: 'Linear sync could not finish; use linear_sync to retry. The board change is saved.' }; }
+  }
+  if (!result.isError && runId && ['conduct', 'run_plan'].includes(command)) {
+    try { result.boardView = await openBoard(app.root, runId); }
+    catch (error) { result.boardView = { warning: `Live board unavailable: ${error.message} Use board_open to retry; the saved plan and Markdown board remain available.` }; }
   }
   console.log(JSON.stringify(result, null, 2));
   if (result.isError) process.exitCode = 1;

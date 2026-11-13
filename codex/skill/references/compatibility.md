@@ -8,11 +8,11 @@ This package adapts Conductor's workflow to a Codex skill and local CLI. Origina
 | Task dependencies, file overlap, capacity | Original Conductor router and preflight logic |
 | Isolated Git workers | Actual Git worktrees and Codex collaboration subagents |
 | Worker tier labels | Retained labels; current model inherited unless user supplies a mapping |
-| Board, findings, questions, rulings, problems | Persistent board displayed in chat when a plan is proposed or revised; orchestrator reads and forwards messages |
+| Board, findings, questions, rulings, problems | Live local board in the desktop right panel, plus Markdown approval board; orchestrator reads and forwards messages |
 | GitHub merge policy | Original checks and policy; live GH reads, exact-head merge, repository lock, uncertain-outcome reconciliation |
 | Pause and resume | Persistent hold checked before worker reservation and merge |
 | Handover | Saved Markdown checkpoint; read after compaction/restart |
-| Claude slash commands and live pane | Use `$conductor <command>`; Markdown board before approval and whenever requested |
+| Claude slash commands and live pane | Use `$conductor <command>`; local browser panel with automatic refresh, plus Markdown fallback |
 | Automatic tool interception, activity/tokens, routing overrides | Not installed; agents follow skill instructions rather than Claude runtime interception |
 | Automatic compaction, timer and post-merge CI watcher | Not installed; Codex handles its context, orchestrator checks CI during the run |
 | Lore workspaces/merges and exact-revision approve-main | Not ported; no claim of runtime-enforced equivalence |
@@ -24,4 +24,4 @@ Codex ledgers live in `<project>/.codex/conductor/runs/<id>/`. Claude's `.claude
 
 The CLI's `--caller` is a cooperative role declaration, not a security boundary. Approval provenance is the user's actual chat instruction. No global hooks are installed to police shell commands outside the adapter. Review gates operate on adapter actions; the host's tools and permissions remain authoritative.
 
-For full native parity, remaining work is a Codex lifecycle integration for tool interception, worker activity/notification delivery, model policy, context telemetry, a live board surface, and the Lore/folder-home lifecycle. Do not represent this skill as the unmodified Claude mod running natively.
+For full native parity, remaining work is a Codex lifecycle integration for tool interception, worker activity/notification delivery, model policy, context telemetry, and the Lore/folder-home lifecycle. Do not represent this skill as the unmodified Claude mod running natively.
