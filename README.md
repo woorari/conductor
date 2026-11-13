@@ -115,6 +115,8 @@ The orchestrator and the workers change the board only through the mod's tools: 
 
 ### Workers and the model router
 
+On a Claude ↔ Codex handover, retain task complexity and resolve future worker models on the receiving host. Claude uses its native tier aliases; Codex inherits its current session model unless the owner explicitly maps tiers to available Codex models. A recorded worker model is history, not a new model assignment.
+
 In a session bound to a run, every agent the orchestrator starts goes through the router:
 
 - A task's worker starts on its task's tier (opus for architecture and design, sonnet for challenging development, haiku for easy jobs), whatever model the call asks for. A tier you set stands.

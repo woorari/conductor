@@ -145,3 +145,9 @@ describe('when a task may start', () => {
     expect(unlocked(started, 'a'), 'one that started already is not listed').toEqual([])
   })
 })
+
+test('a Claude takeover does not reuse a recorded GPT worker model or a foreign spawn request', () => {
+  const ledger = withTask('t392-1', { model: 'gpt-prior-worker' })
+  expect(route(ledger, { ...worker, name: 't392-1', model: 'gpt-prior-worker' })).toMatchObject({ kind: 'worker', model: 'haiku' })
+  expect(ledger.tasks.find(task => task.id === 't392-1')?.model).toBe('gpt-prior-worker')
+})

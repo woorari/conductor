@@ -99,6 +99,7 @@ export function handover(ledger: Ledger, moment: Moment): string {
     ...section('Not read yet', unread.length === 0 ? [] : [`- ${unread.join('; ')}`]),
     '',
     '## How to go on',
+    '- When another host takes over, resolve future worker models on that host: Claude uses the task’s tier alias, Codex inherits its current session model unless the owner supplied a Codex mapping. Recorded worker models describe past or running workers; do not copy them as future assignments.',
     '- The board is the source of truth. mcp__conductor__board_read gives this state again; the tools of the mod change it.',
     '- A stopped worker is started again with a message to its name. After the session itself restarted, names no longer resolve: use the agent id listed with the task.',
     '- A task that was handed back waits for your judgement: review, green, blocked or failed, or done for a task with no pull request.',

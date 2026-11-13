@@ -72,7 +72,7 @@ test('a proposed plan returns the complete approval board without starting worke
   assert.match(result.board, /src\/upload.js/);
   assert.match(result.board, /tests\/upload.test.js/);
   assert.match(result.board, /Keep existing retries/);
-  assert.match(result.board, /\| two: Task two \| queued \| sonnet \| one \|/);
+  assert.match(result.board, /\| two: Task two \| queued \| implementation \| current Codex model \| one \|/);
   assert.equal(app.load('run').run.plan, 'proposed');
   assert.ok(app.load('run').tasks.every(task => task.status === 'queued'));
   assert.equal((await app.worktree('run', { task: 'one' })).isError, true);
@@ -246,4 +246,40 @@ test('an uncertain merge is never retried; reconciliation verifies it with a rea
   await app.reconcile('run', {});
   assert.equal(app.load('run').tasks[0].status, 'done');
   assert.equal(read().writes.length, 1);
+});
+
+test('Codex takeover resolves a prior Claude worker to session inheritance and separates complexity from model', async t => {
+  const { app } = await started(t);
+  await add(app, 'one'); await propose(app); await approve(app);
+  const raw = app.load('run'); raw.tasks[0].model = 'claude-sonnet-prior'; app.save('run', raw);
+  const before = board(app.load('run'));
+  assert.match(before, /implementation \| current Codex model/);
+  assert.doesNotMatch(before, /claude-sonnet-prior/);
+  const result = await app.worktree('run', { task: 'one' });
+  assert.deepEqual(result.modelSelection, { kind: 'inherit', label: 'current Codex model' });
+  assert.equal(result.complexity, 'implementation'); assert.equal(app.load('run').tasks[0].model, undefined);
+  assert.match(app.brief('run', 'one'), /Model selection: current Codex model/);
+  assert.doesNotMatch(app.brief('run', 'one'), /claude-sonnet-prior/);
+  const next = app.load('run'); next.tasks[0].model = 'gpt-observed-worker'; app.save('run', next);
+  assert.match(board(app.load('run')), /Recorded worker models/);
+  assert.match(board(app.load('run')), /gpt-observed-worker/);
+});
+
+test('owner model mappings are explicit and a host takeover can reset them without changing the approved plan or history', async t => {
+  const { app } = await started(t);
+  await add(app, 'one'); await propose(app); await approve(app);
+  await assert.rejects(() => app.apply('run', 'model_policy', { models: { sonnet: 'gpt-owner-choice' } }), /owner/);
+  await assert.rejects(() => app.apply('run', 'model_policy', { models: { sonnet: 'claude-sonnet-prior' } }, owner), /Codex model mappings/);
+  await app.apply('run', 'model_policy', { models: { sonnet: 'gpt-owner-choice' } }, owner);
+  assert.match(board(app.load('run')), /gpt-owner-choice/);
+  const result = await app.worktree('run', { task: 'one' });
+  assert.deepEqual(result.modelSelection, { kind: 'explicit', model: 'gpt-owner-choice', label: 'gpt-owner-choice' });
+  const raw = app.load('run'); raw.tasks[0].model = 'gpt-owner-choice'; app.save('run', raw);
+  await assert.rejects(() => app.apply('run', 'model_policy', {}, worker('one')), /orchestrator/);
+  await app.apply('run', 'model_policy');
+  assert.equal(app.load('run').run.plan, 'approved');
+  assert.equal(app.load('run').tasks[0].status, 'building');
+  assert.equal(app.load('run').tasks[0].model, 'gpt-owner-choice');
+  assert.deepEqual(app.load('run').codex.models, {});
+  assert.match(board(app.load('run')), /current Codex model/);
 });

@@ -9,6 +9,8 @@ import {
   reportProblem,
   resolveProblem,
   spawned,
+  reserved,
+  released,
   turnEnded,
   updateTask,
 } from '../hooks/signals'
@@ -350,4 +352,18 @@ describe('tiers and new tasks', () => {
     expect(ownerSetsTier(raw(), 't999', 'haiku').isError).toBe(true)
     expect(OWNER.kind).toBe('owner')
   })
+})
+
+test('a new reservation clears only the old model; a failed start restores it and a successful spawn records the new host model', () => {
+  const ledger = raw()
+  task(ledger, 't392-1').model = 'gpt-prior-worker'
+  task(ledger, 't390-1').model = 'gpt-completed-worker'
+  const before = reserved(ledger, AT, { taskId: 't392-1', name: 't392-1', slot: 2 })!
+  expect(task(ledger, 't392-1').model).toBeUndefined()
+  expect(task(ledger, 't390-1').model).toBe('gpt-completed-worker')
+  released(ledger, before)
+  expect(task(ledger, 't392-1').model).toBe('gpt-prior-worker')
+  reserved(ledger, AT, { taskId: 't392-1', name: 't392-1', slot: 2 })
+  spawned(ledger, AT, { name: 't392-1', agentId: 'new-worker', model: 'claude-haiku-current' })
+  expect(task(ledger, 't392-1').model).toBe('claude-haiku-current')
 })

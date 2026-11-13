@@ -33,6 +33,9 @@ test('live board reads current saved state without mutating approval, tasks or C
   const first = await (await fetch(base + '/api/board', { headers })).json();
   assert.equal(first.run.plan, 'draft'); assert.equal(first.groups.next[0].id, 'one');
   assert.equal(first.groups.waiting[0].id, 'two'); assert.deepEqual(first.groups.next[0].files, ['src/board.js']);
+  assert.equal(first.groups.next[0].complexity, 'implementation');
+  assert.deepEqual(first.groups.next[0].modelSelection, { kind: 'inherit', label: 'current Codex model' });
+  assert.doesNotMatch(first.groups.next[0].detail, /sonnet/);
   await app.apply('run', 'run_plan');
   const second = await (await fetch(base + '/api/board', { headers })).json();
   assert.equal(second.run.plan, 'proposed');
@@ -128,4 +131,25 @@ test('invalid run paths and missing runs cannot start servers', async () => {
   assert.throws(() => serverFile(built, undefined), /Invalid run/);
   await assert.rejects(() => openBoard(built, 'missing'), /No saved run/);
   assert.throws(() => snapshot(path.join(built, 'missing.json')), /ENOENT/);
+});
+
+test('a skill update replaces an authenticated older board server instead of keeping stale model labels', async t => {
+  const { root } = await fixture(t);
+  await closeBoard(root, 'run'); await new Promise(r => setTimeout(r, 100));
+  const token = 'a'.repeat(64); let stopped = false;
+  const old = http.createServer((req, res) => {
+    assert.equal(req.headers.authorization, `Bearer ${token}`);
+    res.setHeader('Content-Type', 'application/json');
+    if (req.url === '/api/health') res.end(JSON.stringify({ protocol: 1, root: fs.realpathSync(root), run: 'run' }));
+    else { stopped = true; res.setHeader('Connection', 'close'); res.end('{"stopped":true}'); setImmediate(() => { old.close(); old.closeIdleConnections(); }); }
+  });
+  await new Promise(resolve => old.listen(0, '127.0.0.1', resolve));
+  t.after(() => { old.close(); old.closeIdleConnections(); });
+  fs.writeFileSync(serverFile(root, 'run'), JSON.stringify({ protocol: 1, root: fs.realpathSync(root), run: 'run', port: old.address().port, token }));
+  const upgraded = await openBoard(root, 'run');
+  assert.equal(stopped, true); assert.equal(upgraded.reused, false);
+  const info = JSON.parse(fs.readFileSync(serverFile(root, 'run'), 'utf8'));
+  const snapshot = await (await fetch(upgraded.url.split('/#')[0] + '/api/board', { headers: { Authorization: `Bearer ${info.token}` } })).json();
+  assert.equal(snapshot.groups.next[0].complexity, 'implementation');
+  assert.equal(snapshot.groups.next[0].modelSelection.kind, 'inherit');
 });
