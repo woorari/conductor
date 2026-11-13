@@ -52,7 +52,7 @@ export function quarantine(root, files, managed = [], gitWorktree = false, delet
   }))];
   for (const source of sources) {
     if (protectedPath(source) || roots.includes(source) || !roots.some(folder => inside(folder, source))) throw new Error('Quarantine is limited to project or explicitly managed workspace files.');
-    if (source.split(path.sep).some(part => ['.git', '_deleted'].includes(part))) throw new Error('Git metadata and existing quarantine folders cannot be moved.');
+    if (source.split(path.sep).some(part => ['.git', '_deleted'].includes(part.toLowerCase()))) throw new Error('Git metadata and existing quarantine folders cannot be moved.');
     const parent = roots.find(folder => inside(folder, source)); noLinks(parent, source);
     if (sources.some(other => other !== source && inside(source, other))) throw new Error('Do not list both a folder and its contents.');
   }

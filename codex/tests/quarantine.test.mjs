@@ -16,6 +16,8 @@ test('quarantine validates all sources first and never follows a link outside th
   assert.throws(() => quarantine(process.platform === 'win32' ? 'C:\\Windows' : '/System', ['file']), /outside automatic quarantine/);
   const moved = quarantine(root, ['old.txt']); assert.equal(fs.readFileSync(moved.moved[0].to, 'utf8'), 'original');
   assert.throws(() => quarantine(root, ['_deleted']), /quarantine folders/);
+  fs.mkdirSync(path.join(root, '.GIT'));
+  assert.throws(() => quarantine(root, ['.GIT']), /Git metadata/);
 });
 
 test('a Git workspace moves into _deleted while Git retains its correct worktree registration', async t => {
