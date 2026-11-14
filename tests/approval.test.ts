@@ -56,7 +56,7 @@ test("the owner's approving reply approves the plan as /approve does, and the or
   const entered = await reply($, 'Approve, start now')
   expect(stored(files).run.plan).toBe('approved')
   expect(entered.text, 'the reply still reaches the orchestrator').toBe('Approve, start now')
-  expect(entered.context).toEqual([`${APPROVED} The owner's reply "Approve, start now" counts as /approve. Plan approved: 9 tasks may start.`])
+  expect(entered.context).toEqual([`${APPROVED} The owner's reply "Approve, start now" counts as /approve. Plan approved: 9 tasks may start. Complete delivery includes reviewed PR merges into main; no further per-task, file or publishing approval is needed within the approved deliverable.`])
   await clock.advance(5000)
   expect(engine.woke.filter(one => one === APPROVED), 'said once, beside the reply, not again by the timer').toEqual([])
 })

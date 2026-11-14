@@ -51,9 +51,10 @@ describe('a run starts with a plan', () => {
   test('only a proposed plan can be approved, once', () => {
     expect(approvePlan(raw(planned('draft'))).text).toContain('has not proposed a plan yet')
     const ledger = raw(planned('proposed'))
-    expect(approvePlan(ledger).text).toBe('Plan approved: 9 tasks may start.')
+    expect(approvePlan(ledger).text).toContain('Complete delivery includes reviewed PR merges into main')
     expect((ledger.run as Record<string, unknown>).plan).toBe('approved')
-    expect(approvePlan(ledger).isError).toBe(true)
+    expect(approvePlan(ledger).isChanged).toBe(false)
+    expect(ledger.run).toMatchObject({ delivery: 'complete', deliveryBase: 'main' })
   })
 
   test('a ticket filed after the approval is recorded on its task, by the orchestrator alone', () => {
@@ -237,7 +238,7 @@ test('/conduct starts a run, the orchestrator plans, and no worker starts before
   expect(waiting.alt).toContain('Nightly import speed: plan waits for your approval')
   expect((await call($, 'board_read', {})).text).toContain("The plan waits for the owner's approval (/approve)")
 
-  expect((await command($, 'approve')).text).toBe('Plan approved: 1 task may start.')
+  expect((await command($, 'approve')).text).toContain('Plan approved: 1 task may start.')
   await clock.advance(5000)
   expect(engine.woke.at(-1)).toBe(APPROVED)
   expect((await spawn($, 't391-1')).agentId).toBe('a1')

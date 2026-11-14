@@ -89,7 +89,7 @@ test('what the notices no longer say, the orchestrator is told once, out of the 
     'how a question is answered': "A worker's question wakes you: answer it with mcp__conductor__board_rule, naming the question in answers.",
   }
   for (const [what, line] of Object.entries(kept)) expect(text, what).toContain(line)
-  expect(PLANNING).toContain('4. Call mcp__conductor__run_plan with a title for the run. Then tell the owner the plan in a few lines and stop.')
+  expect(PLANNING).toContain('approval includes necessary implementation adjustments, publishing and reviewed base merges')
 })
 
 test('a session bound to no run is told none of it', async ($, on) => {

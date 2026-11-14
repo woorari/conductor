@@ -28,6 +28,32 @@ test('malformed approval records never become a merge permission', () => {
 import { mock } from 'claude-code/testing'
 import { board, file, ledgerPath, spawn, start, world } from './world'
 import { NOW } from './fixture'
+import { approvePlan, updateTask } from '../hooks/signals'
+
+test('complete-delivery approval covers reviewed heads only in the approved base and respects pause', () => {
+  const raw = JSON.parse(JSON.stringify(LEDGER)) as Raw
+  raw.run.plan = 'proposed'; delete raw.run.mergeApprovals
+  expect(approvePlan(raw, 'complete', 'main').isError).toBe(false)
+  let ledger = parseLedger(JSON.stringify(raw)).ledger!
+  expect(mergeApproved(ledger, 't395-1', HEAD, 'main')).toBe(true)
+  expect(mergeApproved(ledger, 't395-1', 'b'.repeat(40), 'main')).toBe(true)
+  expect(mergeApproved(ledger, 't395-1', HEAD, 'other')).toBe(false)
+  expect(mergeApproved(ledger, 't392-1', HEAD, 'main')).toBe(false)
+  raw.run.pausedAt = new Date(NOW).toISOString(); ledger = parseLedger(JSON.stringify(raw)).ledger!
+  expect(mergeApproved(ledger, 't395-1', HEAD, 'main')).toBe(false)
+})
+
+test('necessary file and dependency adjustments retain plan approval and refuse conflicts or cycles', () => {
+  const raw = JSON.parse(JSON.stringify(LEDGER)) as Raw
+  raw.run.plan = 'proposed'; approvePlan(raw)
+  const input = { task: 't392-1', files: ['src/api.ts', 'src/wake.ts'], scopeReason: 'Required validation within the approved outcome' }
+  expect(updateTask(raw, new Date(NOW).toISOString(), { kind: 'worker', taskId: 't392-1' }, input).isError).toBe(true)
+  expect(updateTask(raw, new Date(NOW).toISOString(), { kind: 'orchestrator' }, input).isError).toBe(false)
+  expect(raw.run.plan).toBe('approved')
+  expect(raw.tasks.find(one => one.id === 't392-1')?.files).toEqual(input.files)
+  for (const file of ['../private', ' ../private', ' /private/file', 'src/../private', 'C:\\private', '.git/config']) expect(updateTask(raw, new Date(NOW).toISOString(), { kind: 'orchestrator' }, { ...input, files: [file] }).isError).toBe(true)
+  expect(updateTask(raw, new Date(NOW).toISOString(), { kind: 'orchestrator' }, { task: 't392-1', dependsOn: ['t392-1'], scopeReason: 'Invalid cycle' }).isError).toBe(true)
+})
 
 test('the main session cannot edit implementation files while a task worker can', async ($, on) => {
   mock.clock(on, { now: NOW })

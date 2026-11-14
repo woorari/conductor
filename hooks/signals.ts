@@ -358,14 +358,18 @@ export function proposePlan(raw: Raw, caller: Caller, input: Record<string, unkn
 }
 
 /** `/approve`: the owner lets the workers start. */
-export function approvePlan(raw: Raw): Outcome {
+export function approvePlan(raw: Raw, delivery: 'complete' | 'review-only' = 'complete', base = 'main'): Outcome {
   const run = planOf(raw)
-  if (run.plan === 'approved' || run.plan === undefined) return refused('The plan of this run is approved already.')
+  if (!['complete', 'review-only'].includes(delivery)) return refused('delivery is complete or review-only, as the owner instructed.')
+  if (typeof base !== 'string' || !base.trim()) return refused('Name the base branch covered by the plan approval.')
+  if ((run.plan === 'approved' || run.plan === undefined) && run.delivery === delivery && run.deliveryBase === base) return { isChanged: false, isError: false, text: 'Plan approval stands. Continue the approved delivery; do not ask again.' }
   if (isPickOpen(run)) return refused(PICK_FIRST)
-  if (run.plan !== 'proposed') return refused('The orchestrator has not proposed a plan yet: there is nothing to approve.')
+  if (run.plan !== undefined && run.plan !== 'proposed' && run.plan !== 'approved') return refused('The orchestrator has not proposed a plan yet: there is nothing to approve.')
   run.plan = 'approved'
+  run.delivery = delivery
+  run.deliveryBase = base
 
-  return changed(`Plan approved: ${raw.tasks.length} ${raw.tasks.length === 1 ? 'task' : 'tasks'} may start.`)
+  return changed(`Plan approved: ${raw.tasks.length} ${raw.tasks.length === 1 ? 'task' : 'tasks'} may start. ${delivery === 'complete' ? `Complete delivery includes reviewed PR merges into ${base}; no further per-task, file or publishing approval is needed within the approved deliverable.` : 'The owner limited delivery to review: main/base merges still need separate consent.'}`)
 }
 
 /** `/tier` and the pane's picker: the owner sets a queued task's tier. */
@@ -438,6 +442,37 @@ export function updateTask(raw: Raw, at: string, caller: Caller, input: Record<s
   }
   if (caller.kind === 'worker' && caller.taskId !== id) {
     return refused(`You are ${describe(caller)} and may only update that task, not ${id}.`)
+  }
+  let nextFiles: string[] | undefined
+  let nextDependencies: string[] | undefined
+  let scopeReason: string | undefined
+  if (input.files !== undefined || input.dependsOn !== undefined) {
+    if (caller.kind !== 'orchestrator') return refused('Only the orchestrator adjusts implementation files and dependencies within the approved deliverable.')
+    if (typeof input.scopeReason !== 'string' || !tidy(input.scopeReason) || tidy(input.scopeReason).length > NOTE_MAX) return refused('scopeReason explains how this implementation adjustment delivers the approved outcome (at most 200 characters).')
+    scopeReason = tidy(input.scopeReason)
+    if (['green', 'done'].includes(String(input.status ?? task.status))) return refused('Return the task for work or review before changing its implementation plan.')
+    if (input.files !== undefined) {
+      if (!Array.isArray(input.files) || input.files.some(file => typeof file !== 'string')) return refused('files is a list of project-relative paths.')
+      const paths = (input.files as string[]).map(file => tidy(file).replaceAll('\\', '/'))
+      if (paths.some(file => /^(?:\/|[A-Za-z]:|~)/.test(file) || file.split('/').some(part => part === '..' || part.toLowerCase() === '.git'))) return refused('Implementation files must stay relative to this project, outside Git metadata.')
+      nextFiles = fileList(paths.map(file => file.split('/').filter(part => part !== '.').join('/')))
+      if (!nextFiles || nextFiles.length > FILES_PER_TASK) return refused(`files must contain at most ${FILES_PER_TASK} relative files or folders; split larger implementation work into follow-up tasks.`)
+      if (task.status === 'building' && strings(task.files).some(file => !nextFiles!.some(next => file === next || file.startsWith(`${next}/`)))) return refused('Retain a building worker’s existing file reservation; return the worker before narrowing it.')
+      const clash = raw.tasks.find(other => other.id !== id && other.status === 'building' && (nextFiles!.some(file => covers(strings(other.files), file)) || strings(other.files).some(file => covers(nextFiles!, file))))
+      if (clash) return refused(`Those files overlap the live worker ${clash.id}; wait for its hand-back before expanding this reservation.`)
+    }
+    if (input.dependsOn !== undefined) {
+      if (task.status === 'building') return refused('A building worker keeps its dependency reservation; return it before changing dependencies.')
+      if (!Array.isArray(input.dependsOn) || input.dependsOn.some(dep => typeof dep !== 'string' || !raw.tasks.some(one => one.id === dep))) return refused('dependsOn names existing tasks in this run.')
+      nextDependencies = [...new Set(input.dependsOn as string[])]
+      const reaches = (dep: string, seen = new Set<string>()): boolean => {
+        if (dep === id) return true
+        if (seen.has(dep)) return false
+        seen.add(dep)
+        return strings(raw.tasks.find(one => one.id === dep)?.dependsOn).some(next => reaches(next, seen))
+      }
+      if (nextDependencies.some(dep => reaches(dep))) return refused('The dependency adjustment would create a cycle.')
+    }
   }
   const said: string[] = []
   // A green task whose revision moved: its judgement no longer covers it.
@@ -534,7 +569,13 @@ export function updateTask(raw: Raw, at: string, caller: Caller, input: Record<s
       movedFromGreen = true
     }
   }
-  if (said.length === 0) return refused('Nothing to change: give status, tier, note, ticket, pr, branch or revision.')
+  if (nextFiles !== undefined) { task.files = nextFiles; said.push('implementation files updated') }
+  if (nextDependencies !== undefined) { task.dependsOn = nextDependencies; said.push('dependencies updated') }
+  if (scopeReason !== undefined) {
+    if (input.note === undefined) task.note = scopeReason
+    said.push(`approved outcome: ${scopeReason}`)
+  }
+  if (said.length === 0) return refused('Nothing to change: give status, tier, note, ticket, pr, branch, revision, files or dependsOn.')
 
   const base = `${id}: ${said.join(', ')}.${retiredNote}`
   const lost = isNowFailed ? lostWith(raw, id) : []

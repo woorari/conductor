@@ -64,7 +64,7 @@ test('after a restart the session is bound to its run again, and /approve works'
   engine.store[KEY] = { run: 'demo', at: new Date(NOW - 40 * 60_000).toISOString() }
   await start($)
 
-  expect((await command($, 'approve')).text).toBe('Plan approved: 9 tasks may start.')
+  expect((await command($, 'approve')).text).toContain('Plan approved: 9 tasks may start.')
   expect(stored(files).run.plan).toBe('approved')
   await clock.advance(5000)
   expect(engine.woke, 'and the orchestrator is told to start the workers').toEqual([APPROVED])
