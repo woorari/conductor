@@ -23,6 +23,21 @@ const DONE: Ledger = {
   tasks: [task('t1', { status: 'done', branch: `${RUN_BRANCH}/t1`, mergeCommit: REV_RUN }), task('t2', { status: 'done', branch: `${RUN_BRANCH}/t2`, mergeCommit: REV_RUN })],
 }
 
+test('complete delivery integrates a checked Lore run without an owner-command impersonation', async ($, on) => {
+  const full: Ledger = { ...DONE, run: { ...DONE.run, plan: 'approved', delivery: 'complete', deliveryBase: 'main' } }
+  const { files, engine } = await finished($, on, full)
+  expect((await call($, 'run_merge_main', {})).text).toContain('Merged: run ABC-12 is on main')
+  expect(stored(files).run.merged?.revision).toBe(REV_ON_MAIN)
+  expect(ranIn(engine, RUN_WS)).toContain('branch protect main')
+})
+
+test('review-only Lore delivery refuses automatic base integration', async ($, on) => {
+  const { engine } = await finished($, on, { ...DONE, run: { ...DONE.run, plan: 'approved', delivery: 'review-only', deliveryBase: 'main' } })
+  expect((await call($, 'run_merge_main', {})).text).toContain('no complete-delivery plan approval')
+  expect(ranIn(engine, RUN_WS)).not.toContain('branch unprotect main')
+  expect((await call($, 'run_merge_main', {}, 'untrusted-worker')).text).toContain('Only the orchestrator')
+})
+
 /** A bound Lore run whose tasks are all merged into its branch, at REV_RUN, on a base still at REV_MAIN. */
 async function finished($: Engine, on: Parameters<typeof lored>[1], ledger: Ledger = DONE) {
   const { files, engine, clock } = await lored($, on, ledger)

@@ -46,7 +46,9 @@ Replies follow the user's conversation language. A bare issue key or path defaul
 
 ## Approved delivery and worker roles
 
-The main chat is the sole orchestrator: it plans, dispatches isolated workers, reviews diffs/checks and manages the board. Implementation and conflict fixes go to workers; the orchestrator never writes implementation code. Approved work includes tests, commits, task-branch pushes and PR creation without a second publishing approval. Main/base merges need separate approval for the reviewed PR head, recorded with `approve_merge --caller owner` and `{"task":"id","head":"<full SHA>"}`. Approval already explicitly given for that change stands.
+The main chat orchestrates; workers implement and resolve conflicts. Plan approval covers the approved outcome through necessary files, regression fixes, tests, commits, pushes, PRs, reviewed PR merges into the recorded base, post-merge checks and ticket synchronization. In-scope follow-ups retain approval. Expected files are worker reservations, not permission prompts: update them with `task_update`, `files`/`dependsOn` and `scopeReason` linking the change to the outcome. Live file conflicts and dependency cycles are still refused.
+
+Use `approve --caller owner` from actual owner approval; default delivery is `complete`. Explicit input `{"delivery":"review-only"}` reserves merging. Individual `approve_merge` remains for limited/legacy approvals. Existing explicit full-delivery permission can be recorded once on a legacy approved run without asking again. Do not silently widen another owner’s earlier approval.
 
 Workers use `quarantine --caller worker:<id>` with `{"paths":["relative/file"]}` to move obsolete approved-scope files into their worktree’s `_deleted` without deleting their contents. Orchestrators cannot use that command to perform implementation changes. Permanent deletion requires explicit deletion approval. System files must never be deleted or quarantined, and reading/writing/searching `~/Library`, including through links, requires explicit user approval for that access. The helper refuses system/Library paths, traversal, symlinks and scope escapes.
 

@@ -374,7 +374,7 @@ test('/merged finishes a task by the owner\'s word, when the board cannot see fo
   expect((await command($, 'merged', 't999')).text).toBe('There is no task t999 in this run.')
 })
 
-test('plan approval does not authorize main: the owner approves the exact reviewed head separately', async ($, on) => {
+test('legacy approval retains the owner’s exact-head merge path', async ($, on) => {
   const { files, forge } = await bound($, on)
   const raw = stored(files); delete raw.run.mergeApprovals; files[PATH] = file(raw, (files[PATH]?.mtimeMs ?? 1) + 1)
   const denied = await call($, 'merge', MERGE)
@@ -384,4 +384,16 @@ test('plan approval does not authorize main: the owner approves the exact review
   expect((await call($, 'merge', MERGE)).isError).toBeUndefined()
   expect(forge.merges).toHaveLength(1)
   expect(stored(files).run.mergeApprovals?.['t395-1']).toBeUndefined()
+})
+
+
+test('owner plan approval delivers the reviewed PR into main without another merge approval', async ($, on) => {
+  const { files, forge } = await bound($, on)
+  const raw = stored(files); delete raw.run.mergeApprovals
+  raw.run.plan = 'proposed'; files[PATH] = file(raw, (files[PATH]?.mtimeMs ?? 1) + 1)
+  expect((await command($, 'approve')).text).toContain('Complete delivery includes reviewed PR merges into main')
+  expect(stored(files).run).toMatchObject({ plan: 'approved', delivery: 'complete', deliveryBase: 'main' })
+  expect((await call($, 'merge', MERGE)).isError).toBeUndefined()
+  expect(forge.merges).toHaveLength(1)
+  expect(task(files, 't395-1').status).toBe('done')
 })

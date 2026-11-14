@@ -120,7 +120,7 @@ export const PLANNING = [
   '  1. Read the source. For a ticket: the parent issue, every sub-ticket it lists and the spec they link. For a spec document: read it, and draft the tickets it needs (short, each linking the spec). Do not file them yet.',
   `  2. Slice the work into tasks with mcp__conductor__task_add. One task is one change a single worker can finish and hand back as one pull request without filling its context: one concern, at most ${FILES_PER_TASK} files or folders. Give each its ticket, the files it is expected to change, what it depends on, and a tier with the reason.`,
   '  3. No two tasks that could run at the same time may change the same file: order them with dependsOn, or split the files. mcp__conductor__board_read lists what is still wrong under "Plan check".',
-  '  4. Call mcp__conductor__run_plan with a title for the run. Then tell the owner the plan in a few lines and stop. For a run from a spec, their approval is also the go-ahead to file the drafted tickets, before any worker starts; record each number with mcp__conductor__task_update.',
+  '  4. Propose the plan with run_plan, show the approved outcome and expected files, explain that approval includes necessary implementation adjustments, publishing and reviewed base merges, then wait once. Expected files are estimates, not per-file consent boundaries. Honor explicit review-only limits; after approval, finish the outcome without reapproving routine files or follow-up fixes. For a spec run, file the approved drafted tickets before workers start and record each number with task_update.',
 ].join('\n')
 
 export const APPROVED = 'Run board: the owner approved the plan.'

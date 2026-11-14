@@ -524,6 +524,8 @@ export function parseLedger(source: string): Parsed {
         source: optionalText(run, 'source', 'run'),
         startedAt: optionalTime(run, 'startedAt', 'run'),
         plan: run.plan === undefined ? undefined : oneOf(run, 'plan', 'run', ['draft', 'proposed', 'approved'] as const),
+        delivery: run.delivery === undefined ? undefined : oneOf(run, 'delivery', 'run', ['complete', 'review-only'] as const),
+        deliveryBase: optionalText(run, 'deliveryBase', 'run'),
         maxParallel: optionalNumber(run, 'maxParallel', 'run'),
         mergeApprovals: mergeApprovals(run.mergeApprovals),
         workerHandbackTokens: optionalNumber(run, 'workerHandbackTokens', 'run'),

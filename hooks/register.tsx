@@ -31,7 +31,7 @@ import type { Config, Facts, Flight, Look, Verdict } from './merge'
 import { DONE_SHOWN, boardView, clock, detail, orchestratorLine, problemDetail, runMinutes, summary, timeline } from './board'
 import type { TaskRow } from './board'
 import { dashboardSvg } from './dashboard'
-import { approveMerge, mergeApproved, DELIVERY, ORCHESTRATOR_ROLE } from './delivery'
+import { approveMerge, mergeApproved, planDeliversMain, DELIVERY, ORCHESTRATOR_ROLE } from './delivery'
 import { launchHtmlBoard, boardRequest, htmlActions } from './html-board'
 import { KEEP, ROTATE_AT, carried, handover } from './handover'
 import { LINEAR_KEY, RUN_ID, STATUSES, TIERS, parseLedger } from './ledger'
@@ -64,6 +64,7 @@ import {
   markRead,
   overweight,
   proposePlan,
+  refused,
   released,
   reportProblem,
   reserved,
@@ -2452,11 +2453,12 @@ async function settle($: EngineInterface, path: string, change: (raw: Raw) => Ou
 const OWNER_ORIGINS: ReadonlySet<string> = new Set(['composer', 'sdk', 'bridge'])
 
 /** Approves the bound run's plan, by /approve or the owner's approving reply: what is said, and whether it was approved. */
-async function approveRun($: EngineInterface, path: string): Promise<{ text: string; isApproved: boolean }> {
+async function approveRun($: EngineInterface, path: string, delivery: 'complete' | 'review-only' = 'complete'): Promise<{ text: string; isApproved: boolean }> {
   const notReady = await loreApprove($, path)
   if (notReady !== undefined) return { text: `No plan was approved: ${notReady} Approve again once that is fixed.`, isApproved: false }
+  const base = await runBase($)
   const written = await mutate($, path, raw => {
-    const outcome = approvePlan(raw)
+    const outcome = approvePlan(raw, delivery, base)
 
     return { value: outcome, isChanged: outcome.isChanged }
   })
@@ -2492,22 +2494,32 @@ async function loreRunOf($: EngineInterface): Promise<{ path: string; ledger: Le
  */
 async function approveMain($: EngineInterface, origin: string, signal?: AbortSignal): Promise<string> {
   if (!OWNER_ORIGINS.has(origin)) return 'Not done. /approve-main is the owner\'s: only the owner types it, in the terminal, the desktop app or Remote Control. Nothing was merged.'
+  return mergeRunMain($, false, signal)
+}
+
+/** Full plan delivery uses the same checked, pinned, protected-base path without pretending to be an owner command. */
+async function mergeRunMain($: EngineInterface, fromPlan: boolean, signal?: AbortSignal): Promise<string> {
   const found = await loreRunOf($)
   if ('text' in found) return found.text
   const { path, ledger, runLore, run } = found
   const base = runLore.base
+  if (fromPlan && !planDeliversMain(ledger, base)) return 'Nothing was merged: this run has no complete-delivery plan approval for its base. Honor the owner’s review-only limit; an existing explicit full-delivery instruction can be recorded with /approve.'
   const head = branchInfoOf((await lore($, ['branch', 'info', runLore.branch], run)).out)?.remoteLatest
   const baseNow = branchInfoOf((await lore($, ['branch', 'info', base], run)).out)?.remoteLatest
   if (head === undefined || baseNow === undefined) return `Nothing was merged: lore did not say where ${head === undefined ? runLore.branch : base} stands on the server.`
   const blocks = readyForBase(ledger, head)
   if (blocks.length > 0) return [`The run cannot go into ${base} yet:`, ...blocks.map(one => `- ${one}`)].join('\n')
   const other = (await flights($, ledger.run.id, await $.clock.now()))[0]
-  if (other !== undefined) return `Nothing was merged: Run ${other.run} is merging ${other.task} since ${other.startedAt}. One merge at a time, across runs too: approve again once it is settled.`
+  if (other !== undefined) return `Nothing was merged: Run ${other.run} is merging ${other.task} since ${other.startedAt}. One merge at a time, across runs too: ${fromPlan ? 'retry once it is settled; the plan approval stands' : 'approve again once it is settled'}.`
   if (baseNow !== runLore.baseAt) {
-    return `Nothing was merged: ${base} moved since the run branch last took it in (it is at ${rev7(baseNow)}; the run branch took in ${runLore.baseAt === undefined ? 'no revision of it on record' : rev7(runLore.baseAt)}). Merging into it now would land a result nobody approved. Ask the orchestrator to bring it in with mcp__conductor__run_sync_base, then approve again.`
+    return `Nothing was merged: ${base} moved since the run branch last took it in (it is at ${rev7(baseNow)}; the run branch took in ${runLore.baseAt === undefined ? 'no revision of it on record' : rev7(runLore.baseAt)}). ${fromPlan ? 'Bring it in with mcp__conductor__run_sync_base, review and check the result, then retry run_merge_main under the existing plan approval.' : 'Merging into it now would land a result nobody approved. Ask the orchestrator to bring it in with mcp__conductor__run_sync_base, then approve again.'}`
   }
   const at = iso(await $.clock.now())
   const claimed = await mutate($, path, raw => {
+    const fresh = parseLedger(JSON.stringify(raw)).ledger
+    if (fresh === undefined || (fromPlan && !planDeliversMain(fresh, base))) return { value: refused('The delivery approval or pause state changed before the merge.'), isChanged: false }
+    const freshBlocks = readyForBase(fresh, head)
+    if (freshBlocks.length) return { value: refused(freshBlocks.join('\n')), isChanged: false }
     approvedMain(raw, at, { revision: head, base: baseNow })
     const outcome = startLoreMerge(raw, at, { task: ledger.run.id, revision: head, target: 'base' })
 
@@ -2516,7 +2528,7 @@ async function approveMain($: EngineInterface, origin: string, signal?: AbortSig
   if (claimed.error !== undefined) return `Nothing was merged: ${claimed.error}`
   if (claimed.value.isError) return `Nothing was merged: ${claimed.value.text}`
   // The merge goes on in the session's own way, as a task's merge does: the owner may type or press Stop meanwhile.
-  const job: ApproveJob = { path, ledger, runLore, run, base, head, baseNow, at }
+  const job: ApproveJob = { path, ledger, runLore, run, base, head, baseNow, at, fromPlan }
   const said = await outlasting($, `approve ${ledger.run.id}`, { kind: 'approve', job }, signal, cause => {
     const text = `Run ${ledger.run.id} broke off on its way into ${base} (${because(cause)}). The claim stays until the board lets it go, ${LORE_CLAIM_STALE_MIN} minutes after it was made, and ${base} is protected again then; look at lore history --branch ${base} before anything else merges.`
 
@@ -2528,6 +2540,7 @@ async function approveMain($: EngineInterface, origin: string, signal?: AbortSig
 
 /** An approval, claimed: what merging the run branch into the base works from. */
 type ApproveJob = {
+  fromPlan?: boolean
   path: string
   ledger: Ledger
   runLore: NonNullable<Ledger['run']['lore']>
@@ -2551,7 +2564,7 @@ async function landOnBase($: EngineInterface, job: ApproveJob): Promise<string> 
   const synced = await loreLong($, ['branch', 'switch', runLore.branch, '--reset'], run)
   const status = statusOf((await lore($, ['status'], run)).out)
   if (synced.exitCode !== 0 || status === undefined) return giveUp(`the run's workspace could not be brought to ${runLore.branch}`)
-  if (status.revision !== head) return giveUp(`${runLore.branch} moved after the approval (it is at ${rev7(status.revision)}, ${rev7(head)} was approved): approve again`)
+  if (status.revision !== head) return giveUp(`${runLore.branch} moved after the approval (it is at ${rev7(status.revision)}, ${rev7(head)} was approved): ${job.fromPlan ? 'review/check the new revision, then retry run_merge_main under the existing plan approval' : 'approve again'}`)
   let outcome: ReturnType<typeof mergeOf> = { kind: 'failed', reason: 'it did not run' }
   let protectedAgain: Ran | undefined
   try {
@@ -2561,7 +2574,7 @@ async function landOnBase($: EngineInterface, job: ApproveJob): Promise<string> 
     else {
       // The base is read once more right before the merge: another merge may have landed since the look above.
       const baseAgain = branchInfoOf((await lore($, ['branch', 'info', base], run)).out)?.remoteLatest
-      if (baseAgain !== baseNow) outcome = { kind: 'failed', reason: `${base} moved during the approval (it is at ${baseAgain === undefined ? 'a revision lore did not say' : rev7(baseAgain)}): bring it in with run_sync_base and approve again` }
+      if (baseAgain !== baseNow) outcome = { kind: 'failed', reason: `${base} moved during the approval (it is at ${baseAgain === undefined ? 'a revision lore did not say' : rev7(baseAgain)}): bring it in with run_sync_base and ${job.fromPlan ? 'review/check, then retry run_merge_main under the existing plan approval' : 'approve again'}` }
       else {
         const merged = await loreLong($, ['branch', 'merge', 'into', base, `Run ${ledger.run.id}: ${ledger.run.title}`], run)
         outcome = mergeOf(merged.exitCode, merged.out)
@@ -2817,7 +2830,7 @@ async function bringBaseIn($: EngineInterface, job: SyncJob): Promise<Said> {
   const now2 = parseLedger((await textAt($, path)) ?? '').ledger
   if (now2 !== undefined) await startCheck($, path, now2, { cwd: run, revision: broughtHead })
 
-  return say(`Brought ${base} into ${runLore.branch} as ${rev7(broughtHead)}. A new approval is needed: tell the owner what changed and ask them to type /approve-main.`)
+  return say(`Brought ${base} into ${runLore.branch} as ${rev7(broughtHead)}. ${now2 && planDeliversMain(now2, base) ? 'Review and check the result, then use run_merge_main. The complete-delivery plan approval stands.' : 'A new approval is needed: tell the owner what changed and ask them to type /approve-main.'}`)
 }
 
 /**
@@ -3482,6 +3495,9 @@ async function switchOn($: EngineInterface): Promise<void> {
         pr: { type: 'integer', minimum: 1, description: 'The pull request\'s number.' },
         branch: { type: 'string' },
         revision: { type: 'string', pattern: '^[0-9a-f]{64}$', description: 'In Lore: the revision its branch was pushed at, which the merge is pinned to.' },
+        files: { type: 'array', items: { type: 'string' }, description: 'Orchestrator only: update expected implementation files within the approved outcome; no per-file owner approval is needed.' },
+        dependsOn: { type: 'array', items: { type: 'string' }, description: 'Orchestrator only: adjust dependencies before reserving a worker.' },
+        scopeReason: { type: 'string', description: 'Required with files/dependsOn: how this implementation adjustment delivers the existing approved outcome, at most 200 characters.' },
       },
       required: ['task'],
       additionalProperties: false,
@@ -3707,7 +3723,13 @@ async function switchOn($: EngineInterface): Promise<void> {
     await listTool($, {
       name: 'run_sync_base',
       description:
-        "Run board: the orchestrator has the mod bring the base branch into the run branch, when it moved since the run branch last took it in. A conflict is a blocker on the board. Afterwards the owner approves again with /approve-main.",
+        "Run board: bring the base into the run branch. Resolve conflicts and review/check the result, then continue complete delivery with run_merge_main under the plan approval.",
+      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+      isDeferred: false,
+    })
+    await listTool($, {
+      name: 'run_merge_main',
+      description: 'Run board: orchestrator only. Complete a full-delivery approved Lore run by merging its checked, reviewed run revision into its protected base. Keeps all readiness, pause, conflict, exact-revision and protection-restoration gates. No per-merge owner prompt.',
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
       isDeferred: false,
     })
@@ -4037,7 +4059,7 @@ export const register: Register = (on, options) => {
           return {
             deny: isWorker
               ? `conductor: this command ${what}. A worker builds only on its own branch ${own ?? '(none yet)'}: it never merges, switches or creates branches, and never pushes another branch. Commit and push your own branch, set your task to review with the revision you pushed, and hand back.`
-              : `conductor: this command ${what} by hand. In a bound Lore run the mod does the Lore writes and the owner's workspace is only read: a judged task merges with ${TOOL_MERGE}, the run branch reaches ${runLore.base} only by the owner's /approve-main, and ${runLore.base} is brought into the run branch with mcp__conductor__run_sync_base. /board none lets go of the run.`,
+              : `conductor: this command ${what} by hand. In a bound Lore run the mod does the Lore writes and the owner's workspace is only read: a judged task merges with ${TOOL_MERGE}, the run branch reaches ${runLore.base} through run_merge_main under complete-delivery approval, or the owner's /approve-main for limited/legacy runs, and ${runLore.base} is brought into the run branch with mcp__conductor__run_sync_base. /board none lets go of the run.`,
           }
         }
         // Every command of a worker starts with the line that puts it in its own workspace, wherever its shell was left standing. The
@@ -4187,6 +4209,11 @@ export const register: Register = (on, options) => {
     answer($, e as unknown as ToolCall, (raw, _at, caller, input) => resolveProblem(raw, caller, input)),
   ).catch(broke)
   on('tool.call', { tool: /^mcp__conductor__run_sync_base$/ }, ($, e, next) => runSyncBase($, e as unknown as ToolCall, next.signal)).catch(broke)
+  on('tool.call', { tool: /^mcp__conductor__run_merge_main$/ }, async ($, e, next) => {
+    if (callerOf((e as unknown as ToolCall).agentId).kind !== 'orchestrator') return { isError: true as const, result: 'Only the orchestrator integrates the approved run.', text: 'Only the orchestrator integrates the approved run.' }
+    const text = await mergeRunMain($, true, next.signal)
+    return { result: text, text }
+  }).catch(broke)
   on('tool.call', { tool: /^mcp__conductor__run_check$/ }, ($, e) => runCheckTool($, e as unknown as ToolCall)).catch(broke)
   on('tool.call', { tool: /^mcp__conductor__ticket_read$/ }, ($, e) => ticketRead($, e as unknown as ToolCall)).catch(broke)
   on('tool.call', { tool: /^mcp__conductor__ticket_file$/ }, ($, e) => ticketFile($, e as unknown as ToolCall)).catch(broke)
@@ -4222,7 +4249,9 @@ export const register: Register = (on, options) => {
             `- This is a Lore workspace. The run has its own branch, ${runLore.branch}, made from ${runLore.base} when the owner approved the plan. Start each task's worker always with isolation: "worktree": the mod then hands it a Lore workspace of its own, copied from the owner's workspace, on its own branch ${runLore.branch}/<task id>. A worker started without it is refused every write. Each worker commits and pushes its own branch itself; the mod only makes workspaces and merges. The owner's workspace is only read: never stage, commit, sync, switch or push there.`,
             `- A worker hands back with the revision it pushed (task_update with revision). A task you judged green (its change reviewed${checkArgv === undefined ? '' : ', its check passed'}) is merged into ${runLore.branch} through ${TOOL_MERGE} alone, pinned to that revision, one at a time; ${TOOL_CHECK} says what stands in the way. A conflict comes back as a blocked task with the files named: have its worker bring the run branch in and resolve, never by picking one side of a binary file. A new revision on a green task sends it back to review.`,
             ...(checkArgv === undefined ? [] : [`- The project's check (${checkArgv.join(' ')}) runs on each revision you judge green, and on the run branch's head once every task is merged. Its verdict reaches you as a board notice; a task is merged only once its check passed.`]),
-            `- When every task is merged into ${runLore.branch} and no blocker or warning is open, tell the owner in a line or two what changed and how to try it, and ask them to type /approve-main. Only the owner merges the run branch into ${runLore.base}: no tool of yours does. When ${runLore.base} moved since the run branch last took it in, /approve-main is refused: bring it in with mcp__conductor__run_sync_base, then ask the owner again.`,
+            bound !== undefined && planDeliversMain(bound, runLore.base)
+              ? `- Complete delivery is approved. Once every task is merged into ${runLore.branch} and all checks/problems are settled, use mcp__conductor__run_merge_main to integrate into ${runLore.base}, then verify delivery. If the base moved, run_sync_base, review/check the result and retry. No new owner approval is needed for this in-scope integration.`
+              : `- This legacy or review-only run has no complete-delivery approval. Its /approve-main exact-revision path remains available; use run_sync_base first if the base moved. Honor explicit limits; when the owner already authorized full delivery, record that existing instruction with /approve without asking again.`,
             '- Workers never merge. A lore write by hand (push, merge, switch, sync, protect) is refused in a bound session; read with lore status, lore history, lore diff and lore branch info.',
           ]
     const text = [
@@ -4441,10 +4470,13 @@ export const register: Register = (on, options) => {
     }
   })
 
-  on('command.run', { command: 'approve' }, async $ => {
+  on('command.run', { command: 'approve' }, async ($, e) => {
+    if (!OWNER_ORIGINS.has(e.origin.kind)) return { text: 'Only the owner approves a plan.' }
+    const mode = e.args.trim()
+    if (mode && mode !== 'review-only') return { text: 'Use /approve for complete delivery including reviewed merges, or /approve review-only to stop before main/base merges.' }
     const path = await boundLedger($)
     if (path === undefined) return { text: await unbound($) }
-    const { text, isApproved } = await approveRun($, path)
+    const { text, isApproved } = await approveRun($, path, mode === 'review-only' ? 'review-only' : 'complete')
     if (isApproved) asks.push(APPROVED)
 
     return { text }

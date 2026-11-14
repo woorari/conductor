@@ -146,12 +146,13 @@ test('questions, rulings, problems and handover survive a new adapter instance',
   assert.match(fs.readFileSync(saved.file, 'utf8'), /agent 123/);
 });
 
-test('a changed plan requires approval again and unsafe run paths are refused', async t => {
+test('in-scope follow-ups retain delivery approval and unsafe run paths are refused', async t => {
   const { app } = await started(t);
   await add(app, 'one'); await propose(app); await approve(app);
   await add(app, 'two');
-  assert.equal(app.load('run').run.plan, 'draft');
-  assert.equal((await app.worktree('run', { task: 'two' })).isError, true);
+  assert.equal(app.load('run').run.plan, 'approved');
+  assert.equal(app.load('run').run.delivery, 'complete');
+  assert.equal((await app.worktree('run', { task: 'two' })).isError, false);
   assert.throws(() => app.load('../outside'), /run\/task id/);
   await assert.rejects(() => app.conduct({ id: '../outside', source: 'no' }), /run\/task id/);
 });
@@ -285,16 +286,47 @@ test('owner model mappings are explicit and a host takeover can reset them witho
   assert.match(board(app.load('run')), /current Codex model/);
 });
 
-test('main merge requires a separate owner approval and consumes it only for the approved head', async t => {
+test('legacy/review-only merges retain exact-head owner approval', async t => {
   const { app, state } = await githubFixture(t);
-  const raw = app.load('run'); delete raw.run.mergeApprovals; app.save('run', raw);
+  const raw = app.load('run'); delete raw.run.mergeApprovals; delete raw.run.delivery; delete raw.run.deliveryBase; app.save('run', raw);
   const checked = await app.github('run', { task: 'one' }); assert.equal(checked.approvalRequired, true);
-  await assert.rejects(() => app.github('run', { task: 'one', head: state.head, told: [] }, true), /separate owner approval/);
+  await assert.rejects(() => app.github('run', { task: 'one', head: state.head, told: [] }, true), /no complete-delivery approval/);
   assert.equal(state.writes.length, 0);
   await assert.rejects(() => app.apply('run', 'approve_merge', { task: 'one', head: state.head }), /owner/);
   await app.apply('run', 'approve_merge', { task: 'one', head: state.head }, owner);
   await app.github('run', { task: 'one', head: state.head, told: [] }, true);
   assert.equal(state.writes.length, 1); assert.equal(app.load('run').run.mergeApprovals.one, undefined);
+});
+
+test('one owner plan approval includes reviewed PR delivery without per-head consent', async t => {
+  const { app, state } = await githubFixture(t);
+  const raw = app.load('run'); delete raw.run.mergeApprovals; app.save('run', raw);
+  const checked = await app.github('run', { task: 'one' }); assert.equal(checked.approvalRequired, false);
+  await assert.rejects(() => app.github('run', { task: 'one', head: 'b'.repeat(40), told: [] }, true), /head changed/);
+  assert.equal(state.writes.length, 0);
+  await app.github('run', { task: 'one', head: state.head, told: [] }, true);
+  assert.equal(state.writes.length, 1); assert.equal(app.load('run').tasks[0].status, 'done');
+});
+
+test('an explicit review-only approval limits delivery until the actual owner broadens it', async t => {
+  const { app, state } = await githubFixture(t);
+  const raw = app.load('run'); delete raw.run.mergeApprovals; app.save('run', raw);
+  await app.apply('run', 'approve', { delivery: 'review-only' }, owner);
+  await assert.rejects(() => app.github('run', { task: 'one', head: state.head, told: [] }, true), /no complete-delivery approval/);
+  await approve(app);
+  assert.equal((await app.github('run', { task: 'one' })).approvalRequired, false);
+});
+
+test('implementation files can expand without another approval while live reservations stay safe', async t => {
+  const { app } = await started(t);
+  await add(app, 'one', ['source.txt']); await add(app, 'two', ['tests/one.test.js']); await propose(app); await approve(app);
+  await app.worktree('run', { task: 'one' }); await app.worktree('run', { task: 'two' });
+  const input = { task: 'one', files: ['source.txt', 'wake.ts'], scopeReason: 'Required wake validation for the approved routing deliverable' };
+  assert.equal((await app.apply('run', 'task_update', input, worker('one'))).isError, true);
+  assert.equal((await app.apply('run', 'task_update', input)).isError, false);
+  assert.deepEqual(app.load('run').tasks[0].files, ['source.txt', 'wake.ts']); assert.equal(app.load('run').run.plan, 'approved');
+  assert.equal((await app.apply('run', 'task_update', { ...input, files: ['source.txt', 'tests/one.test.js'] })).isError, true);
+  assert.equal((await app.apply('run', 'task_update', { ...input, files: ['../outside'] })).isError, true);
 });
 
 test('only the reserved worker can quarantine its approved files, with contents preserved', async t => {

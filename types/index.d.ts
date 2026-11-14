@@ -280,6 +280,10 @@ export type Ledger = {
      * means approved: a ledger from before plans had a state.
      */
     plan?: 'draft' | 'proposed' | 'approved'
+    /** Plan approval authorizes complete delivery, or an explicit owner limit to review-only. */
+    delivery?: 'complete' | 'review-only'
+    /** Base branch covered by the plan's delivery approval. */
+    deliveryBase?: string
     /**
      * Since when the owner holds the run with `/pause`: no worker starts and
      * nothing is merged until `/unpause`. Absent while it runs.
