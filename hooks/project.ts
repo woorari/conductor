@@ -105,9 +105,11 @@ function checkCheck(value: unknown, where: string): void {
 /** What a project offers: the efforts each tier may run at and the agents a task may be given to. */
 function checkStaffing(value: unknown, where: string): void {
   const staffing = keysOf(value, where, STAFFING)
+  if (Object.keys(staffing).length === 0) throw new Wrong(`config.json: ${where} offers nothing: name efforts or agents, or leave staffing out.`)
   if (staffing.efforts !== undefined) {
     if (!isObject(staffing.efforts)) throw new Wrong(`config.json: ${where}.efforts names tiers: ${TIERS.join(', ')}.`)
     const efforts = staffing.efforts
+    if (Object.keys(efforts).length === 0) throw new Wrong(`config.json: ${where}.efforts names no tier: name one of ${TIERS.join(', ')}, or leave efforts out.`)
     if (Object.keys(efforts).some(key => !(TIERS as readonly string[]).includes(key))) throw new Wrong(`config.json: ${where}.efforts names tiers: ${TIERS.join(', ')}.`)
     for (const tier of TIERS) {
       const list = efforts[tier]
@@ -119,6 +121,7 @@ function checkStaffing(value: unknown, where: string): void {
   }
   if (staffing.agents !== undefined) {
     const agents = staffing.agents
+    if (Array.isArray(agents) && agents.length === 0) throw new Wrong(`config.json: ${where}.agents is empty: name an agent, or leave agents out.`)
     const one = (agent: unknown): boolean =>
       isObject(agent) && Object.keys(agent).every(key => key === 'id' || key === 'about') &&
       typeof agent.id === 'string' && AGENT_ID.test(agent.id) &&

@@ -64,6 +64,12 @@ describe('a project config', () => {
     expect(error('{"staffing":{"agents":[{"id":"a","about":"x"},{"id":"a","about":"y"}]}}')).toBe('config.json: staffing.agents names "a" twice.')
   })
 
+  test('an empty staffing block is refused, by the field that is empty', () => {
+    expect(error('{"staffing":{}}'), 'staffing {}').toBe('config.json: staffing offers nothing: name efforts or agents, or leave staffing out.')
+    expect(error('{"staffing":{"efforts":{}}}'), 'efforts {}').toBe('config.json: staffing.efforts names no tier: name one of opus, sonnet, haiku, or leave efforts out.')
+    expect(error('{"staffing":{"agents":[]}}'), 'agents []').toBe('config.json: staffing.agents is empty: name an agent, or leave agents out.')
+  })
+
   test('a place has its own staffing', () => {
     const staffing = { efforts: { haiku: ['low'] }, agents: [{ id: 'reviewer', about: 'Reads the change.' }] }
     const place = { folder: 'studio', teams: ['ABC'], about: 'x', staffing }
