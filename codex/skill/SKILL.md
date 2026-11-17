@@ -78,7 +78,7 @@ The page shows tasks, expected files, dependencies, problems, questions, rulings
 - `board_rule`: `{"text":"...","tasks":["..."],"answers":"Q1"}`; `tasks` and `answers` are optional. Forward a ruling to the affected live workers.
 - `problem_report`: `{"text":"...","severity":"blocker|warning|note","task":"..."}`. Assign work with `problem_assign` (`problem`, `task`) or `task_add` (`addresses`). Resolve with `problem_resolve` (`problem`, `resolution`; `dismiss:true` only when it was not a real problem). Do not declare a run delivered with open blockers or warnings.
 - On the user's hold/resume instruction, use `pause` or `unpause` with `--caller owner`. Already running workers finish; nothing new starts or merges while paused. Do not restart a paused run on your own.
-- `tier --caller owner` accepts `{"task":"...","tier":"opus|sonnet|haiku","agent":"...","effort":"..."}` for queued tasks; `tier`, `agent` and `effort` are each optional and are checked against the run's staffing. Preserve the user's choice. It changes the planning label only; if they want a different Codex model, obtain their intended mapping.
+- `tier --caller owner` accepts `{"task":"...","tier":"opus|sonnet|haiku","agent":"...","effort":"..."}` for queued tasks; `tier`, `agent` and `effort` are each optional and are checked against the run's staffing. Preserve the user's choice. The pick (tier, agent and effort) is the run's planning record; it does not choose a Codex model. If they want a different Codex model, obtain their intended mapping.
 - `merged --caller owner` records the user's explicit statement that an externally merged task is done; it performs no merge.
 
 ## Linear ticket states

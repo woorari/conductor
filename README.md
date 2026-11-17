@@ -89,7 +89,7 @@ The token goes into a request's header and nowhere else: not the ledger, not a m
 
 1. **Start a run.** `/conduct #12` starts a run from issue 12; `/conduct docs/specs/export.md` starts one from a spec document. Any other words become the run's title: `/conduct #12 Retry the flaky upload`. `id=<name>` names the run yourself. The session is now bound to the run, and the orchestrator is asked for a plan.
 2. **The plan.** The orchestrator reads the source and adds tasks with `task_add`. Each task has a title, a model tier and the reason for it, the files it is expected to change, and what it waits for. A task is at most 12 files or folders: one change one worker can finish as one pull request. The mod checks the plan for tasks that could run at the same time on the same file.
-3. **Approve.** The orchestrator proposes the plan with `run_plan` and stops. `/approve` lets the workers start. `/tier <task> <opus|sonnet|haiku>`, or the picker in the pane, changes a task's tier before it starts. Your choice stands.
+3. **Approve.** The orchestrator proposes the plan with `run_plan` and stops. `/approve` lets the workers start. `/tier <task> <opus|sonnet|haiku>`, or the picker in the pane, changes a task's tier before it starts. Your choice stands. A run that offers agents and efforts has more to pick; see [Staffing](#staffing).
 4. **Workers.** The orchestrator starts each worker as a background agent in a worktree of its own, named after its task. The mod starts it on the task's tier whatever model the call asks for, briefs it (its task, the rules, your `brief.md`), and records what it is doing. At most 3 workers build at once, or what the run's `maxParallel` says.
 5. **The board.** `/board` opens the pane: problems, what needs a decision, each worker on a time axis, and what is building, handed back, next and ready to merge. `/board <run>` binds the session to another run, and `/board none` lets go.
 6. **Hand-backs.** A worker opens a pull request, sets its task to review and hands back. The orchestrator judges it: review, green, blocked or failed.
@@ -105,7 +105,7 @@ A run lives in `.claude/conductor/runs/<run id>/`: its `ledger.json`, and `hando
 | `/conduct <#issue or spec> [title]` | Start a run and its plan |
 | `/board [run id \| none]` | Show the board; bind to a run, or let go |
 | `/approve` | Approve the plan, so workers may start |
-| `/tier <task> <tier>` | Set a queued task's model tier |
+| `/tier <task> <tier> [effort=<e>] [agent=<a>]` | Set a queued task's model tier, and where the run offers them, its effort and agent |
 | `/pause`, `/unpause` | Hold the run, and let it go on |
 | `/merged <task>` | Mark a task done by your word: its pull request is merged |
 | `/rotate` | Compact the orchestrator's session with a handover now |
@@ -128,7 +128,7 @@ The orchestrator and the workers change the board only through the mod's tools: 
 ### Planning and approval
 
 - `/conduct` starts a run with its plan in draft and asks the orchestrator to plan it.
-- The orchestrator slices the work with `task_add`: each task is at most 12 files or folders, with its ticket, the files it is expected to change, what it waits for, and a model tier with the reason for it.
+- The orchestrator slices the work with `task_add`: each task is at most 12 files or folders, with its ticket, the files it is expected to change, what it waits for, and a model tier with the reason for it. In a run that offers staffing, the orchestrator also picks an agent and an effort, with the same one reason (see [Staffing](#staffing)).
 - The plan check lists open tasks that could run at the same time on the same file, and tasks that name no files. `board_read` shows what it still finds, under "Plan check".
 - `run_plan` proposes the plan, and no worker starts before `/approve`. A reply of yours that only approves, such as a button "Approve, start now", counts as `/approve`. A reply from another session, a channel, a plugin or a scheduled prompt approves nothing, and neither does one that asks, adds a condition or names something else.
 - For a run from a spec, the orchestrator drafts the tickets the spec needs and files them only after your approval, recording each number with `task_update`.
@@ -209,6 +209,38 @@ When a worker cannot be resumed, the orchestrator takes its task back by setting
 ### Run settings
 
 A run's ledger takes two settings of its own: `maxParallel`, the most workers building at once (3 when absent), and `workerHandbackTokens` (above).
+
+### Staffing
+
+A project may offer agents and efforts next to the model tiers. It does so with a `staffing` block in `.claude/conductor/config.json`. The names here are made up:
+
+```json
+{
+  "staffing": {
+    "efforts": { "opus": ["low", "high"], "sonnet": ["low", "high"] },
+    "agents": [
+      { "id": "builder", "about": "writes the change and its tests" },
+      { "id": "reviewer", "about": "reads a change and reports what is wrong" }
+    ]
+  }
+}
+```
+
+- `efforts`: for each tier, the efforts a task of that tier may run at. The keys are tiers (`opus`, `sonnet`, `haiku`). Each list is 1 to 8 different names: lowercase letters, digits and hyphens, starting with a letter, at most 24 characters. A tier left out takes no effort.
+- `agents`: the agents a task may be given to, at most 64. Each has an `id` (lowercase letters, digits and hyphens, at most 64 characters, unique) and an `about` (one line, 1 to 200 characters) that tells the orchestrator what the agent is for. No other key is allowed.
+- Both are optional. A project with no `staffing` plans as before: a task has a tier and a reason, and naming an agent or an effort is refused.
+- A run keeps the staffing it was started with. Changing the file later changes nothing in that run.
+- In a home that is not a repository, `staffing` belongs in a place, like `lore` and `check`; a top-level one is refused. A place without one offers nothing.
+- The provider is not part of the pick. Which program runs a task is the host's to decide.
+
+How a run uses it:
+
+- When the run offers agents, the orchestrator picks an agent for every task. When a task's tier has efforts, it picks an effort too. It gives one reason for the tier, the agent and the effort together.
+- A pick is checked against the run's staffing. An agent or an effort the run does not offer is refused, the task stays as it was, and the message lists what the run offers. A run with no agents refuses an agent pick with "This run offers no agents to pick from." When a task moves to a tier that offers no efforts, a kept effort is dropped.
+- You overrule a pick with `/tier <task> <tier> [effort=<e>] [agent=<a>]`; no reason is needed, and the orchestrator leaves a pick of yours alone. The pane's picker sets the tier only.
+- A pick is set while a task is queued. Once the task has started, it cannot change.
+- A failed task is re-queued and restaffed by the orchestrator in one `task_update` call, with a new reason.
+- The board shows each task's pick as tier, effort and agent, and the briefing and the handover carry it.
 
 ## Lore
 
@@ -349,7 +381,7 @@ Add the `WorktreeCreate` placeholder shown under [Lore](#lore) to `.claude/setti
 - **Hand-back limit.** A worker is asked to hand back early only once its context passes the run's `workerHandbackTokens`. The mod cannot see how large a worker model's window is.
 - **Guards read text.** The by-hand guards read a command's text: a merge hidden inside a script is not seen. In Lore the guard also refuses what it cannot read simply (a substitution, an interpreter, a variable as the program), but text is all it reads: the place that really enforces who may change the base branch is the Lore server, with sign-in and branch permissions.
 
-What has been seen for real: the board, the plan gate, the router, messaging, pause and auto-compaction, in real runs on a Forgejo-based ancestor of this mod. What has not: the GitHub merge loop against GitHub itself. Its request and response shapes are checked against GitHub's documented API in the tests (a pretend GitHub), and its readers against real answers of GitHub's API, but no merge has been made through it yet.
+What has been seen for real: the board, the plan gate, the router, messaging, pause and auto-compaction, in real runs on a Forgejo-based ancestor of this mod. The GitHub merge loop has also been seen against GitHub itself: checked on 2026-11-17, runs of both hosts (the mod and the command interface) had recorded merges that GitHub reports as merged, with the same merge commits. What has not been seen: a merge into a protected base branch by a session with no person present. The base branches checked were not protected. The loop's request and response shapes are also checked against GitHub's documented API in the tests (a pretend GitHub), and its readers against real answers of GitHub's API.
 
 ## Developing
 
