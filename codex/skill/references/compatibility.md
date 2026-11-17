@@ -17,6 +17,7 @@ This package adapts Conductor's workflow to a Codex skill and local CLI. Origina
 | Automatic tool interception, activity/tokens, routing overrides | No automatic tool/token telemetry; agents follow skill instructions rather than Claude runtime interception |
 | Automatic compaction, timer and post-merge CI watcher | Not installed; Codex handles its context, orchestrator checks CI during the run |
 | Lore workspaces/merges and exact-revision approve-main | Not ported; no claim of runtime-enforced equivalence |
+| A project's `.claude/conductor/config.json` | Only the `staffing` block is read, when `conduct` creates the run; the run keeps its own copy and picks of agent and effort are checked against it. Nothing else of the file is used; a file that does not parse stops `conduct` |
 | Folder-home workspace selection | Select a concrete repository first; no automatic places routing |
 | Linear ticket states | Approval/work-start/completion synchronization via the connected plugin or optional API key; persisted pending updates and retry warnings |
 | Linear issue creation and Lore lifecycle | Existing issues can be linked; automatic issue filing and Lore state synchronization are not ported |
