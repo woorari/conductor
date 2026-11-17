@@ -352,7 +352,11 @@ function restaff(raw: Raw, task: RawTask, caller: Caller, pick: Pick): Outcome |
     effort = pick.effort
   } else if (effort !== undefined && !offered.includes(effort)) {
     // A tier that takes no effort lets the kept one go; one that takes others needs one named.
-    if (offered.length > 0) return refused(`${next} runs at ${offered.join(', ')} here, not at ${effort}.`)
+    if (offered.length > 0) {
+      const fix = caller.kind === 'owner' ? ` Name one with /tier ${task.id} ${next} effort=<e>.` : ''
+
+      return refused(`${next} runs at ${offered.join(', ')} here, not at ${effort}.${fix}`)
+    }
     effort = undefined
   }
   if (agents.length > 0 && agent === undefined) {
@@ -571,7 +575,8 @@ export function updateTask(raw: Raw, at: string, caller: Caller, input: Record<s
 
       return no
     }
-    said.push(input.agent === undefined && input.effort === undefined ? `tier ${String(task.tier)}` : `staffed ${labelOf(task)}`)
+    const dropped = before.effort !== undefined && task.effort === undefined ? ' (effort dropped)' : ''
+    said.push(`${input.agent === undefined && input.effort === undefined ? `tier ${String(task.tier)}` : `staffed ${labelOf(task)}`}${dropped}`)
   }
   if (input.note !== undefined) {
     if (typeof input.note !== 'string') return refused('note is a line of text; an empty one clears it.')

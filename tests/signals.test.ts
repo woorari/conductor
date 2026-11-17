@@ -477,6 +477,31 @@ describe('tiers and new tasks', () => {
     expect(task(ledger, 't1')).toMatchObject({ tier: 'haiku', agent: 'builder' })
   })
 
+  test('a dropped effort is said, and a pick that drops nothing says what it did before', () => {
+    const ledger = STAFFED()
+    staff(ledger)
+    expect(updateTask(ledger, LATER, ORCHESTRATOR, { task: 't1', tier: 'haiku', tierReason: 'r' }).text).toContain('t1: tier haiku (effort dropped).')
+    expect(updateTask(ledger, LATER, ORCHESTRATOR, { task: 't1', tier: 'sonnet', agent: 'builder', effort: 'high', tierReason: 'r' }).text).toContain('t1: staffed sonnet · high · builder.')
+    const dropped = STAFFED()
+    staff(dropped)
+    expect(updateTask(dropped, LATER, ORCHESTRATOR, { task: 't1', tier: 'haiku', agent: 'reviewer', tierReason: 'r' }).text).toContain('t1: staffed haiku · reviewer (effort dropped).')
+    const plain = STAFFED()
+    staff(plain, { tier: 'haiku', effort: undefined })
+    delete (plain.run as any).config.staffing.efforts.haiku
+    expect(updateTask(plain, LATER, ORCHESTRATOR, { task: 't1', tier: 'haiku', tierReason: 'r2' }).text, 'no effort to drop').toContain('t1: tier haiku.')
+  })
+
+  test('a tier-only pick the task\'s effort does not fit names the command that fixes it', () => {
+    const ledger = STAFFED()
+    staff(ledger)
+    expect(ownerSetsTier(ledger, 't1', 'opus')).toMatchObject({
+      isError: true,
+      text: 'opus runs at high here, not at low. Name one with /tier t1 opus effort=<e>.',
+    })
+    expect(task(ledger, 't1')).toMatchObject({ tier: 'sonnet', effort: 'low' })
+    expect(updateTask(ledger, LATER, ORCHESTRATOR, { task: 't1', tier: 'opus', tierReason: 'r' }).text, 'the orchestrator\'s refusal keeps its words').toBe('opus runs at high here, not at low.')
+  })
+
   test('the owner\'s pick stands', () => {
     const ledger = STAFFED()
     staff(ledger)
