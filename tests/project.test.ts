@@ -27,7 +27,7 @@ describe('a project config', () => {
   })
 
   test('an unknown key, a bad check, a relative workspaces folder and bad JSON are refused, by name', () => {
-    expect(error('{"tickts": "linear"}')).toBe('config.json: "tickts" is no setting here (tickets, linear, lore, check).')
+    expect(error('{"tickts": "linear"}')).toBe('config.json: "tickts" is no setting here (tickets, linear, lore, check, staffing).')
     expect(error('{"lore": {"bins": "x"}}')).toBe('config.json: "lore.bins" is no setting here (branchPrefix, workspaces, carry, minFreeGB, lockPatterns).')
     expect(error('{"lore": {"bin": "/tmp/evil"}}'), 'which program runs is never the project\'s to say').toBe(
       'config.json: "lore.bin" is no setting here (branchPrefix, workspaces, carry, minFreeGB, lockPatterns).',
@@ -41,6 +41,36 @@ describe('a project config', () => {
     expect(error('{"linear": {"team": "abc"}}')).toBe('config.json: linear.team is a Linear team key, like ABC.')
     expect(error('{oops')).toBe('config.json is not valid JSON.')
     expect(error('{"lore": {"branchPrefix": "-f"}}')).toBe('config.json: lore.branchPrefix is letters, digits and . _ / -, starting with a letter or digit.')
+  })
+  test('a staffing block is taken as written', () => {
+    const staffing = { efforts: { opus: ['high'], sonnet: ['low', 'high'] }, agents: [{ id: 'builder', about: 'Writes the change.' }] }
+    expect(parseConfig(JSON.stringify({ staffing }))).toEqual({ config: { staffing } })
+  })
+
+  test('what is wrong with a staffing block is named', () => {
+    expect(error('{"staffing":{"teams":[]}}')).toBe('config.json: "staffing.teams" is no setting here (efforts, agents).')
+    expect(error('{"staffing":{"efforts":{"big":["high"]}}}')).toBe('config.json: staffing.efforts names tiers: opus, sonnet, haiku.')
+    const EFFORTS = 'config.json: staffing.efforts.opus is 1 to 8 different effort names, like "high".'
+    expect(error('{"staffing":{"efforts":{"opus":[]}}}')).toBe(EFFORTS)
+    expect(error('{"staffing":{"efforts":{"opus":["High"]}}}')).toBe(EFFORTS)
+    expect(error('{"staffing":{"efforts":{"opus":["high","high"]}}}'), 'a repeated effort').toBe(EFFORTS)
+    expect(error(JSON.stringify({ staffing: { efforts: { opus: ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i'] } } })), 'nine efforts').toBe(EFFORTS)
+    const AGENTS = 'config.json: staffing.agents holds { "id", "about" }: an id like "builder" and one line on what the agent is for.'
+    expect(error('{"staffing":{"agents":[{"id":"builder"}]}}')).toBe(AGENTS)
+    expect(error('{"staffing":{"agents":[{"id":"Builder","about":"x"}]}}'), 'an id in capitals').toBe(AGENTS)
+    expect(error('{"staffing":{"agents":[{"id":"a","about":"two\\nlines"}]}}'), 'about with a line break').toBe(AGENTS)
+    expect(error(JSON.stringify({ staffing: { agents: [{ id: 'a', about: 'x'.repeat(201) }] } })), 'about over 200 characters').toBe(AGENTS)
+    expect(error(JSON.stringify({ staffing: { agents: Array.from({ length: 65 }, (_, at) => ({ id: `a${at}`, about: 'x' })) } })), '65 agents').toBe(AGENTS)
+    expect(error('{"staffing":{"agents":[{"id":"a","about":"x"},{"id":"a","about":"y"}]}}')).toBe('config.json: staffing.agents names "a" twice.')
+  })
+
+  test('a place has its own staffing', () => {
+    const staffing = { efforts: { haiku: ['low'] }, agents: [{ id: 'reviewer', about: 'Reads the change.' }] }
+    const place = { folder: 'studio', teams: ['ABC'], about: 'x', staffing }
+    expect(parseConfig(JSON.stringify({ places: [place] }))).toEqual({ config: { places: [place] } })
+    expect(placeConfig(place, 'ABC').staffing).toEqual(staffing)
+    expect(placeConfig({ folder: 'studio', teams: ['ABC'], about: 'x' }, 'ABC'), 'a place without a block carries none').toEqual({ tickets: 'linear', linear: { team: 'ABC' } })
+    expect(error(JSON.stringify({ places: [{ ...place, staffing: { efforts: { opus: [] } } }] })), 'a place is checked as the top level is').toBe('config.json: places[0].staffing.efforts.opus is 1 to 8 different effort names, like "high".')
   })
 })
 
@@ -129,7 +159,7 @@ describe('places: a home that is not a repository', () => {
     expect(one({ lore: { workspaces: 'rel' } })).toBe('config.json: places[0].lore.workspaces is an absolute path.')
     expect(one({ lore: { bins: 'x' } })).toBe('config.json: "places[0].lore.bins" is no setting here (branchPrefix, workspaces, carry, minFreeGB, lockPatterns).')
     expect(one({ check: { argv: [], timeoutMin: 5 } })).toBe('config.json: places[0].check.argv is a non-empty list of strings: the program and its arguments.')
-    expect(one({ bogus: 1 })).toBe('config.json: "places[0].bogus" is no setting here (folder, teams, about, base, lore, check).')
+    expect(one({ bogus: 1 })).toBe('config.json: "places[0].bogus" is no setting here (folder, teams, about, base, lore, check, staffing).')
     const BASE = 'config.json: places[0].base is a branch name: letters, digits and . _ / -, starting with a letter or digit.'
     expect(one({ base: '' })).toBe(BASE)
     expect(one({ base: '-main' })).toBe(BASE)
