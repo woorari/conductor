@@ -4,6 +4,7 @@
  */
 
 import type { Place, ProjectConfig } from '../types'
+import { TIERS } from './ledger'
 import { ignoreRules, isIgnored } from './lore'
 
 export type { Place, ProjectConfig }
@@ -13,14 +14,17 @@ export const CONFIG_PATH = '.claude/conductor/config.json'
 /** What a Lore run uses where the project says nothing. */
 export const LORE_DEFAULTS = { branchPrefix: 'conductor/', minFreeGB: 20, carry: [] as string[] }
 
-const TOP = ['tickets', 'linear', 'lore', 'check'] as const
+const TOP = ['tickets', 'linear', 'lore', 'check', 'staffing'] as const
 const LINEAR = ['team'] as const
 // Which program runs is never a project's to say: a repository could name any program. That is the mod's
 // Lore program option, or LORE_BIN, both the person's own.
 const LORE = ['branchPrefix', 'workspaces', 'carry', 'minFreeGB', 'lockPatterns'] as const
 const CHECK = ['argv', 'timeoutMin'] as const
-const PLACE = ['folder', 'teams', 'about', 'base', 'lore', 'check'] as const
+const STAFFING = ['efforts', 'agents'] as const
+const PLACE = ['folder', 'teams', 'about', 'base', 'lore', 'check', 'staffing'] as const
 const TEAM_KEY = /^[A-Z][A-Z0-9]{0,9}$/
+const EFFORT = /^[a-z][a-z0-9-]{0,23}$/
+const AGENT_ID = /^[a-z0-9][a-z0-9-]{0,63}$/
 const BRANCH = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/
 
 class Wrong extends Error {}
@@ -62,6 +66,7 @@ export function parseConfig(text: string | undefined): { config: ProjectConfig }
     }
     if (top.lore !== undefined) checkLore(top.lore, 'lore')
     if (top.check !== undefined) checkCheck(top.check, 'check')
+    if (top.staffing !== undefined) checkStaffing(top.staffing, 'staffing')
     if (top.places !== undefined) checkPlaces(top.places)
 
     return { config: json as ProjectConfig }
@@ -94,6 +99,39 @@ function checkCheck(value: unknown, where: string): void {
   if (!strings(check.argv) || check.argv.length === 0) throw new Wrong(`config.json: ${where}.argv is a non-empty list of strings: the program and its arguments.`)
   if (typeof check.timeoutMin !== 'number' || !Number.isInteger(check.timeoutMin) || check.timeoutMin < 1 || check.timeoutMin > 240) {
     throw new Wrong(`config.json: ${where}.timeoutMin is a whole number of minutes from 1 to 240.`)
+  }
+}
+
+/** What a project offers: the efforts each tier may run at and the agents a task may be given to. */
+function checkStaffing(value: unknown, where: string): void {
+  const staffing = keysOf(value, where, STAFFING)
+  if (Object.keys(staffing).length === 0) throw new Wrong(`config.json: ${where} offers nothing: name efforts or agents, or leave staffing out.`)
+  if (staffing.efforts !== undefined) {
+    if (!isObject(staffing.efforts)) throw new Wrong(`config.json: ${where}.efforts names tiers: ${TIERS.join(', ')}.`)
+    const efforts = staffing.efforts
+    if (Object.keys(efforts).length === 0) throw new Wrong(`config.json: ${where}.efforts names no tier: name one of ${TIERS.join(', ')}, or leave efforts out.`)
+    if (Object.keys(efforts).some(key => !(TIERS as readonly string[]).includes(key))) throw new Wrong(`config.json: ${where}.efforts names tiers: ${TIERS.join(', ')}.`)
+    for (const tier of TIERS) {
+      const list = efforts[tier]
+      if (list === undefined) continue
+      if (!Array.isArray(list) || list.length < 1 || list.length > 8 || !list.every(one => typeof one === 'string' && EFFORT.test(one)) || new Set(list).size !== list.length) {
+        throw new Wrong(`config.json: ${where}.efforts.${tier} is 1 to 8 different effort names, like "high".`)
+      }
+    }
+  }
+  if (staffing.agents !== undefined) {
+    const agents = staffing.agents
+    if (Array.isArray(agents) && agents.length === 0) throw new Wrong(`config.json: ${where}.agents is empty: name an agent, or leave agents out.`)
+    const one = (agent: unknown): boolean =>
+      isObject(agent) && Object.keys(agent).every(key => key === 'id' || key === 'about') &&
+      typeof agent.id === 'string' && AGENT_ID.test(agent.id) &&
+      typeof agent.about === 'string' && agent.about.length >= 1 && agent.about.length <= 200 && !/[\r\n]/.test(agent.about)
+    if (!Array.isArray(agents) || agents.length > 64 || !agents.every(one)) {
+      throw new Wrong(`config.json: ${where}.agents holds { "id", "about" }: an id like "builder" and one line on what the agent is for.`)
+    }
+    const ids = (agents as { id: string }[]).map(agent => agent.id)
+    const twice = ids.find((id, at) => ids.indexOf(id) !== at)
+    if (twice !== undefined) throw new Wrong(`config.json: ${where}.agents names "${twice}" twice.`)
   }
 }
 
@@ -136,6 +174,7 @@ function checkPlaces(value: unknown): void {
     }
     if (place.lore !== undefined) checkLore(place.lore, `${where}.lore`)
     if (place.check !== undefined) checkCheck(place.check, `${where}.check`)
+    if (place.staffing !== undefined) checkStaffing(place.staffing, `${where}.staffing`)
   })
 }
 
@@ -152,7 +191,7 @@ export function homeConfigProblem(config: ProjectConfig, kind: 'repository' | 'f
   if (config.places === undefined) {
     return 'config.json: this home is not a repository, so it lists its places, for example {"places": [{"folder": "studio", "teams": ["ABC"], "about": "what belongs there"}]}.'
   }
-  for (const key of ['lore', 'check', 'linear'] as const) {
+  for (const key of ['lore', 'check', 'linear', 'staffing'] as const) {
     if (config[key] !== undefined) return `config.json: in a home that is not a repository, ${key} belongs in a place: move it into the place it is for.`
   }
   if (config.tickets === 'github') return 'config.json: in a home that is not a repository, tickets are Linear: remove "tickets": "github".'
@@ -167,6 +206,7 @@ export function placeConfig(place: Place, team: string): ProjectConfig {
     linear: { team },
     ...(place.lore === undefined ? {} : { lore: place.lore }),
     ...(place.check === undefined ? {} : { check: place.check }),
+    ...(place.staffing === undefined ? {} : { staffing: place.staffing }),
   }
 }
 

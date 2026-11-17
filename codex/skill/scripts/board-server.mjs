@@ -4,13 +4,13 @@ import path from 'node:path';
 import http from 'node:http';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { complexityOf, selectModel } from './core/models.mjs';
+import { complexityOf, selectModel, staffLabel } from './core/models.mjs';
 import { parseLedger, RUN_ID } from './core/ledger.mjs';
 import { boardView, detail, problemDetail, timeline, runMinutes, elapsedShort } from './core/board.mjs';
 import { preflight } from './core/router.mjs';
 import { pendingLinear } from './linear.mjs';
 
-export const BOARD_PROTOCOL = 5;
+export const BOARD_PROTOCOL = 6;
 
 export const serverFile = (root, id, host = 'codex') => {
   if (!['claude', 'codex'].includes(host)) throw new Error('Invalid board host.');
@@ -26,6 +26,7 @@ export function snapshot(file, offset = 0, host = 'codex') {
   const now = Date.now();
   const view = boardView(ledger, now);
   const task = row => ({ id: row.id, title: row.title, status: row.status, tier: row.tier, complexity: host === 'claude' ? row.tier : complexityOf(row.tier),
+    staffing: staffLabel({ ...row, tier: host === 'claude' ? row.tier : complexityOf(row.tier) }),
     modelSelection: row.status === 'done' ? undefined : selectModel(host, row.tier, host === 'codex' ? raw.codex?.models : undefined), recordedModel: row.model,
     files: row.files ?? [], dependsOn: row.dependsOn ?? [], note: row.note, ticket: row.ticket,
     activity: row.activity && Number.isFinite(Date.parse(row.activity.at)) ? { ...row.activity, ageMinutes: Math.max(0, Math.floor((now - Date.parse(row.activity.at)) / 60_000)) } : undefined,

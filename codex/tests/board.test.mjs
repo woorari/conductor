@@ -213,3 +213,23 @@ test('the Claude entry builds its local runtime once and reuses its host-specifi
   assert.equal(fs.readdirSync(native).filter(name => name.startsWith('.html-runtime-')).length, 1);
   const info = JSON.parse(fs.readFileSync(serverFile(root, 'run', 'claude'), 'utf8')); assert.equal(info.host, 'claude');
 });
+
+test('the board snapshot carries the pick as a staffing label, and an unstaffed task is unchanged', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'conductor board staffing '));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const app = new Conductor(root); app.init();
+  fs.mkdirSync(path.join(root, '.claude/conductor'), { recursive: true });
+  fs.writeFileSync(path.join(root, '.claude/conductor/config.json'), JSON.stringify({ staffing: { efforts: { sonnet: ['low', 'high'] }, agents: [{ id: 'builder', about: 'Writes.' }] } }));
+  await app.conduct({ id: 'run', source: 'Build a live board', title: 'Staffed board' });
+  await app.apply('run', 'task_add', { id: 'one', title: 'First task', tier: 'sonnet', tierReason: 'Implementation', files: ['one.txt'], agent: 'builder', effort: 'high' });
+  const file = path.join(root, '.codex/conductor/runs/run/ledger.json');
+  const codex = snapshot(file, 0, 'codex').groups.next[0];
+  assert.equal(codex.staffing, 'implementation · high · builder');
+  assert.equal(snapshot(file, 0, 'claude').groups.next[0].staffing, 'sonnet · high · builder');
+  const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+  delete raw.tasks[0].agent; delete raw.tasks[0].effort;
+  fs.writeFileSync(file, JSON.stringify(raw));
+  const plain = snapshot(file, 0, 'codex').groups.next[0];
+  assert.equal(plain.staffing, plain.complexity);
+  assert.equal(snapshot(file, 0, 'claude').groups.next[0].staffing, 'sonnet');
+});

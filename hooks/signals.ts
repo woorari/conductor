@@ -1,6 +1,7 @@
-import type { Activity, ModelTier, ProblemSeverity, TaskStatus, Ticket } from '../types'
+import type { Activity, ModelTier, ProblemSeverity, Staffing, TaskStatus, Ticket } from '../types'
 import { LINEAR_KEY, RUN_ID, STATUSES, TIERS } from './ledger'
 import { REVISION } from './lore'
+import { staffLabel } from './models'
 import { LOOK_AGAIN_MIN, afterDone, dueForLook, isUnderway, lostWith, named, standing, standingText } from './problems'
 
 /**
@@ -308,27 +309,67 @@ const describe = (caller: Caller): string =>
 
 const TITLE_MAX = 120
 
+type Pick = { tier?: unknown; agent?: unknown; effort?: unknown; reason?: unknown }
+
+/** The staffing the run was created with: the only one a pick is checked against. */
+const staffingOf = (raw: Raw): Staffing | undefined => (raw.run as { config?: { staffing?: Staffing } } | undefined)?.config?.staffing
+
+const labelOf = (task: RawTask): string => staffLabel(task as RawTask & { tier: ModelTier })
+
+const NONE_OFFERED = 'This project offers no agents or efforts to pick from: a task takes a tier and a reason.'
+
 /**
- * A task's tier is set before it starts. The orchestrator gives its reason
- * and leaves a tier the owner set alone; the owner's word needs no reason.
+ * A task's tier, effort and agent are set before it starts. The orchestrator
+ * gives its one reason and leaves a pick the owner made alone; the owner's
+ * word needs no reason. Nothing is written until the whole pick is valid.
  */
-function retier(task: RawTask, caller: Caller, tier: unknown, reason: unknown): Outcome | undefined {
-  const next = TIERS.find(one => one === tier)
+function restaff(raw: Raw, task: RawTask, caller: Caller, pick: Pick): Outcome | undefined {
+  const next = TIERS.find(one => one === pick.tier)
   if (next === undefined) return refused(`tier is one of ${TIERS.join(', ')}: opus for architecture and design, sonnet for challenging development, haiku for easy jobs.`)
   if (caller.kind !== 'orchestrator' && caller.kind !== 'owner') return refused('Only the orchestrator and the owner set a task’s tier.')
   if (task.status !== 'queued') {
     return refused(`${task.id} is ${task.status}; a tier is set before a task starts.`)
   }
-  if (caller.kind === 'owner') {
-    task.tier = next
-    task.tierBy = 'owner'
-
-    return undefined
+  if (caller.kind === 'orchestrator') {
+    if (task.tierBy === 'owner') return refused(`The owner set ${task.id} to ${String(task.tier)}; only they change it.`)
+    if (typeof pick.reason !== 'string' || tidy(pick.reason) === '') return refused('Say in one line why the task has this tier: {"tier": "...", "tierReason": "..."}.')
   }
-  if (task.tierBy === 'owner') return refused(`The owner set ${task.id} to ${String(task.tier)}; only they change it.`)
-  if (typeof reason !== 'string' || tidy(reason) === '') return refused('Say in one line why the task has this tier: {"tier": "...", "tierReason": "..."}.')
+  const staffing = staffingOf(raw)
+  if (staffing === undefined && (pick.agent !== undefined || pick.effort !== undefined)) return refused(NONE_OFFERED)
+  const agents = staffing?.agents ?? []
+  const offered = staffing?.efforts?.[next] ?? []
+  let agent = typeof task.agent === 'string' ? task.agent : undefined
+  if (pick.agent !== undefined) {
+    if (agents.length === 0) return refused('This run offers no agents to pick from.')
+    const found = agents.find(one => one.id === pick.agent)
+    if (found === undefined) return refused(`${String(pick.agent)} is no agent of this run. It offers: ${agents.map(one => one.id).join(', ')}.`)
+    agent = found.id
+  }
+  let effort = typeof task.effort === 'string' ? task.effort : undefined
+  if (pick.effort !== undefined) {
+    if (offered.length === 0) return refused(`${next} takes no effort here.`)
+    if (typeof pick.effort !== 'string' || !offered.includes(pick.effort)) return refused(`${next} runs at ${offered.join(', ')} here, not at ${String(pick.effort)}.`)
+    effort = pick.effort
+  } else if (effort !== undefined && !offered.includes(effort)) {
+    // A tier that takes no effort lets the kept one go; one that takes others needs one named.
+    if (offered.length > 0) {
+      const fix = caller.kind === 'owner' ? ` Name one with /tier ${task.id} ${next} effort=<e>.` : ''
+
+      return refused(`${next} runs at ${offered.join(', ')} here, not at ${effort}.${fix}`)
+    }
+    effort = undefined
+  }
+  if (agents.length > 0 && agent === undefined) {
+    return refused(`Say who does the task: {"agent": "…"}. This run offers: ${agents.map(one => `${one.id} (${one.about})`).join('; ')}.`)
+  }
+  if (offered.length > 0 && effort === undefined) return refused(`Say how hard ${next} works on it: {"effort": "…"}. Here: ${offered.join(', ')}.`)
   task.tier = next
-  task.tierReason = tidy(reason).slice(0, NOTE_MAX)
+  if (agent === undefined) delete task.agent
+  else task.agent = agent
+  if (effort === undefined) delete task.effort
+  else task.effort = effort
+  if (caller.kind === 'owner') task.tierBy = 'owner'
+  else task.tierReason = tidy(pick.reason as string).slice(0, NOTE_MAX)
 
   return undefined
 }
@@ -372,16 +413,20 @@ export function approvePlan(raw: Raw, delivery: 'complete' | 'review-only' = 'co
   return changed(`Plan approved: ${raw.tasks.length} ${raw.tasks.length === 1 ? 'task' : 'tasks'} may start. ${delivery === 'complete' ? `Complete delivery includes reviewed PR merges into ${base}; no further per-task, file or publishing approval is needed within the approved deliverable.` : 'The owner limited delivery to review: main/base merges still need separate consent.'}`)
 }
 
-/** `/tier` and the pane's picker: the owner sets a queued task's tier. */
-export function ownerSetsTier(raw: Raw, taskId: string, tier: ModelTier): Outcome {
-  const task = raw.tasks.find(one => one.id === taskId)
+/** `/tier` and the pane's picker: the owner sets a queued task's tier, and with a staffed run its agent and effort. */
+export function ownerStaffs(raw: unknown, taskId: string, pick: { tier?: string; agent?: string; effort?: string }): Outcome {
+  const ledger = raw as Raw
+  const task = ledger.tasks.find(one => one.id === taskId)
   if (task === undefined) return refused(`There is no task ${taskId} in this run.`)
-  const was = String(task.tier)
-  const no = retier(task, { kind: 'owner' }, tier, undefined)
+  const was = labelOf(task)
+  const no = restaff(ledger, task, { kind: 'owner' }, { ...pick, tier: pick.tier === undefined ? task.tier : pick.tier })
   if (no !== undefined) return no
+  const now = labelOf(task)
 
-  return changed(was === tier ? `${taskId} stays on ${tier}, now by your word.` : `${taskId}: ${was} to ${tier}.`)
+  return changed(was === now ? `${taskId} stays on ${now}, now by your word.` : `${taskId}: ${was} to ${now}.`)
 }
+
+export const ownerSetsTier = (raw: Raw, taskId: string, tier: ModelTier): Outcome => ownerStaffs(raw, taskId, { tier })
 
 /** `task_add`: the orchestrator adds a task to the run, tagged with a tier and why. */
 export function addTask(raw: Raw, caller: Caller, input: Record<string, unknown>): Outcome {
@@ -411,7 +456,7 @@ export function addTask(raw: Raw, caller: Caller, input: Record<string, unknown>
   const loose = (addresses as string[]).find(one => !(raw.problems ?? []).some(problem => problem.id === one && problem.status === 'open'))
   if (loose !== undefined) return refused(`addresses names ${loose}, which is no open problem of this run.`)
   const task: RawTask = { id, title, tier: 'sonnet', status: 'queued' }
-  const no = retier(task, caller, input.tier, input.tierReason)
+  const no = restaff(raw, task, caller, { tier: input.tier, agent: input.agent, effort: input.effort, reason: input.tierReason })
   if (no !== undefined) return no
   if (input.ticket !== undefined) task.ticket = input.ticket
   if (dependsOn.length > 0) task.dependsOn = dependsOn
@@ -428,7 +473,7 @@ export function addTask(raw: Raw, caller: Caller, input: Record<string, unknown>
   const warns = shared.length > 0 ? ` It shares files with ${shared.join('; ')}: order them with dependsOn, or split the files.` : ''
   const deals = addresses.length > 0 ? ` It addresses ${named([...new Set(addresses as string[])])}.` : ''
 
-  return changed(`${id} added: ${String(task.tier)}, queued${after}.${deals}${warns}`)
+  return changed(`${id} added: ${labelOf(task)}, queued${after}.${deals}${warns}`)
 }
 
 /** `task_update`: where a task stands, what it is doing, its pull request and branch. */
@@ -474,6 +519,7 @@ export function updateTask(raw: Raw, at: string, caller: Caller, input: Record<s
       if (nextDependencies.some(dep => reaches(dep))) return refused('The dependency adjustment would create a cycle.')
     }
   }
+  const before = structuredClone(task)
   const said: string[] = []
   // A green task whose revision moved: its judgement no longer covers it.
   let movedFromGreen = false
@@ -520,10 +566,17 @@ export function updateTask(raw: Raw, at: string, caller: Caller, input: Record<s
       retiredNote = ` Its worker ${takenFrom} is retired: the mod refuses its tool calls from now on, so an attempt that still runs cannot change the workspace or the board. Start a worker again with ${id} as its name: it works in the same workspace and is told to look at what is there first.`
     }
   }
-  if (input.tier !== undefined) {
-    const no = retier(task, caller, input.tier, input.tierReason)
-    if (no !== undefined) return no
-    said.push(`tier ${String(task.tier)}`)
+  if (input.tier !== undefined || input.agent !== undefined || input.effort !== undefined) {
+    const no = restaff(raw, task, caller, { tier: input.tier === undefined ? task.tier : input.tier, agent: input.agent, effort: input.effort, reason: input.tierReason })
+    if (no !== undefined) {
+      // A refused pick changes nothing, the status applied just before it included.
+      for (const key of Object.keys(task)) delete task[key]
+      Object.assign(task, before)
+
+      return no
+    }
+    const dropped = before.effort !== undefined && task.effort === undefined ? ' (effort dropped)' : ''
+    said.push(`${input.agent === undefined && input.effort === undefined ? `tier ${String(task.tier)}` : `staffed ${labelOf(task)}`}${dropped}`)
   }
   if (input.note !== undefined) {
     if (typeof input.note !== 'string') return refused('note is a line of text; an empty one clears it.')

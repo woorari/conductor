@@ -162,6 +162,15 @@ describe('dashboardSvg', () => {
     }
   })
 
+  test('shows the pick of a staffed task where it shows the tier', () => {
+    const staffed = { effort: 'high', agent: 'builder' }
+    let ledger: Ledger = withTask('t391-1', { tier: 'opus', ...staffed })
+    ledger = { ...ledger, tasks: ledger.tasks.map(one => (one.id === 't392-1' ? { ...one, tier: 'opus', ...staffed } : one)) }
+    const source = draw(ledger, 720).source
+    for (const piece of ['t391-1 · opus · high · builder · writing the middleware test', '>t392-1 opus · high · builder<']) expect(source, piece).toContain(piece)
+    expect(draw(LEDGER, 720).source).toContain('>t392-1 haiku<')
+  })
+
   test('keeps everything inside its width, at pane widths from narrow to wide', () => {
     for (const width of [260, 320, 400, 560]) {
       const { source } = draw(LEDGER, width)

@@ -6,6 +6,7 @@ import {
   activityText,
   addTask,
   ownerSetsTier,
+  ownerStaffs,
   reportProblem,
   resolveProblem,
   spawned,
@@ -351,6 +352,166 @@ describe('tiers and new tasks', () => {
     expect(ownerSetsTier(raw(), 't391-1', 'haiku')).toMatchObject({ isError: true, text: 't391-1 is building; a tier is set before a task starts.' })
     expect(ownerSetsTier(raw(), 't999', 'haiku').isError).toBe(true)
     expect(OWNER.kind).toBe('owner')
+  })
+
+  const STAFFED = (): Raw => {
+    const ledger = raw()
+    ;(ledger.run as Record<string, unknown>).config = {
+      staffing: {
+        efforts: { opus: ['high'], sonnet: ['low', 'high'] },
+        agents: [{ id: 'builder', about: 'Writes the change.' }, { id: 'reviewer', about: 'Reads it.' }],
+      },
+    }
+
+    return ledger
+  }
+  const staff = (ledger: Raw, more: object = {}) =>
+    addTask(ledger, ORCHESTRATOR, { id: 't1', title: 'T', tier: 'sonnet', tierReason: 'Plain change.', agent: 'builder', effort: 'low', ...more })
+
+  test('a run without staffing takes a tier only', () => {
+    const ledger = raw()
+    expect(addTask(ledger, ORCHESTRATOR, { id: 't397-1', title: 'T', tier: 'sonnet', tierReason: 'r', dependsOn: ['t391-1'] }))
+      .toMatchObject({ text: 't397-1 added: sonnet, queued, after t391-1.' })
+    expect(addTask(ledger, ORCHESTRATOR, { id: 't397-2', title: 'T', tier: 'sonnet', tierReason: 'r', agent: 'builder' }))
+      .toMatchObject({ isError: true, text: 'This project offers no agents or efforts to pick from: a task takes a tier and a reason.' })
+    expect(task(ledger, 't397-2')).toBeUndefined()
+    expect(updateTask(ledger, AT, ORCHESTRATOR, { task: 't392-1', effort: 'low', tierReason: 'r' }))
+      .toMatchObject({ isError: true, text: 'This project offers no agents or efforts to pick from: a task takes a tier and a reason.' })
+    expect(task(ledger, 't392-1').effort).toBeUndefined()
+  })
+
+  test('a run whose staffing offers no agents refuses a given agent', () => {
+    const ledger = STAFFED()
+    ;((ledger.run as any).config.staffing as Record<string, unknown>).agents = []
+    const said = staff(ledger, { effort: 'low' })
+    expect(said).toMatchObject({ isError: true, text: 'This run offers no agents to pick from.' })
+    expect(task(ledger, 't1')).toBeUndefined()
+    delete ((ledger.run as any).config.staffing as Record<string, unknown>).agents
+    expect(staff(ledger)).toMatchObject({ isError: true, text: 'This run offers no agents to pick from.' })
+    expect(addTask(ledger, ORCHESTRATOR, { id: 't2', title: 'T', tier: 'sonnet', tierReason: 'r', effort: 'low' })).toMatchObject({ text: 't2 added: sonnet · low, queued.' })
+  })
+
+  test('an agent or effort the run does not offer is refused', () => {
+    const ledger = STAFFED()
+    const add = (more: object) => addTask(ledger, ORCHESTRATOR, { id: 't1', title: 'T', tier: 'sonnet', tierReason: 'r', ...more })
+    expect(add({ agent: 'wizard', effort: 'low' })).toMatchObject({ isError: true, text: 'wizard is no agent of this run. It offers: builder, reviewer.' })
+    expect(add({ agent: 'builder', effort: 'max' })).toMatchObject({ isError: true, text: 'sonnet runs at low, high here, not at max.' })
+    expect(add({ effort: 'low' })).toMatchObject({ isError: true, text: 'Say who does the task: {"agent": "…"}. This run offers: builder (Writes the change.); reviewer (Reads it.).' })
+    expect(add({ agent: 'builder' })).toMatchObject({ isError: true, text: 'Say how hard sonnet works on it: {"effort": "…"}. Here: low, high.' })
+    expect(task(ledger, 't1')).toBeUndefined()
+    expect(ledger).toEqual(STAFFED())
+  })
+
+  test('a complete pick is kept and named', () => {
+    const ledger = STAFFED()
+    expect(staff(ledger)).toMatchObject({ isChanged: true, text: 't1 added: sonnet · low · builder, queued.' })
+    expect(task(ledger, 't1')).toMatchObject({ tier: 'sonnet', effort: 'low', agent: 'builder', tierReason: 'Plain change.' })
+  })
+
+  test('a tier with no efforts takes none', () => {
+    const ledger = STAFFED()
+    expect(addTask(ledger, ORCHESTRATOR, { id: 't1', title: 'T', tier: 'haiku', tierReason: 'r', agent: 'builder' })).toMatchObject({ text: 't1 added: haiku · builder, queued.' })
+    expect(addTask(ledger, ORCHESTRATOR, { id: 't2', title: 'T', tier: 'haiku', tierReason: 'r', agent: 'builder', effort: 'low' })).toMatchObject({ isError: true, text: 'haiku takes no effort here.' })
+    expect(task(ledger, 't2')).toBeUndefined()
+  })
+
+  test('the checks read the run\'s staffing, not the file', () => {
+    const ledger = STAFFED()
+    expect(staff(ledger, { agent: 'reviewer' })).toMatchObject({ isChanged: true, text: 't1 added: sonnet · low · reviewer, queued.' })
+    const agents = (ledger.run as any).config.staffing.agents as { id: string }[]
+    agents.splice(1, 1)
+    expect(staff(ledger, { id: 't2', agent: 'reviewer' })).toMatchObject({ isError: true, text: 'reviewer is no agent of this run. It offers: builder.' })
+    expect(task(ledger, 't2')).toBeUndefined()
+  })
+
+  test('a failed task is re-queued and restaffed in one call', () => {
+    const ledger = STAFFED()
+    staff(ledger)
+    task(ledger, 't1').status = 'failed'
+    const said = updateTask(ledger, LATER, ORCHESTRATOR, { task: 't1', status: 'queued', tier: 'opus', effort: 'high', agent: 'reviewer', tierReason: 'Needs a second design.' })
+    expect(said).toMatchObject({ isChanged: true, isError: false })
+    expect(said.text).toContain('opus · high · reviewer')
+    expect(task(ledger, 't1')).toMatchObject({ status: 'queued', tier: 'opus', effort: 'high', agent: 'reviewer', tierReason: 'Needs a second design.' })
+  })
+
+  test('a refused restaff leaves the task as it was, status included', () => {
+    const ledger = STAFFED()
+    staff(ledger)
+    task(ledger, 't1').status = 'failed'
+    const before = JSON.parse(JSON.stringify(task(ledger, 't1')))
+    expect(updateTask(ledger, LATER, ORCHESTRATOR, { task: 't1', status: 'queued', agent: 'wizard', tierReason: 'r' }).isError).toBe(true)
+    expect(task(ledger, 't1')).toEqual(before)
+  })
+
+  test('a task that is building is not restaffed', () => {
+    const ledger = STAFFED()
+    staff(ledger)
+    task(ledger, 't1').status = 'building'
+    expect(updateTask(ledger, LATER, ORCHESTRATOR, { task: 't1', agent: 'reviewer', tierReason: 'r' }))
+      .toMatchObject({ isError: true, text: 't1 is building; a tier is set before a task starts.' })
+    expect(task(ledger, 't1').agent).toBe('builder')
+  })
+
+  test('a new tier needs an effort it offers', () => {
+    const ledger = STAFFED()
+    staff(ledger)
+    expect(updateTask(ledger, LATER, ORCHESTRATOR, { task: 't1', tier: 'opus', tierReason: 'r' }))
+      .toMatchObject({ isError: true, text: 'opus runs at high here, not at low.' })
+    expect(task(ledger, 't1')).toMatchObject({ tier: 'sonnet', effort: 'low' })
+    expect(updateTask(ledger, LATER, ORCHESTRATOR, { task: 't1', tier: 'opus', effort: 'high', tierReason: 'r' })).toMatchObject({ isChanged: true })
+    expect(task(ledger, 't1')).toMatchObject({ tier: 'opus', effort: 'high', agent: 'builder' })
+  })
+
+  test('a null tier is refused, not read as the task\'s own', () => {
+    const ledger = raw()
+    expect(updateTask(ledger, LATER, ORCHESTRATOR, { task: 't392-2', tier: null, tierReason: 'r' }))
+      .toMatchObject({ isError: true, text: expect.stringContaining('tier is one of') })
+    expect(ledger).toEqual(raw())
+  })
+
+  test('a tier that offers no effort drops the kept one', () => {
+    const ledger = STAFFED()
+    staff(ledger)
+    expect(updateTask(ledger, LATER, ORCHESTRATOR, { task: 't1', tier: 'haiku', tierReason: 'r' })).toMatchObject({ isChanged: true })
+    expect(task(ledger, 't1').effort).toBeUndefined()
+    expect(task(ledger, 't1')).toMatchObject({ tier: 'haiku', agent: 'builder' })
+  })
+
+  test('a dropped effort is said, and a pick that drops nothing says what it did before', () => {
+    const ledger = STAFFED()
+    staff(ledger)
+    expect(updateTask(ledger, LATER, ORCHESTRATOR, { task: 't1', tier: 'haiku', tierReason: 'r' }).text).toContain('t1: tier haiku (effort dropped).')
+    expect(updateTask(ledger, LATER, ORCHESTRATOR, { task: 't1', tier: 'sonnet', agent: 'builder', effort: 'high', tierReason: 'r' }).text).toContain('t1: staffed sonnet · high · builder.')
+    const dropped = STAFFED()
+    staff(dropped)
+    expect(updateTask(dropped, LATER, ORCHESTRATOR, { task: 't1', tier: 'haiku', agent: 'reviewer', tierReason: 'r' }).text).toContain('t1: staffed haiku · reviewer (effort dropped).')
+    const plain = STAFFED()
+    staff(plain, { tier: 'haiku', effort: undefined })
+    delete (plain.run as any).config.staffing.efforts.haiku
+    expect(updateTask(plain, LATER, ORCHESTRATOR, { task: 't1', tier: 'haiku', tierReason: 'r2' }).text, 'no effort to drop').toContain('t1: tier haiku.')
+  })
+
+  test('a tier-only pick the task\'s effort does not fit names the command that fixes it', () => {
+    const ledger = STAFFED()
+    staff(ledger)
+    expect(ownerSetsTier(ledger, 't1', 'opus')).toMatchObject({
+      isError: true,
+      text: 'opus runs at high here, not at low. Name one with /tier t1 opus effort=<e>.',
+    })
+    expect(task(ledger, 't1')).toMatchObject({ tier: 'sonnet', effort: 'low' })
+    expect(updateTask(ledger, LATER, ORCHESTRATOR, { task: 't1', tier: 'opus', tierReason: 'r' }).text, 'the orchestrator\'s refusal keeps its words').toBe('opus runs at high here, not at low.')
+  })
+
+  test('the owner\'s pick stands', () => {
+    const ledger = STAFFED()
+    staff(ledger)
+    expect(ownerStaffs(ledger, 't1', { agent: 'reviewer' })).toMatchObject({ isChanged: true, text: 't1: sonnet · low · builder to sonnet · low · reviewer.' })
+    expect(task(ledger, 't1')).toMatchObject({ agent: 'reviewer', tierBy: 'owner' })
+    expect(updateTask(ledger, LATER, ORCHESTRATOR, { task: 't1', agent: 'builder', tierReason: 'r' }))
+      .toMatchObject({ isError: true, text: 'The owner set t1 to sonnet; only they change it.' })
+    expect(task(ledger, 't1').agent).toBe('reviewer')
+    expect(ownerStaffs(ledger, 't1', { agent: 'wizard' }).isError).toBe(true)
+    expect(ownerSetsTier(ledger, 't1', 'sonnet')).toMatchObject({ isChanged: true, text: 't1 stays on sonnet · low · reviewer, now by your word.' })
   })
 })
 

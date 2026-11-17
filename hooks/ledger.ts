@@ -331,6 +331,13 @@ function stall(value: unknown, where: string): Stall | undefined {
   return { at: timeOf(from, 'at', where), problem: text(from, 'problem', where) }
 }
 
+function staffed(from: Fields, where: string): { agent?: string; effort?: string } {
+  const agent = optionalText(from, 'agent', where)
+  const effort = optionalText(from, 'effort', where)
+
+  return { ...(agent === undefined ? {} : { agent }), ...(effort === undefined ? {} : { effort }) }
+}
+
 function task(value: unknown, where: string): Task {
   const from = fields(value, where)
   const dependsOn = texts(from.dependsOn, `${where}.dependsOn`)
@@ -342,6 +349,8 @@ function task(value: unknown, where: string): Task {
     title: text(from, 'title', where),
     tier: oneOf(from, 'tier', where, TIERS),
     tierReason: optionalText(from, 'tierReason', where),
+    // Left out, not undefined, when the task has none: a ledger written before staffing reads back unchanged.
+    ...staffed(from, where),
     tierBy: from.tierBy === undefined ? undefined : oneOf(from, 'tierBy', where, ['owner'] as const),
     status: oneOf(from, 'status', where, STATUSES),
     ticket: optionalTicket(from, 'ticket', where),

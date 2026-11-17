@@ -46,7 +46,7 @@ import { checkWorkspaceOf, isInside, removals, runBranchOf, runWorkspaceOf, task
 import type { RepositoryInfo } from './lore'
 import { pauseRun, unpauseRun } from './pause'
 import { LOOK_AGAIN_MIN, dueForLook, isUnderway, unsettled } from './problems'
-import { APPROVED, PLANNING, conducting, isApproval, newRun, planning } from './plan'
+import { APPROVED, conducting, isApproval, newRun, planning, planningOf } from './plan'
 import type { Conducting } from './plan'
 import { ORCHESTRATOR, briefing, digest, post, relative, rule, touch, waiting } from './posts'
 import { HELPER_TYPES, MAX_BUILDING, familyOf, route, unlocked } from './router'
@@ -59,6 +59,7 @@ import {
   askAgain,
   assignProblem,
   ownerSetsTier,
+  ownerStaffs,
   gauge,
   heldUp,
   markRead,
@@ -1740,13 +1741,13 @@ async function heard(
 }
 
 /** The owner picked a tier, in the pane or with /tier. Answers the line to show them. */
-async function pick($: EngineInterface, taskId: string, tier: string): Promise<string> {
+async function pick($: EngineInterface, taskId: string, tier: string, more: { agent?: string; effort?: string } = {}): Promise<string> {
   const chosen = TIERS.find(one => one === tier)
   if (chosen === undefined) return `${tier} is no tier: ${TIERS.join(', ')}.`
   const path = await boundLedger($)
   if (path === undefined) return unbound($)
   const written = await mutate($, path, raw => {
-    const outcome = ownerSetsTier(raw, taskId, chosen satisfies ModelTier)
+    const outcome = ownerStaffs(raw, taskId, { tier: chosen satisfies ModelTier, ...more })
 
     return { value: outcome, isChanged: outcome.isChanged }
   })
@@ -3490,6 +3491,8 @@ async function switchOn($: EngineInterface): Promise<void> {
         status: { type: 'string', enum: [...STATUSES] },
         tier: { type: 'string', enum: [...TIERS], description: 'Only before the task starts, and only by the orchestrator.' },
         tierReason: { type: 'string', description: 'One line: why this tier. Required with tier.' },
+        agent: { type: 'string', description: 'The agent that does the task, from those this run offers' },
+        effort: { type: 'string', description: 'How hard the model works on it, from the efforts this run offers for the tier' },
         note: { type: 'string', description: 'One line: what it is doing now, or why it is blocked. An empty string clears it.' },
         ticket: { anyOf: [{ type: 'integer', minimum: 1 }, { type: 'string', pattern: TICKET_PATTERN }], description: 'The issue it belongs to, a GitHub number or a Linear key like ABC-12; the orchestrator\'s to set.' },
         pr: { type: 'integer', minimum: 1, description: 'The pull request\'s number.' },
@@ -3515,6 +3518,8 @@ async function switchOn($: EngineInterface): Promise<void> {
         title: { type: 'string', description: 'What the task delivers, in a few words.' },
         tier: { type: 'string', enum: [...TIERS] },
         tierReason: { type: 'string', description: 'One line: why this tier.' },
+        agent: { type: 'string', description: 'The agent that does the task, from those this run offers' },
+        effort: { type: 'string', description: 'How hard the model works on it, from the efforts this run offers for the tier' },
         ticket: { anyOf: [{ type: 'integer', minimum: 1 }, { type: 'string', pattern: TICKET_PATTERN }], description: 'The issue it belongs to: a GitHub number or a Linear key like ABC-12.' },
         dependsOn: { type: 'array', items: { type: 'string' }, description: 'Ids of tasks that must be done first.' },
         files: { type: 'array', items: { type: 'string' }, description: 'The files or folders the task is expected to change, relative to the repository. Findings on them reach its worker, and a second task on the same file is flagged.' },
@@ -4269,7 +4274,7 @@ export const register: Register = (on, options) => {
           ]
         : []),
       `- The mod writes the ledger. Never edit ledger.json: change it with ${TOOL_ADD}, ${TOOL_UPDATE}, ${TOOL_REPORT} and ${TOOL_RESOLVE}.`,
-      `- A run starts with a plan. Until you have proposed it with ${TOOL_PLAN} and the owner has approved it with /approve, no worker starts. Once they have, start the tasks that can start. ${PLANNING}`,
+      `- A run starts with a plan. Until you have proposed it with ${TOOL_PLAN} and the owner has approved it with /approve, no worker starts. Once they have, start the tasks that can start. ${planningOf(bound?.run.config?.staffing)}`,
       ORCHESTRATOR_ROLE,
       DELIVERY,
       `- Every worker is a task. Add it with ${TOOL_ADD}, tagged with a tier and why: opus for architecture and design, sonnet for challenging development, haiku for easy jobs. The owner may change a tier before the task starts; their choice stands.`,
@@ -4563,11 +4568,19 @@ export const register: Register = (on, options) => {
 
   on('command.run', { command: 'tier' }, async ($, e) => {
     const [taskId, tier, ...rest] = e.args.trim().split(/\s+/)
-    if (taskId === undefined || taskId === '' || tier === undefined || rest.length > 0) {
-      return { text: `Say which task and which tier: /tier <task id> <${TIERS.join('|')}>.` }
+    const more: { agent?: string; effort?: string } = {}
+    const isOptional = rest.every(token => {
+      const [key, ...value] = token.split('=')
+      if ((key !== 'effort' && key !== 'agent') || value.length !== 1 || value[0] === '' || more[key] !== undefined) return false
+      more[key] = value[0]
+
+      return true
+    })
+    if (taskId === undefined || taskId === '' || tier === undefined || !isOptional) {
+      return { text: `Say which task and which tier: /tier <task id> <${TIERS.join('|')}> [effort=<effort>] [agent=<agent>].` }
     }
 
-    return { text: await pick($, taskId, tier) }
+    return { text: await pick($, taskId, tier, more) }
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {

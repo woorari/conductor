@@ -1,7 +1,21 @@
-import type { Ledger } from '../types'
+import type { Ledger, Staffing } from '../types'
 import { RUN_ID } from './ledger'
 import { linearKeyOf } from './linear'
 import { FILES_PER_TASK, tidy } from './signals'
+
+/** What a project's staffing asks of each task, for step 2 of the plan: empty when the project offers nothing. */
+function offered(staffing: Staffing | undefined): string {
+  const agents = staffing?.agents ?? []
+  const efforts = Object.entries(staffing?.efforts ?? {}).filter(([, list]) => list.length > 0)
+  if (agents.length === 0 && efforts.length === 0) return ''
+  const needs = ['a tier', ...(agents.length > 0 ? ['an agent'] : []), ...(efforts.length > 0 ? ['an effort where its tier has one'] : [])]
+  const lists = [
+    ...(agents.length > 0 ? [`agents ${agents.map(one => `${one.id} (${one.about})`).join('; ')}`] : []),
+    ...(efforts.length > 0 ? [`efforts ${efforts.map(([tier, list]) => `${tier}: ${list.join(', ')}`).join('; ')}`] : []),
+  ]
+
+  return ` This run offers ${lists.join(', and ')}. A task then needs ${needs.join(', ')}, and one reason for all of them.`
+}
 
 /** What `/conduct` was asked to start. */
 export type Conducting = {
@@ -114,14 +128,17 @@ export const newRun = (id: string, source: string, at: string, title?: string, m
 export const planning = (id: string, source: string, title?: string): string =>
   `Run board: the owner started run \`${id}\` from ${source}${title === undefined ? '' : `, and calls it "${title}"`}. Plan it; start no worker yet.`
 
-/** How a run is planned: plan first, dispatch nothing. */
-export const PLANNING = [
+/** How a run is planned: plan first, dispatch nothing. A run whose project offers agents or efforts asks for them in step 2. */
+export const planningOf = (staffing?: Staffing): string => [
   'Planning a run, in this order:',
   '  1. Read the source. For a ticket: the parent issue, every sub-ticket it lists and the spec they link. For a spec document: read it, and draft the tickets it needs (short, each linking the spec). Do not file them yet.',
-  `  2. Slice the work into tasks with mcp__conductor__task_add. One task is one change a single worker can finish and hand back as one pull request without filling its context: one concern, at most ${FILES_PER_TASK} files or folders. Give each its ticket, the files it is expected to change, what it depends on, and a tier with the reason.`,
+  `  2. Slice the work into tasks with mcp__conductor__task_add. One task is one change a single worker can finish and hand back as one pull request without filling its context: one concern, at most ${FILES_PER_TASK} files or folders. Give each its ticket, the files it is expected to change, what it depends on, and a tier with the reason.${offered(staffing)}`,
   '  3. No two tasks that could run at the same time may change the same file: order them with dependsOn, or split the files. mcp__conductor__board_read lists what is still wrong under "Plan check".',
   '  4. Propose the plan with run_plan, show the approved outcome and expected files, explain that approval includes necessary implementation adjustments, publishing and reviewed base merges, then wait once. Expected files are estimates, not per-file consent boundaries. Honor explicit review-only limits; after approval, finish the outcome without reapproving routine files or follow-up fixes. For a spec run, file the approved drafted tickets before workers start and record each number with task_update.',
 ].join('\n')
+
+/** How a run that offers nothing to pick from is planned. */
+export const PLANNING = planningOf()
 
 export const APPROVED = 'Run board: the owner approved the plan.'
 

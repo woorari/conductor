@@ -310,7 +310,7 @@ export function briefing(ledger: Ledger, task: Task, project?: { brief: string; 
   return [
     '',
     '---',
-    `Run board (conductor). You are the worker for task \`${task.id}\` ("${task.title}") of run \`${ledger.run.id}\`, on the ${task.tier} tier.`,
+    `Run board (conductor). You are the worker for task \`${task.id}\` ("${task.title}") of run \`${ledger.run.id}\`, on the ${task.tier} tier${task.effort === undefined ? '' : `, at effort ${task.effort}`}${task.agent === undefined ? '' : `, as the ${task.agent} agent`}.`,
     ...(loreLines === undefined ? ['- Say where you stand with mcp__conductor__task_update: a note of what you are doing; review with pr and branch when your pull request is open; blocked or failed when you cannot go on. You cannot mark your task done: the orchestrator judges your hand-back.'] : [loreLines[0]!]),
     '- A problem you find: mcp__conductor__problem_report. A fact another worker may need: mcp__conductor__board_post, kind finding, with the files it concerns. A decision you need: board_post, kind question; go on with what does not depend on the answer, or set your task blocked and stop. mcp__conductor__board_read shows what the board holds for you.',
     ...(loreLines === undefined ? ['- You never merge and never push to the base branch. When your pull request is open, set your task to review and hand back: merging is the orchestrator\'s, through the board.'] : loreLines.slice(1)),

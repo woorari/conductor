@@ -150,6 +150,21 @@ test('/tier is the owner\'s word on a task that has not started, and it stands',
   expect(engine.spawns.at(-1)?.model, 'the worker runs on what the owner chose').toBe('opus')
 })
 
+test('/tier takes an effort and an agent the run offers, and the tools carry them', async ($, on) => {
+  const staffing = { efforts: { opus: ['high'], sonnet: ['low'] }, agents: [{ id: 'builder', about: 'Writes the change.' }] }
+  const { files } = await bound($, on, { ...LEDGER, run: { ...LEDGER.run, config: { staffing } } })
+
+  expect((await command($, 'tier', 't392-1 opus effort=high agent=builder')).text).toBe('t392-1: haiku to opus · high · builder.')
+  expect(task(files, 't392-1')).toMatchObject({ tier: 'opus', effort: 'high', agent: 'builder', tierBy: 'owner' })
+  expect((await command($, 'tier', 't392-1 opus effort=max')).text).toBe('opus runs at high here, not at max.')
+  expect((await command($, 'tier', 't392-1 opus mood=high')).text).toContain('[effort=<effort>] [agent=<agent>]')
+  const added = await call($, 'mcp__conductor__task_add', { id: 't397-1', title: 'More', tier: 'sonnet', tierReason: 'plain', effort: 'low', agent: 'builder' })
+  expect(added.text).toContain('sonnet · low · builder')
+  expect(task(files, 't397-1')).toMatchObject({ tier: 'sonnet', effort: 'low', agent: 'builder' })
+  const moved = await call($, 'mcp__conductor__task_update', { task: 't397-1', effort: 'low', agent: 'builder', tier: 'sonnet', tierReason: 'again' })
+  expect(moved.isError).toBeUndefined()
+})
+
 test('the pane has a tier picker for each task that has not started, in a bound session only', async ($, on) => {
   const { files, engine } = await bound($, on)
 

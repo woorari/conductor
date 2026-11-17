@@ -284,6 +284,14 @@ describe('what the board says to whom', () => {
     expect(digest(parsed(raw()), worker('t391-1'))).toBe('Nothing on the board concerns t391-1 yet.')
   })
 
+  test('a staffed worker is told its agent and effort; an unstaffed one only its tier', () => {
+    const ledger = busy()
+    const task = ledger.tasks.find(one => one.id === 't391-1')!
+    expect(briefing(ledger, { ...task, effort: 'high', agent: 'builder' })).toContain('on the sonnet tier, at effort high, as the builder agent.')
+    expect(briefing(ledger, { ...task, agent: 'builder' })).toContain('on the sonnet tier, as the builder agent.')
+    expect(briefing(ledger, { ...task, effort: 'high' })).toContain('on the sonnet tier, at effort high.')
+  })
+
   test('a worker starts knowing its task, how it reports and what the board already holds for it', () => {
     const ledger = busy()
     const text = briefing(ledger, ledger.tasks.find(one => one.id === 't391-1')!)
