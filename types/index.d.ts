@@ -32,6 +32,14 @@ export type CheckRecord = {
   line?: string
 }
 
+/** What a project offers when the orchestrator staffs a task. */
+export type Staffing = {
+  /** The efforts a task of that tier may run at. A tier left out takes no effort. */
+  efforts?: Partial<Record<ModelTier, string[]>>
+  /** The agents a task may be given to. */
+  agents?: { id: string; about: string }[]
+}
+
 /**
  * A project's own settings, `.claude/conductor/config.json`: every field
  * optional. A run keeps the copy it was started with.
@@ -49,6 +57,8 @@ export type ProjectConfig = {
   check?: { argv: string[]; timeoutMin: number }
   /** In a home that is not a repository: the folders inside it a run may work in. */
   places?: Place[]
+  /** The agents and efforts the project offers. */
+  staffing?: Staffing
 }
 
 /**
@@ -65,6 +75,8 @@ export type Place = {
   base?: string
   lore?: ProjectConfig['lore']
   check?: ProjectConfig['check']
+  /** The agents and efforts this place offers; else the project's. */
+  staffing?: Staffing
 }
 
 /** The kinds of workspace a run can work in. */
@@ -105,6 +117,10 @@ export type Task = {
   tier: ModelTier
   /** One line: why the task has this tier. The orchestrator gives it when it tags the task. */
   tierReason?: string
+  /** An id from the run's `config.staffing.agents`. Not `agentId`, which is the worker's session. */
+  agent?: string
+  /** One of the run's `config.staffing.efforts` for this task's tier. */
+  effort?: string
   /** `owner` once the person set the tier: the orchestrator then leaves it alone. */
   tierBy?: 'owner'
   status: TaskStatus

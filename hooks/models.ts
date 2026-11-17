@@ -19,3 +19,8 @@ export function selectModel(host: 'claude' | 'codex', tier: ModelTier, mapping: 
   }
   return { kind: 'explicit', model, label: model }
 }
+
+/** What was picked for a task, for a line on the board: tier, then effort, then agent, the absent ones left out. */
+export function staffLabel(task: { tier: ModelTier; effort?: string; agent?: string }): string {
+  return [task.tier, task.effort, task.agent].filter(part => part !== undefined).join(' · ')
+}

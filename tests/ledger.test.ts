@@ -49,6 +49,25 @@ describe('parseLedger', () => {
     expect(refused(withTask('t391-1', { startedAt: 'this morning' }))).toContain('tasks[2].startedAt')
   })
 
+  test('a ledger without agent or effort parses unchanged', () => {
+    const parsed = parseLedger(JSON.stringify(LEDGER))
+    expect('ledger' in parsed).toBe(true)
+    for (const task of parsed.ledger!.tasks) {
+      expect('agent' in task).toBe(false)
+      expect('effort' in task).toBe(false)
+    }
+  })
+
+  test('a task keeps its agent and effort', () => {
+    const task = parseLedger(JSON.stringify(withTask('t392-1', { agent: 'builder', effort: 'high' }))).ledger!.tasks.find(one => one.id === 't392-1')
+    expect(task).toMatchObject({ agent: 'builder', effort: 'high' })
+  })
+
+  test('an agent or effort that is not text is named as wrong', () => {
+    expect(refused(withTask('t392-1', { agent: 7 as never }))).toContain('agent')
+    expect(refused(withTask('t392-1', { effort: 7 as never }))).toContain('effort')
+  })
+
   test('refuses a run id that could leave the runs folder', () => {
     expect(refused({ ...LEDGER, run: { ...LEDGER.run, id: '../x' } })).toContain('run.id')
   })
