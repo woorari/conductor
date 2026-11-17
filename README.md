@@ -228,6 +228,7 @@ A project may offer agents and efforts next to the model tiers. It does so with 
 
 - `efforts`: for each tier, the efforts a task of that tier may run at. The keys are tiers (`opus`, `sonnet`, `haiku`). Each list is 1 to 8 different names: lowercase letters, digits and hyphens, starting with a letter, at most 24 characters. A tier left out takes no effort.
 - `agents`: the agents a task may be given to, at most 64. Each has an `id` (lowercase letters, digits and hyphens, at most 64 characters, unique) and an `about` (one line, 1 to 200 characters) that tells the orchestrator what the agent is for. No other key is allowed.
+- A `staffing` block, an `efforts` object and an `agents` list may not be empty: the config is refused with the empty field named. Leave the setting out to offer nothing.
 - Both are optional. A project with no `staffing` plans as before: a task has a tier and a reason, and naming an agent or an effort is refused.
 - A run keeps the staffing it was started with. Changing the file later changes nothing in that run.
 - In a home that is not a repository, `staffing` belongs in a place, like `lore` and `check`; a top-level one is refused. A place without one offers nothing.
@@ -236,7 +237,7 @@ A project may offer agents and efforts next to the model tiers. It does so with 
 How a run uses it:
 
 - When the run offers agents, the orchestrator picks an agent for every task. When a task's tier has efforts, it picks an effort too. It gives one reason for the tier, the agent and the effort together.
-- A pick is checked against the run's staffing. An agent or an effort the run does not offer is refused, the task stays as it was, and the message lists what the run offers. A run with no agents refuses an agent pick with "This run offers no agents to pick from." When a task moves to a tier that offers no efforts, a kept effort is dropped.
+- A pick is checked against the run's staffing. An agent or an effort the run does not offer is refused, the task stays as it was, and the message lists what the run offers. A run with no agents refuses an agent pick with "This run offers no agents to pick from." When a task moves to a tier that offers no efforts, a kept effort is dropped, and the outcome says so. When the new tier offers efforts but not the kept one, the pick is refused until a new effort is named; the pane's picker and the board's picker set the tier only, so they are refused too, and the refusal points to `/tier <task> <tier> effort=<e>`.
 - You overrule a pick with `/tier <task> <tier> [effort=<e>] [agent=<a>]`; no reason is needed, and the orchestrator leaves a pick of yours alone. The pane's picker sets the tier only.
 - A pick is set while a task is queued. Once the task has started, it cannot change.
 - A failed task is re-queued and restaffed by the orchestrator in one `task_update` call, with a new reason.
