@@ -3,7 +3,7 @@ import type { Engine } from 'claude-code/testing'
 
 import { parseLedger } from '../hooks/ledger'
 import { handover } from '../hooks/handover'
-import { APPROVED, CONDUCT_USAGE, PLANNING, conducting, newRun, planning } from '../hooks/plan'
+import { APPROVED, CONDUCT_USAGE, PLANNING, conducting, newRun, planning, planningOf } from '../hooks/plan'
 import { briefing } from '../hooks/posts'
 import { preflight, route } from '../hooks/router'
 import { addTask, approvePlan, proposePlan, spawned, updateTask } from '../hooks/signals'
@@ -25,6 +25,20 @@ describe('a run starts with a plan', () => {
     expect(fresh.run).toEqual({ id: 'capacity', title: 'Run capacity', source: '#334', startedAt: AT, plan: 'draft' })
     expect(planning('capacity', '#334')).toBe('Run board: the owner started run `capacity` from #334. Plan it; start no worker yet.')
     expect(PLANNING, 'how a run is planned is a standing instruction').toContain('at most 12 files or folders')
+  })
+
+  test('the plan asks for what the run offers, and for nothing when it offers nothing', () => {
+    expect(planningOf(undefined)).toBe(PLANNING)
+    expect(planningOf({})).toBe(PLANNING)
+    const staffed = planningOf({
+      efforts: { opus: ['high'], sonnet: ['low', 'high'] },
+      agents: [{ id: 'builder', about: 'Writes the change.' }, { id: 'reviewer', about: 'Reads it.' }],
+    })
+    expect(staffed.startsWith(PLANNING.split('\n  3.')[0]!)).toBe(true)
+    for (const piece of ['builder (Writes the change.)', 'reviewer (Reads it.)', 'opus: high', 'sonnet: low, high', 'an agent', 'an effort where its tier has one', 'one reason']) expect(staffed).toContain(piece)
+    expect(staffed.split('\n').slice(3)).toEqual(PLANNING.split('\n').slice(3))
+    expect(planningOf({ efforts: { opus: ['high'] } })).not.toContain('an agent')
+    expect(planningOf({ agents: [{ id: 'builder', about: 'x' }] })).not.toContain('an effort')
   })
 
   test('no worker starts while the plan is a draft or waits for the owner', () => {

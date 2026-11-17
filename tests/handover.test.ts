@@ -36,6 +36,14 @@ describe('the handover', () => {
     expect(text.match(/^- t\d/gm)).toHaveLength(LEDGER.tasks.filter(one => one.status !== 'done').length)
   })
 
+  test('shows what was picked for a task beside its status', () => {
+    const ledger = raw()
+    Object.assign(ledger.tasks.find(one => one.id === 't392-2')!, { tier: 'opus', effort: 'high', agent: 'builder' })
+    const text = handover(parsed(ledger), { at: AT })
+    expect(text).toContain('- t392-2 [queued, opus · high · builder] Clients retry a busy read')
+    expect(text).toContain('- t391-1 [building, sonnet] Pool exhaustion answers 503')
+  })
+
   test('names the done tasks on one line: what they held is merged and needs no rereading', () => {
     const text = handover(busy(), { at: AT })
     expect(text).toContain('\n- Done: t390-1, t390-2\n')

@@ -137,6 +137,12 @@ describe('the lines the pane draws', () => {
     expect(detail(view.waiting[0]!)).toBe('sonnet · ticket 392 · after t391-1, t392-1')
   })
 
+  test('a task with an effort and an agent says all three, and one without says its tier', () => {
+    const staffed = boardView(withTask('t392-2', { tier: 'opus', effort: 'high', agent: 'builder' }), NOW)
+    expect(detail(staffed.waiting[0]!)).toBe('opus · high · builder · ticket 392 · after t391-1, t392-1')
+    expect(detail(view.waiting[0]!)).toBe('sonnet · ticket 392 · after t391-1, t392-1')
+  })
+
   test('a blocked task says so and why', () => {
     expect(detail(view.attention[0]!)).toBe('blocked · opus · w396 · ticket 396 · needs the second box')
   })

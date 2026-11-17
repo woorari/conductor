@@ -1,6 +1,7 @@
 import type { Ledger, Merge, Problem, Task } from '../types'
 import { DELIVERY, ORCHESTRATOR_ROLE } from './delivery'
 import { short } from './merge'
+import { staffLabel } from './models'
 import { standing, standingText } from './problems'
 import { preflight } from './router'
 
@@ -41,7 +42,7 @@ const taskLine = (task: Task): string => {
     task.note === undefined ? '' : `note: ${task.note}`,
   ].filter(one => one !== '')
 
-  return `- ${task.id} [${task.status}, ${task.tier}] ${task.title}${who}${more.length > 0 ? ` · ${more.join(' · ')}` : ''}`
+  return `- ${task.id} [${task.status}, ${staffLabel(task)}] ${task.title}${who}${more.length > 0 ? ` · ${more.join(' · ')}` : ''}`
 }
 
 /** `P2 blocker (t391-1), no task: …`: who found it or what it holds up, and who deals with it. */

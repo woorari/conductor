@@ -462,6 +462,13 @@ describe('tiers and new tasks', () => {
     expect(task(ledger, 't1')).toMatchObject({ tier: 'opus', effort: 'high', agent: 'builder' })
   })
 
+  test('a null tier is refused, not read as the task\'s own', () => {
+    const ledger = raw()
+    expect(updateTask(ledger, LATER, ORCHESTRATOR, { task: 't392-2', tier: null, tierReason: 'r' }))
+      .toMatchObject({ isError: true, text: expect.stringContaining('tier is one of') })
+    expect(ledger).toEqual(raw())
+  })
+
   test('a tier that offers no effort drops the kept one', () => {
     const ledger = STAFFED()
     staff(ledger)

@@ -1,4 +1,5 @@
 import type { Ledger, Orchestrator, Post, Problem, ProblemSeverity, Task, TaskStatus } from '../types'
+import { staffLabel } from './models'
 import { needsTask, standing, standingText } from './problems'
 import type { Standing } from './problems'
 import { readiness } from './router'
@@ -188,7 +189,7 @@ export function detail(row: TaskRow, tierLabel: (tier: Task['tier']) => string =
   if (row.merging !== undefined) parts.push(row.mergeMinutes === undefined ? row.merging : `${row.merging} ${elapsed(row.mergeMinutes)}`)
   else if (row.status === 'green') parts.push('ready to merge')
   if (row.status === 'review') parts.push('in review')
-  if (row.status !== 'done') parts.push(tierLabel(row.tier))
+  if (row.status !== 'done') parts.push(staffLabel({ ...row, tier: tierLabel(row.tier) }))
   if (row.worker !== undefined && row.status !== 'queued' && row.status !== 'done') parts.push(row.worker)
   if (row.minutes !== undefined) parts.push(elapsed(row.minutes))
   if (row.silentMinutes !== undefined) parts.push(`silent ${elapsed(row.silentMinutes)}`)

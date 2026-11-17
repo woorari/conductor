@@ -415,7 +415,7 @@ export function ownerStaffs(raw: unknown, taskId: string, pick: { tier?: string;
   const task = ledger.tasks.find(one => one.id === taskId)
   if (task === undefined) return refused(`There is no task ${taskId} in this run.`)
   const was = labelOf(task)
-  const no = restaff(ledger, task, { kind: 'owner' }, { ...pick, tier: pick.tier ?? task.tier })
+  const no = restaff(ledger, task, { kind: 'owner' }, { ...pick, tier: pick.tier === undefined ? task.tier : pick.tier })
   if (no !== undefined) return no
   const now = labelOf(task)
 
@@ -563,7 +563,7 @@ export function updateTask(raw: Raw, at: string, caller: Caller, input: Record<s
     }
   }
   if (input.tier !== undefined || input.agent !== undefined || input.effort !== undefined) {
-    const no = restaff(raw, task, caller, { tier: input.tier ?? task.tier, agent: input.agent, effort: input.effort, reason: input.tierReason })
+    const no = restaff(raw, task, caller, { tier: input.tier === undefined ? task.tier : input.tier, agent: input.agent, effort: input.effort, reason: input.tierReason })
     if (no !== undefined) {
       // A refused pick changes nothing, the status applied just before it included.
       for (const key of Object.keys(task)) delete task[key]
