@@ -385,3 +385,48 @@ test('a config that does not parse stops conduct', async t => {
   await assert.rejects(() => app.conduct({ id: 'run', source: 'Test request' }), { message: 'config.json: "staffing.teams" is no setting here (efforts, agents).' });
   assert.equal(fs.existsSync(app.ledgerFile('run')), false);
 });
+
+const ROSTER = { efforts: { sonnet: ['low', 'high'], opus: ['high'] }, agents: [{ id: 'builder', about: 'Writes.' }] };
+async function staffed(t, staffing = ROSTER) {
+  const { app, root } = fixture(t);
+  app.init();
+  configure(root, { staffing });
+  await app.conduct({ id: 'run', source: 'Test request', title: 'Test run' });
+  return app;
+}
+const staffedAdd = (app, id, more = {}) => app.apply('run', 'task_add', { id, title: `Task ${id}`, tier: 'sonnet', tierReason: 'Implementation task', files: [`${id}.txt`], agent: 'builder', effort: 'high', ...more });
+
+test('the worker brief and the worktree result name the agent and the effort', async t => {
+  const app = await staffed(t);
+  await staffedAdd(app, 'one'); await propose(app); await approve(app);
+  const work = await app.worktree('run', { task: 'one' });
+  assert.equal(work.agent, 'builder'); assert.equal(work.effort, 'high');
+  assert.match(app.brief('run', 'one'), / Agent: builder\. Effort: high\. Previous worker model IDs/);
+});
+
+test('an effort the run does not offer is refused and the task stays as it was', async t => {
+  const app = await staffed(t);
+  await staffedAdd(app, 'one');
+  const refused = await app.apply('run', 'tier', { task: 'one', tier: 'sonnet', effort: 'max' }, owner);
+  assert.equal(refused.isError, true);
+  assert.equal(refused.text, 'sonnet runs at low, high here, not at max.');
+  assert.equal(app.load('run').tasks[0].effort, 'high');
+});
+
+test('a run that offers no agents refuses an agent pick', async t => {
+  const app = await staffed(t, { efforts: { sonnet: ['low', 'high'] } });
+  await staffedAdd(app, 'one', { agent: undefined });
+  const refused = await app.apply('run', 'tier', { task: 'one', tier: 'sonnet', agent: 'builder' }, owner);
+  assert.equal(refused.isError, true);
+  assert.equal(refused.text, 'This run offers no agents to pick from.');
+  assert.equal(app.load('run').tasks[0].agent, undefined);
+});
+
+test('a kept effort is dropped when the new tier offers none, and the outcome says so', async t => {
+  const app = await staffed(t);
+  await staffedAdd(app, 'one');
+  const moved = await app.apply('run', 'task_update', { task: 'one', tier: 'haiku', tierReason: 'Only docs' });
+  assert.equal(moved.isError, false);
+  assert.match(moved.text, /one: tier haiku \(effort dropped\)\./);
+  assert.deepEqual([app.load('run').tasks[0].tier, app.load('run').tasks[0].effort, app.load('run').tasks[0].agent], ['haiku', undefined, 'builder']);
+});
