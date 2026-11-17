@@ -20,7 +20,7 @@ export function selectModel(host: 'claude' | 'codex', tier: ModelTier, mapping: 
   return { kind: 'explicit', model, label: model }
 }
 
-/** What was picked for a task, for a line on the board: tier, then effort, then agent, the absent ones left out. */
+/** The pick joined with ' · ': the tier as given (the Codex host passes its complexity word), then effort, then agent. A part left undefined is skipped; an empty string is not. */
 export function staffLabel(task: { tier: string; effort?: string; agent?: string }): string {
   return [task.tier, task.effort, task.agent].filter(part => part !== undefined).join(' · ')
 }
