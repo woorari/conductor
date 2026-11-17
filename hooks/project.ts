@@ -188,7 +188,7 @@ export function homeConfigProblem(config: ProjectConfig, kind: 'repository' | 'f
   if (config.places === undefined) {
     return 'config.json: this home is not a repository, so it lists its places, for example {"places": [{"folder": "studio", "teams": ["ABC"], "about": "what belongs there"}]}.'
   }
-  for (const key of ['lore', 'check', 'linear'] as const) {
+  for (const key of ['lore', 'check', 'linear', 'staffing'] as const) {
     if (config[key] !== undefined) return `config.json: in a home that is not a repository, ${key} belongs in a place: move it into the place it is for.`
   }
   if (config.tickets === 'github') return 'config.json: in a home that is not a repository, tickets are Linear: remove "tickets": "github".'

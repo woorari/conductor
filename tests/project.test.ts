@@ -180,6 +180,9 @@ describe('places: a home that is not a repository', () => {
     expect(homeConfigProblem({ places, tickets: 'linear' }, 'folder')).toBeUndefined()
     expect(homeConfigProblem({ places }, 'folder')).toBeUndefined()
     expect(homeConfigProblem({ lore: {} }, 'repository')).toBeUndefined()
+    const staffing = { agents: [{ id: 'builder', about: 'Writes the change.' }] }
+    expect(homeConfigProblem({ places, staffing }, 'folder')).toBe('config.json: in a home that is not a repository, staffing belongs in a place: move it into the place it is for.')
+    expect(homeConfigProblem({ staffing }, 'repository'), 'a repository home keeps its staffing at the top').toBeUndefined()
   })
 
   test("placeConfig: a run takes its place's settings in today's shape", () => {
