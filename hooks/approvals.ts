@@ -94,8 +94,10 @@ export async function loreRunOf(host: ApprovalHost): Promise<{ path: string; led
 
 /**
  * `/approve-main`: the owner approves the run branch's revision for the base
- * branch, and the host merges exactly that revision into the protected base.
- * Only the owner's own origin counts; any other merges nothing.
+ * branch, and the host merges exactly that revision into the protected base,
+ * protecting it again whatever happens. Refused while anything stands in the
+ * way, when the run branch moved, or when the base moved since the run branch
+ * last took it in. Only the owner's own origin counts; any other merges nothing.
  */
 export async function approveMain(host: ApprovalHost, origin: string, signal?: AbortSignal): Promise<string> {
   if (!OWNER_ORIGINS.has(origin)) return 'Not done. /approve-main is the owner\'s: only the owner types it, in the terminal, the desktop app or Remote Control. Nothing was merged.'

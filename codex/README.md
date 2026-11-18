@@ -79,7 +79,7 @@ Who may run what with a proven caller (a command not listed here is refused to e
 | `list`, `board`, `digest` | anyone; no token needed |
 | `init`, `conduct` (its `id` equals the token's run, its `department` the token's), `board_open`, `board_close`, `run_plan`, `merge_check`, `merge`, `run_check`, `run_sync_base`, `handover`, `reconcile`, `task_add`, `board_rule`, `problem_report`, `problem_assign`, `problem_resolve` | the run's orchestrator |
 | `worktree` | the run's orchestrator, or a dispatcher of the run's department (its input is `{task}` and nothing else) |
-| `task_update` | the run's orchestrator; a worker for its own task only (it may set the status to `review`, `blocked` or `failed` and no other); a dispatcher, which sets the status of a task to `returned` or `blocked` (with an optional `note`) and nothing else, so `files`, `dependsOn`, `tier`, `agent`, `effort`, `pr`, `branch` and the rest are refused |
+| `task_update` | the run's orchestrator; a worker for its own task only (it may set the status to `review`, `blocked` or `failed` and no other); a dispatcher, which sets the status of a task to `returned` or `blocked` (with an optional `note`) and nothing else, and only for a task with no live worker (no `agentId`): `blocked` from `queued` or from `building`, `returned` from `building`, refused from any other status, so `files`, `dependsOn`, `tier`, `agent`, `effort`, `pr`, `branch` and the rest are refused |
 | `brief` | the run's orchestrator, or a worker for its own task only |
 | `board_post` | the run's orchestrator, or any worker of the run |
 | `quarantine` | a worker (it quarantines in its own task's workspace) |
