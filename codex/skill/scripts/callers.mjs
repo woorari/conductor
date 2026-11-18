@@ -24,12 +24,35 @@ export function issueCaller(dir, record) {
   const sha256 = hashOf(token);
   const file = path.join(dir, `${sha256}.json`);
   const temp = `${file}.${process.pid}.tmp`;
-  fs.mkdirSync(dir, { recursive: true });
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   try {
     fs.writeFileSync(temp, JSON.stringify({ ...record, sha256 }, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
     fs.renameSync(temp, file);
   } finally { if (fs.existsSync(temp)) fs.unlinkSync(temp); }
   return token;
+}
+
+// The callers folder is the run's trust root. It is named by realpath: a folder only its owner can write to.
+// Returns { dir } (the real path) or { refused } with a reason that holds no token text.
+export function callersFolder(dir) {
+  let real;
+  try { real = fs.realpathSync(dir); } catch { return { refused: 'The callers folder does not exist.' }; }
+  let stat;
+  try { stat = fs.statSync(real); } catch { return { refused: 'The callers folder cannot be read.' }; }
+  if (!stat.isDirectory()) return { refused: 'The callers folder is not a folder.' };
+  if (process.platform !== 'win32') {
+    if (typeof process.getuid === 'function' && stat.uid !== process.getuid()) return { refused: 'The callers folder is not owned by the user running this call.' };
+    if ((stat.mode & 0o022) !== 0) return { refused: 'The callers folder is writable by its group or by others; only its owner may write to it.' };
+  }
+  return { dir: real };
+}
+
+// The run's recorded folder (run.callers.dir) against the real path given now: true, or { refused } naming both.
+export function callersBound(real, runCallers) {
+  if (!runCallers) return true;
+  if (!text(runCallers.dir)) return { refused: 'This run recorded no callers folder, so no callers folder is trusted for it.' };
+  if (runCallers.dir !== real) return { refused: `This run trusts the callers folder ${runCallers.dir}, not ${real}.` };
+  return true;
 }
 
 // The record the token proves, or { refused } with a reason that holds no token text.
@@ -110,10 +133,18 @@ export function decisionMay(proven, command, ctx = {}) {
   const decision = input.decision;
   if (!decision || typeof decision !== 'object' || Array.isArray(decision) || !text(decision.by) || !text(decision.ref)) return { refused: 'An approval by a proven caller carries a decision {by, ref}.' };
   if (proven.kind === 'decider') {
+    if (decision.agent !== undefined && decision.agent !== proven.agent) return { refused: "A decider's decision names the agent its record names, or none." };
     const department = ctx.runCallers?.department;
     if (!text(department) || decision.by !== `decider:${department}`) return { refused: `A decider's decision is by decider:${department ?? '<department>'}.` };
   } else if (!text(proven.person) || decision.by !== `person:${proven.person}`) return { refused: "A dispatcher's decision is by the person its record names (person:<id>); this caller has none or another." };
   return true;
+}
+
+// The input with a proven decider's agent set from its record: that is the agent a decision records.
+export function withAgent(proven, command, input) {
+  if (!proven || proven.refused || proven.kind !== 'decider' || !GATES.includes(command) || !input?.decision || typeof input.decision !== 'object') return input;
+  const { agent: _given, ...rest } = input.decision;
+  return { ...input, decision: { ...rest, ...(text(proven.agent) ? { agent: proven.agent } : {}) } };
 }
 
 // The shape the command bodies already take.
@@ -124,7 +155,7 @@ export function legacyCaller(proven) {
   return { kind: 'owner' };
 }
 
-// What conduct records for a run made with callers: { department }, or { refused }.
-export function runCallersOf(input) {
-  return text(input?.department) ? { department: input.department } : { refused: 'conduct with callers needs department in its input.' };
+// What conduct records for a run made with callers: { department, dir (the real path of the callers folder) }, or { refused }.
+export function runCallersOf(input, dir) {
+  return text(input?.department) && text(dir) ? { department: input.department, dir } : { refused: 'conduct with callers needs department in its input.' };
 }

@@ -225,10 +225,16 @@ export function runSetup(
   ask: { place?: string; base: string; look: (folder: string) => { root: string; kind: 'missing' | 'plain' | 'git' | 'lore' } },
 ): { base: string; config?: ProjectConfig; workspace?: RunWorkspace } | { error: string } {
   const refused = (reason: string) => ({ error: `No run was started. ${reason}` })
+  const badBase = (base: string): string | undefined =>
+    /^[^\s\u0000-\u001f\u007f-][^\s\u0000-\u001f\u007f]*$/.test(base) && !base.includes('..')
+      ? undefined
+      : `The base branch ${JSON.stringify(base)} is not a branch name: no leading "-", no spaces or control characters, no "..".`
   if (config.places === undefined) {
     if (ask.place !== undefined) return refused('This home is a repository and lists no places: the run works in it, so do not name a place.')
     const problem = homeConfigProblem(config, 'repository')
     if (problem !== undefined) return refused(problem)
+    const wrong = badBase(ask.base)
+    if (wrong !== undefined) return refused(wrong)
 
     return Object.keys(config).length === 0 ? { base: ask.base } : { base: ask.base, config }
   }
@@ -243,6 +249,8 @@ export function runSetup(
   if (found.kind === 'missing') return refused(`The folder of the place ${bare(place.folder)}, ${place.folder}, is no folder in this home: correct config.json, or make the folder.`)
 
   const base = place.base ?? ask.base
+  const wrong = badBase(base)
+  if (wrong !== undefined) return refused(wrong)
 
   return {
     base,

@@ -221,6 +221,15 @@ describe('runSetup: what a run keeps of its home', () => {
     expect(runSetup({}, { base: 'main', look: look('plain') }), 'an empty config keeps none').toEqual({ base: 'main' })
   })
 
+  test('a base that could pass for an option or leave the branch namespace is refused', () => {
+    for (const base of ['--upload-pack=x', '-x', 'a..b', 'a b', 'a\nb', 'a\tb', '', 'a\u0000b']) {
+      expect(runSetup({}, { base, look: look('plain') }), JSON.stringify(base)).toEqual({ error: expect.stringContaining('No run was started. The base branch') })
+    }
+    expect(runSetup(folderConfig, { place: 'game-art', base: '--x', look: look('git') })).toEqual({ error: expect.stringContaining('The base branch') })
+    expect(runSetup({ places: [{ ...place, base: '--x' }] }, { place: 'game-code', base: 'main', look: look('git') })).toEqual({ error: expect.stringContaining('The base branch') })
+    for (const base of ['main', 'release/1.2', 'feature_x-1.0']) expect(runSetup({}, { base, look: look('plain') })).toEqual({ base })
+  })
+
   test('a repository home refuses a place', () => {
     expect(runSetup({}, { place: 'game-code', base: 'main', look: look('git') })).toEqual({
       error: 'No run was started. This home is a repository and lists no places: the run works in it, so do not name a place.',

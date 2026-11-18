@@ -10,7 +10,7 @@ import { buildSkill } from '../build.mjs';
 const built = fs.mkdtempSync(path.join(os.tmpdir(), 'conductor-callers-built-'));
 const skillPath = buildSkill(path.join(built, 'conductor'));
 const callers = await import(pathToFileURL(path.join(skillPath, 'scripts', 'callers.mjs')).href);
-const { issueCaller, resolveCaller, revokeCaller, callerMay, decisionMay } = callers;
+const { issueCaller, resolveCaller, revokeCaller, callerMay, decisionMay, callersFolder, callersBound, withAgent } = callers;
 const { Conductor } = await import(pathToFileURL(path.join(skillPath, 'scripts', 'conductor.mjs')).href);
 const cli = path.join(skillPath, 'scripts', 'conductor.mjs');
 process.on('exit', () => fs.rmSync(built, { recursive: true, force: true }));
@@ -157,7 +157,7 @@ test('a record of another run, task or department does not reach this run', () =
 test('a run created with callers refuses a call without them', async t => {
   const f = await started(t);
   const run = JSON.parse(fs.readFileSync(f.ledger, 'utf8'));
-  assert.deepEqual(run.run.callers, { department: 'engineering' });
+  assert.deepEqual(run.run.callers, { department: 'engineering', dir: fs.realpathSync(f.dir) });
   const before = fs.readFileSync(f.ledger);
   const done = spawnSync(process.execPath, [cli, 'pause', '--root', f.root, '--home', f.home, '--run', 'run', '--caller', 'owner'], { encoding: 'utf8' });
   assert.notEqual(done.status, 0);
@@ -402,4 +402,74 @@ test('approve_main refuses a base other than the one the run branch took in', as
   assert.notEqual(done.status, 0);
   assert.ok(done.all.includes(REV('d').slice(0, 7)) && done.all.includes(REV('e').slice(0, 7)), 'names both');
   assert.deepEqual(fs.readFileSync(f.ledger), before);
+});
+
+// R19: the callers folder is a trust root the run fixes, and a decider's agent is its record's.
+test('a run records the real path of its callers folder, and a call with another folder is refused', async t => {
+  const f = await started(t);
+  assert.equal(ledgerOf(f).run.callers.dir, fs.realpathSync(f.dir));
+  const other = path.join(f.parent, 'forged');
+  const minted = issueCaller(other, orchestrator());
+  const before = fs.readFileSync(f.ledger);
+  const args = [cli, 'task_add', '--root', f.root, '--home', f.home, '--callers', other, '--run', 'run', '--input', path.join(f.parent, 'in.json')];
+  fs.writeFileSync(path.join(f.parent, 'in.json'), JSON.stringify({ id: 'c', title: 'Task c', tier: 'sonnet', tierReason: 'Implementation task', files: ['c.txt'] }));
+  const done = spawnSync(process.execPath, args, { encoding: 'utf8', env: { ...process.env, CONDUCTOR_TOKEN: minted } });
+  assert.notEqual(done.status, 0);
+  assert.match(done.stderr, /callers folder/);
+  assert.equal((done.stdout + done.stderr).includes(minted), false, 'the refusal holds no token text');
+  assert.deepEqual(fs.readFileSync(f.ledger), before, 'the ledger is unchanged');
+  const link = path.join(f.parent, 'link');
+  fs.symlinkSync(f.dir, link);
+  assert.equal(callersBound(callersFolder(link).dir, ledgerOf(f).run.callers), true, 'a link to the same folder is the same folder');
+});
+
+test('a callers folder others can write to, or that is not a folder, is no trust root', { skip: process.platform === 'win32' }, t => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'callers-root-'));
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  const open = path.join(parent, 'open');
+  fs.mkdirSync(open, { mode: 0o700 });
+  assert.equal(typeof callersFolder(open).dir, 'string');
+  fs.chmodSync(open, 0o770);
+  assert.ok(callersFolder(open).refused, 'group-writable');
+  fs.chmodSync(open, 0o707);
+  assert.ok(callersFolder(open).refused, 'world-writable');
+  assert.ok(callersFolder(path.join(parent, 'missing')).refused, 'missing');
+  fs.writeFileSync(path.join(parent, 'file'), '');
+  assert.ok(callersFolder(path.join(parent, 'file')).refused, 'a file');
+  assert.ok(callersBound(fs.realpathSync(parent), { department: 'engineering' }).refused, 'a run that recorded no folder trusts none');
+  assert.ok(callersBound(fs.realpathSync(parent), { department: 'engineering', dir: '/elsewhere' }).refused.includes('/elsewhere'));
+});
+
+test('a run is not conducted from a callers folder others can write to', { skip: process.platform === 'win32' }, t => {
+  const f = fixture(t);
+  const token = issueCaller(f.dir, orchestrator());
+  fs.chmodSync(f.dir, 0o777);
+  const done = f.call('conduct', { token, input: start, run: undefined });
+  assert.notEqual(done.status, 0);
+  assert.equal(done.all.includes(token), false);
+  assert.equal(fs.existsSync(f.ledger), false);
+});
+
+test('a decider decides as the agent its record names, and no other', async t => {
+  const f = await proposed(t);
+  const token = issueCaller(f.dir, decider());
+  const before = fs.readFileSync(f.ledger);
+  const refused = f.call('approve', { token, input: { planSha256: f.hash, decision: asDecider('D-1', { agent: 'lead-b' }) } });
+  assert.notEqual(refused.status, 0);
+  assert.deepEqual(fs.readFileSync(f.ledger), before);
+  const none = { by: 'decider:engineering', ref: 'D-1' };
+  const done = f.call('approve', { token, input: { planSha256: f.hash, decision: none } });
+  assert.equal(done.status, 0, done.all);
+  assert.equal(ledgerOf(f).run.decisions.plan.agent, 'lead-a', 'recorded from the record, not the input');
+});
+
+test('a decider with no agent in its record records none and cannot name one', () => {
+  const run = { department: 'engineering' };
+  const bare = { kind: 'decider', department: 'engineering' };
+  const input = agent => ({ planSha256: REV('a'), decision: { by: 'decider:engineering', ref: 'D-1', ...(agent ? { agent } : {}) } });
+  assert.equal(decisionMay(bare, 'approve', { input: input(), runCallers: run }), true);
+  assert.ok(decisionMay(bare, 'approve', { input: input('lead-a'), runCallers: run }).refused);
+  assert.equal(withAgent(bare, 'approve', input()).decision.agent, undefined);
+  assert.equal(withAgent(decider(), 'approve', input()).decision.agent, 'lead-a');
+  assert.deepEqual(withAgent(null, 'approve', input('x')), input('x'), 'without --callers the input stands');
 });
