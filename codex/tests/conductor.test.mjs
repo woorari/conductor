@@ -481,3 +481,84 @@ test('a kept effort is dropped when the new tier offers none, and the outcome sa
   assert.match(moved.text, /one: tier haiku \(effort dropped\)\./);
   assert.deepEqual([app.load('run').tasks[0].tier, app.load('run').tasks[0].effort, app.load('run').tasks[0].agent], ['haiku', undefined, 'builder']);
 });
+
+// A home that is not a repository: each run records its own git repository in run.workspace.root.
+async function homeFixture(t, { remote = true } = {}) {
+  const repo = fixture(t);
+  if (remote) repo.git('remote', 'add', 'origin', 'https://github.com/example/project.git');
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'conductor-codex-home-'));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const app = new Conductor(home);
+  app.init();
+  await app.conduct({ id: 'run', source: 'Test request', title: 'Test run' });
+  const raw = app.load('run');
+  raw.run.workspace = { kind: 'git', root: fs.realpathSync(repo.root), place: 'project', base: 'main' };
+  app.save('run', raw);
+  await add(app, 'one'); await propose(app); await approve(app);
+  return { ...repo, app, home };
+}
+function ghStub(t) {
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'conductor-gh-'));
+  const log = path.join(bin, 'cwd.log');
+  const sha = 'a'.repeat(40);
+  const pull = merged => `{"state":"${merged ? 'closed' : 'open'}","merged":${merged},"mergeable":true,"mergeable_state":"clean","draft":false,"base":{"ref":"main"},"head":{"sha":"${sha}"},"title":"Change","body":"","merge_commit_sha":${merged ? `"${'c'.repeat(40)}"` : 'null'}}`;
+  // The merge write "drops" (exit 1) but lands; later reads see the PR merged.
+  fs.writeFileSync(path.join(bin, 'gh'), `#!/bin/sh
+pwd -P >> '${log}'
+for last; do :; done
+case "$*" in *'--method PUT'*) cat >/dev/null; touch '${bin}/merged'; exit 1 ;; esac
+case "$last" in
+  */pulls/1) if [ -e '${bin}/merged' ]; then echo '${pull(true)}'; else echo '${pull(false)}'; fi ;;
+  */check-runs*) echo '{"total_count":1,"check_runs":[{"name":"tests","status":"completed","conclusion":"success"}]}' ;;
+  */status*) echo '{"total_count":0,"statuses":[]}' ;;
+  *) echo '{"commit":{"sha":"${'b'.repeat(40)}"}}' ;;
+esac
+`, { mode: 0o755 });
+  const before = process.env.PATH;
+  process.env.PATH = `${bin}${path.delimiter}${before}`;
+  t.after(() => { process.env.PATH = before; fs.rmSync(bin, { recursive: true, force: true }); });
+  return () => fs.existsSync(log) ? fs.readFileSync(log, 'utf8').split('\n').filter(Boolean) : [];
+}
+const ready = async app => {
+  await app.apply('run', 'task_update', { task: 'one', pr: 1, status: 'green' });
+  await app.apply('run', 'approve_merge', { task: 'one', head: 'a'.repeat(40) }, owner);
+};
+
+test("worktree uses the run's git workspace root under a non-repository root", async t => {
+  const { app, root } = await homeFixture(t, { remote: false });
+  const result = await app.worktree('run', { task: 'one' });
+  assert.equal(result.isError, false);
+  const repo = fs.realpathSync(root);
+  assert.equal(fs.realpathSync(result.workspace), path.join(fs.realpathSync(path.dirname(repo)), `${path.basename(repo)}.conductor-codex`, 'run', 'one'));
+  assert.equal(execFileSync('git', ['-C', result.workspace, 'branch', '--show-current'], { encoding: 'utf8' }).trim(), 'conductor/run/one');
+});
+
+test("merge_check reads origin from the run's git workspace root", async t => {
+  const { app, root } = await homeFixture(t);
+  const cwds = ghStub(t);
+  await ready(app);
+  const check = await app.github('run', { task: 'one' });
+  assert.equal(check.isError, false, check.text);
+  assert.ok(cwds().length > 0);
+  for (const cwd of cwds()) assert.equal(cwd, fs.realpathSync(root));
+});
+
+test("reconcile reads origin from the run's git workspace root", async t => {
+  const { app, root } = await homeFixture(t);
+  const cwds = ghStub(t);
+  await ready(app);
+  await assert.rejects(() => app.github('run', { task: 'one', head: 'a'.repeat(40), told: [] }, true), /uncertain/);
+  assert.ok(app.load('run').merge);
+  await app.reconcile('run', {});
+  assert.equal(app.load('run').tasks[0].status, 'done');
+  assert.ok(cwds().length > 0);
+  for (const cwd of cwds()) assert.equal(cwd, fs.realpathSync(root));
+});
+
+test('a run without a workspace keeps the --root repository', async t => {
+  const { app, root } = await started(t);
+  await add(app, 'one'); await propose(app); await approve(app);
+  const result = await app.worktree('run', { task: 'one' });
+  assert.equal(result.isError, false);
+  assert.ok(fs.realpathSync(result.workspace).startsWith(path.join(fs.realpathSync(path.dirname(root)), `${path.basename(root)}.conductor-codex`)));
+});

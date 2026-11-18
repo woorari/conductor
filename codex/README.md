@@ -39,6 +39,7 @@ Replies follow the user's conversation language. A bare issue key or path defaul
 ## Runtime requirements and scope
 
 - Git must be on PATH for isolated Git worktrees. GitHub integration additionally needs an authenticated `gh` CLI.
+- Git runs use the run's own repository: when a run records `run.workspace` of kind `git`, `worktree`, `merge_check`, `merge` and `reconcile` run their Git and `gh` commands in `run.workspace.root`. `--root` may then be a home that is not a repository. A run with no workspace uses the `--root` repository, which must be the repository root.
 - The host must expose subagent tools for parallel workers. The skill adapts to the host's available slots.
 - Run ledgers are project-local under `.codex/conductor/runs/`; they do not modify `.claude/conductor/runs/`.
 - This is a skill/CLI adapter, not Claude's function-hook runtime. The [compatibility table](skill/references/compatibility.md) lists automatic hooks, Lore provisioning/merges and other remaining differences.
