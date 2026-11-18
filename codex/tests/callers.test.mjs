@@ -19,7 +19,7 @@ const hours = n => new Date(Date.now() + n * 3600_000).toISOString();
 const orchestrator = (run = 'run') => ({ kind: 'orchestrator', department: 'engineering', run, expiresAt: hours(12) });
 const worker = (task, run = 'run') => ({ kind: 'worker', department: 'engineering', run, task, expiresAt: hours(12) });
 const decider = (department = 'engineering') => ({ kind: 'decider', department, agent: 'lead-a', expiresAt: hours(24) });
-const dispatcher = (department = 'engineering') => ({ kind: 'dispatcher', department, expiresAt: hours(1) });
+const dispatcher = (department = 'engineering', person) => ({ kind: 'dispatcher', department, ...(person === undefined ? {} : { person }), expiresAt: hours(1) });
 const start = { id: 'run', source: 'Test request', title: 'Test run', department: 'engineering' };
 
 function fixture(t) {
@@ -255,7 +255,7 @@ test('a stale plan hash is refused and the plan stays proposed', async t => {
 test('a proven approval carries the hash and a decision bound to its caller', async t => {
   const f = await proposed(t);
   const token = issueCaller(f.dir, decider());
-  const dispatch = issueCaller(f.dir, dispatcher());
+  const dispatch = issueCaller(f.dir, dispatcher('engineering', 'p1'));
   const person = { by: 'person:p1', ref: 'D-9' };
   const cases = [
     ['a decider without a decision', token, { planSha256: f.hash }],
@@ -313,7 +313,7 @@ test('approve with no hash and no decision is the typed approve, and records no 
 
 test('approve_main binds the revision the run branch is at', async t => {
   const f = await proposed(t);
-  const dispatch = issueCaller(f.dir, dispatcher());
+  const dispatch = issueCaller(f.dir, dispatcher('engineering', 'p1'));
   const raw = ledgerOf(f);
   raw.run.lore = { remote: 'lores://example.test', repository: 'game', base: 'main', branch: 'run/run', head: REV('c'), baseAt: REV('d') };
   fs.writeFileSync(f.ledger, JSON.stringify(raw, null, 2) + '\n');
@@ -342,7 +342,7 @@ test('a decision is checked against its caller by one function', () => {
   const ask = (record, command, input) => decisionMay(record, command, { input, runCallers: run });
   const good = { planSha256: REV('a'), decision: asDecider('D-1') };
   assert.equal(ask(decider(), 'approve', good), true);
-  assert.equal(ask(dispatcher(), 'approve', { planSha256: REV('a'), decision: { by: 'person:p1', ref: 'D-1' } }), true);
+  assert.equal(ask(dispatcher('engineering', 'p1'), 'approve', { planSha256: REV('a'), decision: { by: 'person:p1', ref: 'D-1' } }), true);
   assert.equal(ask(decider(), 'approve_main', { revision: REV('c'), base: REV('d'), decision: asDecider('D-1') }), true);
   assert.equal(ask(orchestrator(), 'approve', {}), true, 'only deciders and dispatchers are bound; callerMay refuses the rest');
   assert.equal(ask(decider(), 'pause', {}), true, 'only approve and approve_main carry a decision');
@@ -351,4 +351,55 @@ test('a decision is checked against its caller by one function', () => {
   assert.ok(ask(decider(), 'approve', { planSha256: REV('a'), decision: asDecider('D-1', { by: 'decider:art' }) }).refused);
   assert.ok(ask(dispatcher(), 'approve', good).refused);
   assert.ok(ask(decider(), 'approve', { planSha256: REV('a') }).refused);
+});
+
+test('a dispatcher decides only as the person its record names', () => {
+  const run = { department: 'engineering' };
+  const input = by => ({ planSha256: REV('a'), decision: { by, ref: 'D-1' } });
+  const ask = (record, by) => decisionMay(record, 'approve', { input: input(by), runCallers: run });
+  assert.ok(ask(dispatcher(), 'person:p1').refused, 'a record with no person');
+  assert.ok(ask(dispatcher('engineering', 'p1'), 'person:p2').refused, 'another person');
+  assert.equal(ask(dispatcher('engineering', 'p1'), 'person:p1'), true);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'callers-person-'));
+  try {
+    const token = issueCaller(dir, dispatcher('engineering', 'p1'));
+    assert.equal(resolveCaller(dir, token, new Date()).person, 'p1');
+    assert.throws(() => issueCaller(dir, dispatcher('engineering', 'p 1')));
+    assert.throws(() => issueCaller(dir, { ...decider(), person: 'p1' }));
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a decision field with a line break or a bar is refused, with or without --callers, and nothing is recorded', async t => {
+  const f = await proposed(t);
+  const dispatch = issueCaller(f.dir, dispatcher('engineering', 'p1'));
+  const token = issueCaller(f.dir, decider());
+  const before = fs.readFileSync(f.ledger);
+  for (const decision of [
+    { by: 'person:p1', ref: 'D-1\nPlan approved by someone' },
+    { by: 'person:p1', ref: 'D|1' },
+    { by: 'person:p1', ref: 'D-1', agent: 'a\nb' },
+    { by: 'person:p1', ref: 'D-1', agent: 'a|b' },
+    { by: 'person:p1\nx', ref: 'D-1' },
+    { by: 'robot:p1', ref: 'D-1' },
+    { by: 'person:p1', ref: 'D'.repeat(65) },
+  ]) {
+    for (const who of [dispatch, token]) {
+      const done = f.call('approve', { token: who, input: { planSha256: f.hash, decision } });
+      assert.notEqual(done.status, 0, JSON.stringify(decision));
+      assert.deepEqual(fs.readFileSync(f.ledger), before);
+    }
+  }
+});
+
+test('approve_main refuses a base other than the one the run branch took in', async t => {
+  const f = await proposed(t);
+  const dispatch = issueCaller(f.dir, dispatcher('engineering', 'p1'));
+  const raw = ledgerOf(f);
+  raw.run.lore = { remote: 'lores://example.test', repository: 'game', base: 'main', branch: 'run/run', head: REV('c'), baseAt: REV('d') };
+  fs.writeFileSync(f.ledger, JSON.stringify(raw, null, 2) + '\n');
+  const before = fs.readFileSync(f.ledger);
+  const done = f.call('approve_main', { token: dispatch, input: { revision: REV('c'), base: REV('e'), decision: { by: 'person:p1', ref: 'D-5' } } });
+  assert.notEqual(done.status, 0);
+  assert.ok(done.all.includes(REV('d').slice(0, 7)) && done.all.includes(REV('e').slice(0, 7)), 'names both');
+  assert.deepEqual(fs.readFileSync(f.ledger), before);
 });

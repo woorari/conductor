@@ -10,6 +10,7 @@ const TOKEN = /^[0-9a-f]{64}$/;
 const hashOf = token => crypto.createHash('sha256').update(token).digest('hex');
 const same = (a, b) => a.length === b.length && crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
 const text = value => typeof value === 'string' && value !== '';
+const PERSON = /^[A-Za-z0-9_.-]{1,64}$/;
 
 // Writes <sha256>.json (mode 0600, atomic) and returns the token.
 export function issueCaller(dir, record) {
@@ -18,6 +19,7 @@ export function issueCaller(dir, record) {
   if ((record.kind === 'orchestrator' || record.kind === 'worker') && !text(record.run)) throw new Error('An orchestrator or worker record names its run.');
   if (record.kind === 'worker' && !text(record.task)) throw new Error('A worker record names its task.');
   if (!(Date.parse(record.expiresAt) > 0)) throw new Error('A caller record has an expiry time (ISO 8601).');
+  if (record.person !== undefined && (record.kind !== 'dispatcher' || typeof record.person !== 'string' || !PERSON.test(record.person))) throw new Error('Only a dispatcher record names a person, as 1-64 letters, digits, dots, hyphens or underscores.');
   const token = crypto.randomBytes(32).toString('hex');
   const sha256 = hashOf(token);
   const file = path.join(dir, `${sha256}.json`);
@@ -97,7 +99,7 @@ export function callerMay(proven, command, ctx = {}) {
   return true;
 }
 
-// The gates a recorded decision decides, and who may stand behind one: a decider as decider:<its department>, a dispatcher as person:<id>.
+// The gates a recorded decision decides, and who may stand behind one: a decider as decider:<its department>, a dispatcher as person:<id> of the person its record names.
 const GATES = ['approve', 'approve_main'];
 // proven: what resolveCaller returned, or null. ctx: { input, runCallers }. Returns true, or { refused } with the reason.
 // Without --callers nothing is required: the CI checks a hash or records a decision when one is given.
@@ -110,7 +112,7 @@ export function decisionMay(proven, command, ctx = {}) {
   if (proven.kind === 'decider') {
     const department = ctx.runCallers?.department;
     if (!text(department) || decision.by !== `decider:${department}`) return { refused: `A decider's decision is by decider:${department ?? '<department>'}.` };
-  } else if (!/^person:\S+$/.test(decision.by)) return { refused: "A dispatcher's decision is by a person (person:<id>)." };
+  } else if (!text(proven.person) || decision.by !== `person:${proven.person}`) return { refused: "A dispatcher's decision is by the person its record names (person:<id>); this caller has none or another." };
   return true;
 }
 

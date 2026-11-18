@@ -8,7 +8,7 @@ import { approveMerge, mergeApproved, DELIVERY, ORCHESTRATOR_ROLE } from './core
 import { quarantine } from './quarantine.mjs';
 import { complexityOf, selectModel, staffLabel } from './core/models.mjs';
 import { RUN_ID, parseLedger, TIERS } from './core/ledger.mjs';
-import { conducting, newRun, canonicalPlan, planGate, mainGate, decisionLines, factsLines } from './core/plan.mjs';
+import { conducting, newRun, canonicalPlan, planGate, mainGate, decisionLines, digestOutput } from './core/plan.mjs';
 import { CONFIG_PATH, parseConfig, runSetup } from './core/project.mjs';
 import * as signals from './core/signals.mjs';
 import { preflight, route } from './core/router.mjs';
@@ -442,7 +442,7 @@ export async function main(argv = process.argv.slice(2)) {
       const raw = app.load(id);
       const ledger = parsed(raw);
       const text = digest(ledger, caller);
-      console.log(proven === null ? text : [caller.kind === 'worker' ? text : '', factsLines(ledger, planHash(ledger, raw.codex?.base)).join('\n')].filter(Boolean).join('\n\n'));
+      console.log(digestOutput(text, ledger, planHash(ledger, raw.codex?.base), proven !== null, caller.kind === 'worker'));
       return;
     }
     if (command === 'brief') { console.log(app.brief(id, input.task)); return; }

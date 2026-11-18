@@ -586,6 +586,16 @@ describe('approvals by a recorded decision', () => {
     expect(parseLedger(JSON.stringify(ledger)).ledger?.run.decisions?.main).toEqual({ ...mainGate, revision: 'c'.repeat(64), base: 'd'.repeat(64) })
   })
 
+  test('approve_main binds the base the run branch took in', () => {
+    const ledger = lored()
+    const before = JSON.stringify(ledger)
+    const refused = approvedMainAt(ledger, AT, { revision: 'c'.repeat(64), base: 'e'.repeat(64) }, mainGate)
+    expect(refused.isError).toBe(true)
+    expect(refused.text).toContain('d'.repeat(7))
+    expect(refused.text).toContain('e'.repeat(7))
+    expect(JSON.stringify(ledger)).toBe(before)
+  })
+
   test('approve_main without a decision still binds the revision and records the approval only', () => {
     const ledger = lored()
     expect(approvedMainAt(ledger, AT, { revision: 'e'.repeat(64), base: 'd'.repeat(64) }).isError).toBe(true)

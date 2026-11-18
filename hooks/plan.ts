@@ -203,9 +203,10 @@ export function canonicalPlan(ledger: Ledger, base?: string): string {
 /** The decision a call names, stamped with the time the CI gives it; or what is wrong with it. */
 function decisionOf(input: unknown, at: string): GateDecision | { error: string } {
   const one = typeof input === 'object' && input !== null && !Array.isArray(input) ? (input as Record<string, unknown>) : undefined
-  const isText = (value: unknown): value is string => typeof value === 'string' && value.trim() !== ''
-  if (one === undefined || !isText(one.by) || !isText(one.ref) || (one.agent !== undefined && !isText(one.agent))) {
-    return { error: 'A decision is {by, ref} and may name its agent: by is decider:<department> or person:<id>, ref is its id in the decisions log.' }
+  const isId = (value: unknown): value is string => typeof value === 'string' && /^[A-Za-z0-9_.:-]{1,64}$/.test(value)
+  const isBy = (value: unknown): value is string => typeof value === 'string' && /^(decider|person):[A-Za-z0-9_.-]{1,64}$/.test(value)
+  if (one === undefined || !isBy(one.by) || !isId(one.ref) || (one.agent !== undefined && !isId(one.agent))) {
+    return { error: 'A decision is {by, ref} and may name its agent: by is decider:<department> or person:<id>, ref and agent are 1-64 letters, digits, dots, colons, hyphens or underscores.' }
   }
 
   return { by: one.by, ...(one.agent === undefined ? {} : { agent: one.agent as string }), ref: one.ref, at }
@@ -269,4 +270,11 @@ export function factsLines(ledger: Ledger, planSha256: string): string[] {
     `Check: ${check === undefined ? 'none recorded' : `${check.verdict} on ${check.revision} at ${check.at}`}`,
     ...decisionLines(ledger),
   ]
+}
+
+/** What `digest` prints: the plain digest without proven callers; with them the facts a decider reads (and the worker digest for a worker only). */
+export function digestOutput(text: string, ledger: Ledger, planSha256: string, proven: boolean, worker: boolean): string {
+  if (!proven) return text
+
+  return [worker ? text : '', factsLines(ledger, planSha256).join('\n')].filter(Boolean).join('\n\n')
 }

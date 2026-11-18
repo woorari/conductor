@@ -155,7 +155,7 @@ export function approvedMain(raw: Raw, at: string, approval: { revision: string;
 
 /**
  * `approve_main`: an approval by name, for a revision that is the run branch's
- * head as the board last left it, and a base that is a revision. Refused for a
+ * head as the board last left it, and the base it last took in. Refused for a
  * run with no Lore branch or any other revision; the owner's own approval of
  * the head the mod just read goes through approvedMain.
  */
@@ -165,6 +165,11 @@ export function approvedMainAt(raw: Raw, at: string, approval: { revision: strin
   if (!REVISION.test(approval.revision) || !REVISION.test(approval.base)) return refused('revision and base are Lore revisions (64 hex characters).')
   if (approval.revision !== head) {
     return refused(`The run branch is at ${head === undefined ? 'no revision the board knows of' : rev7(String(head))}, not ${rev7(approval.revision)}: approve the revision the run branch is at now.`)
+  }
+
+  const baseAt = (raw.run as Loose & { lore?: Loose }).lore?.baseAt
+  if (approval.base !== baseAt) {
+    return refused(`The base branch is at ${baseAt === undefined ? 'no revision the board knows of' : rev7(String(baseAt))}, not ${rev7(approval.base)}: approve the base the run branch took in last.`)
   }
 
   return approvedMain(raw, at, approval, decision)
