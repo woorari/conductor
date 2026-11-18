@@ -177,6 +177,29 @@ test('maxParallel is enforced and restarting a returned worker retains its works
   assert.equal(resumed.workspace, first.workspace);
 });
 
+test('a dispatcher returned leaves the task startable again', async t => {
+  const { app } = fixture(t);
+  app.init(); await app.conduct({ id: 'run', source: 'Test request', maxParallel: 1 });
+  await add(app, 'one'); await add(app, 'two'); await propose(app); await approve(app);
+  const dispatcher = { kind: 'owner', dispatcher: true };
+  const first = await app.worktree('run', { task: 'one' });
+  assert.equal((await app.worktree('run', { task: 'two' })).isError, true, 'the one slot is taken');
+  const returned = await app.apply('run', 'task_update', { task: 'one', status: 'returned', note: 'Spawn failed' }, dispatcher);
+  assert.equal(returned.isError, false, returned.text);
+  const raw = app.load('run');
+  assert.equal(raw.tasks.find(one => one.id === 'one').status, 'returned');
+  assert.match(raw.tasks.find(one => one.id === 'one').activity.text, /^Dispatcher: Spawn failed/);
+  const two = await app.worktree('run', { task: 'two' });
+  assert.equal(two.isError, false, 'the slot is free again');
+  await app.apply('run', 'task_update', { task: 'two', status: 'returned' }, dispatcher);
+  const resumed = await app.worktree('run', { task: 'one' });
+  assert.equal(resumed.isError, false);
+  assert.equal(resumed.workspace, first.workspace);
+  const blocked = await app.apply('run', 'task_update', { task: 'one', status: 'blocked', note: 'No slot' }, dispatcher);
+  assert.equal(blocked.isError, false, blocked.text);
+  assert.equal(app.load('run').tasks.find(one => one.id === 'one').status, 'blocked');
+});
+
 async function githubFixture(t) {
   const fixtureValue = await started(t);
   const { app, parent, git } = fixtureValue;

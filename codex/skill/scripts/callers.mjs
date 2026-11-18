@@ -80,7 +80,12 @@ const ORCHESTRATOR = ['init', 'conduct', 'board_open', 'board_close', 'task_add'
 const WORKER = ['task_update', 'board_post', 'brief', 'quarantine'];
 const DECIDER = ['approve', 'approve_main', 'approve_merge', 'tier', 'model_policy'];
 const WORKER_STATUS = ['review', 'blocked', 'failed'];
+const DISPATCHER_STATUS = ['returned', 'blocked'];
+// A dispatcher reserves a worker and hands a task back or holds it; it changes nothing else of a task.
+const DISPATCHER_KEYS = { worktree: ['task'], task_update: ['task', 'status', 'note'] };
 function who(command) {
+  if (command === 'worktree') return ['orchestrator', 'dispatcher'];
+  if (command === 'task_update') return ['orchestrator', 'worker', 'dispatcher'];
   if (command.startsWith('problem_') || ORCHESTRATOR.includes(command)) return ['orchestrator', ...(WORKER.includes(command) ? ['worker'] : [])];
   if (WORKER.includes(command)) return ['worker'];
   // A dispatcher's approval is bound to a recorded person decision by a later task; here only kind, department and run are checked.
@@ -121,6 +126,12 @@ export function callerMay(proven, command, ctx = {}) {
     if ((command === 'task_update' || command === 'brief') && input.task !== proven.task) return { refused: 'A worker uses only its own task.' };
     if (command === 'task_update' && input.status !== undefined && !WORKER_STATUS.includes(input.status)) return { refused: 'A worker sets its task to review, blocked or failed.' };
   }
+  if (proven.kind === 'dispatcher' && command in DISPATCHER_KEYS) {
+    const extra = Object.keys(input).filter(key => !DISPATCHER_KEYS[command].includes(key));
+    if (extra.length > 0) return { refused: `A dispatcher's ${command} takes only ${DISPATCHER_KEYS[command].join(', ')}; not ${extra.join(', ')}.` };
+    if (!text(input.task)) return { refused: `A dispatcher's ${command} names its task.` };
+    if (command === 'task_update' && !DISPATCHER_STATUS.includes(input.status)) return { refused: 'A dispatcher sets a task to returned or blocked and no other status.' };
+  }
   return true;
 }
 
@@ -154,7 +165,7 @@ export function legacyCaller(proven) {
   if (!proven || proven.refused) return { kind: 'stranger' };
   if (proven.kind === 'orchestrator') return { kind: 'orchestrator' };
   if (proven.kind === 'worker') return { kind: 'worker', taskId: proven.task };
-  return { kind: 'owner' };
+  return proven.kind === 'dispatcher' ? { kind: 'owner', dispatcher: true } : { kind: 'owner' };
 }
 
 // What conduct records for a run made with callers: { department, dir (the real path of the callers folder) }, or { refused }.

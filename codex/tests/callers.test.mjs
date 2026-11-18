@@ -103,6 +103,8 @@ const rows = [
   ['task_add', {}, orchestrator(), worker('a')],
   ['run_plan', {}, orchestrator(), decider()],
   ['worktree', {}, orchestrator(), worker('a')],
+  ['worktree', { task: 'a' }, dispatcher(), worker('a')],
+  ['worktree', { task: 'a' }, dispatcher(), decider()],
   ['merge_check', {}, orchestrator(), worker('a')],
   ['merge', {}, orchestrator(), dispatcher()],
   ['run_sync_base', {}, orchestrator(), worker('a')],
@@ -119,6 +121,8 @@ const rows = [
   ['task_update', { task: 'b', files: ['x'] }, orchestrator(), worker('a')],
   ['task_update', { task: 'a', status: 'review' }, worker('a'), worker('b')],
   ['task_update', { task: 'a', status: 'green' }, orchestrator(), worker('a')],
+  ['task_update', { task: 'a', status: 'returned' }, dispatcher(), decider()],
+  ['task_update', { task: 'a', status: 'blocked', note: 'No slot' }, dispatcher(), decider()],
   ['board_post', {}, worker('a'), decider()],
   ['board_post', {}, orchestrator(), dispatcher()],
   ['approve', {}, decider(), worker('a')],
@@ -144,6 +148,85 @@ test('each command takes only its callers', () => {
   for (const command of ['linear_sync', 'linear_ack']) for (const record of [orchestrator(), worker('a'), decider(), dispatcher()]) assert.ok(may(record, command).refused, `${command}: nobody`);
   for (const command of ['list', 'board', 'digest']) assert.equal(callerMay({ refused: 'x' }, command, ctx), true, `${command}: anyone`);
   assert.ok(may(orchestrator(), 'no_such_command').refused, 'a command not in the map is refused');
+});
+
+test('a dispatcher may reserve a worker with worktree', () => {
+  assert.equal(may(dispatcher(), 'worktree', { task: 'a' }), true);
+  assert.ok(may(dispatcher(), 'worktree', { task: 'a', tier: 'opus' }).refused, 'worktree takes the task and nothing else');
+  assert.ok(may(dispatcher(), 'worktree', {}).refused, 'worktree names its task');
+  assert.ok(may(dispatcher(), 'worktree', { task: 7 }).refused, 'the task is a name');
+});
+
+test('a dispatcher sets a task returned or blocked and nothing else', () => {
+  for (const status of ['returned', 'blocked']) assert.equal(may(dispatcher(), 'task_update', { task: 'a', status }), true, status);
+  assert.equal(may(dispatcher(), 'task_update', { task: 'a', status: 'blocked', note: 'No slot' }), true, 'with a note');
+  assert.ok(may(dispatcher(), 'task_update', { task: 'a' }).refused, 'a status is required');
+  assert.ok(may(dispatcher(), 'task_update', { task: 'a', note: 'only a note' }).refused, 'a note alone is not enough');
+  assert.ok(may(dispatcher(), 'task_update', { status: 'returned' }).refused, 'the task is named');
+});
+
+test('a dispatcher cannot set building, review, green, done or failed', () => {
+  for (const status of ['building', 'review', 'green', 'done', 'failed', 'queued', 'nonsense']) {
+    assert.ok(may(dispatcher(), 'task_update', { task: 'a', status }).refused, status);
+  }
+});
+
+test('a dispatcher task_update with files, dependsOn, tier, agent or effort is refused', () => {
+  const extra = { files: ['x'], dependsOn: ['b'], tier: 'opus', agent: 'x', effort: 'high', tierReason: 'r', pr: 1, branch: 'b', revision: REV('a'), scopeReason: 's' };
+  for (const [key, value] of Object.entries(extra)) {
+    assert.ok(may(dispatcher(), 'task_update', { task: 'a', status: 'returned', [key]: value }).refused, key);
+  }
+});
+
+test('a dispatcher of another department or run is refused', () => {
+  assert.ok(may(dispatcher('art'), 'worktree', { task: 'a' }).refused);
+  assert.ok(may(dispatcher('art'), 'task_update', { task: 'a', status: 'returned' }).refused);
+  assert.ok(may({ ...dispatcher(), run: 'other' }, 'worktree', { task: 'a' }).refused);
+  assert.ok(may({ ...dispatcher(), run: 'other' }, 'task_update', { task: 'a', status: 'blocked' }).refused);
+  assert.equal(may({ ...dispatcher(), run: 'run' }, 'worktree', { task: 'a' }), true, 'a record bound to this run reaches it');
+});
+
+test('a worker still may not call worktree, and a dispatcher still may not call the rest of the orchestrator gate', () => {
+  assert.ok(may(worker('a'), 'worktree', { task: 'a' }).refused);
+  for (const command of ['merge', 'merge_check', 'handover', 'run_sync_base', 'run_check', 'reconcile', 'linear_sync', 'linear_ack', 'task_add', 'run_plan', 'init', 'board_open']) {
+    assert.ok(may(dispatcher(), command, { task: 'a' }).refused, command);
+  }
+});
+
+test('a dispatcher reserves a worker and returns or blocks its task through the command', async t => {
+  const f = await proposed(t);
+  const git = (...args) => spawnSync('git', ['-C', f.root, ...args], { encoding: 'utf8' });
+  assert.equal(git('init', '-b', 'main').status, 0);
+  git('config', 'user.name', 'Test'); git('config', 'user.email', 'test@example.invalid');
+  fs.writeFileSync(path.join(f.root, 'source.txt'), 'x\n');
+  git('add', 'source.txt');
+  assert.equal(git('commit', '-m', 'initial').status, 0);
+  const dispatch = issueCaller(f.dir, dispatcher());
+  assert.equal(f.call('approve', { token: issueCaller(f.dir, decider()), input: { planSha256: f.hash, decision: asDecider('D-1') } }).status, 0);
+  const worktree = f.call('worktree', { token: dispatch, input: { task: 'a' } });
+  assert.equal(worktree.status, 0, worktree.all);
+  assert.equal(ledgerOf(f).tasks[0].status, 'building');
+  const returned = f.call('task_update', { token: dispatch, input: { task: 'a', status: 'returned', note: 'Spawn failed' } });
+  assert.equal(returned.status, 0, returned.all);
+  assert.equal(ledgerOf(f).tasks[0].status, 'returned');
+  assert.match(ledgerOf(f).tasks[0].activity.text, /^Dispatcher: /);
+  const again = f.call('worktree', { token: dispatch, input: { task: 'a' } });
+  assert.equal(again.status, 0, again.all);
+  assert.equal(ledgerOf(f).tasks[0].status, 'building', 'a returned task starts again');
+  const blocked = f.call('task_update', { token: dispatch, input: { task: 'a', status: 'blocked', note: 'No slot' } });
+  assert.equal(blocked.status, 0, blocked.all);
+  assert.equal(ledgerOf(f).tasks[0].status, 'blocked');
+  const before = fs.readFileSync(f.ledger);
+  for (const input of [{ task: 'a', status: 'green' }, { task: 'a', status: 'returned', files: ['z.txt'], scopeReason: 'r' }, { task: 'a', status: 'returned', tier: 'opus' }]) {
+    assert.notEqual(f.call('task_update', { token: dispatch, input }).status, 0, JSON.stringify(input));
+  }
+  assert.deepEqual(fs.readFileSync(f.ledger), before, 'a refused call writes nothing');
+  for (const command of ['merge', 'handover', 'run_sync_base', 'merge_check']) {
+    const done = f.call(command, { token: dispatch, input: { task: 'a' } });
+    assert.notEqual(done.status, 0, command);
+  }
+  const refused = f.call('worktree', { token: issueCaller(f.dir, worker('a')), input: { task: 'a' } });
+  assert.notEqual(refused.status, 0, 'a worker may not reserve');
 });
 
 test('a record of another run, task or department does not reach this run', () => {

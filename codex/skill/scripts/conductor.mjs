@@ -243,7 +243,7 @@ export class Conductor {
           const result = signals.updateTask(raw, at, caller, input);
           if (!result.isError && (input.note || input.status || input.files || input.dependsOn)) {
             const task = raw.tasks.find(one => one.id === input.task);
-            const actor = caller.kind === 'worker' ? 'Worker' : 'Orchestrator';
+            const actor = caller.kind === 'worker' ? 'Worker' : caller.dispatcher ? 'Dispatcher' : 'Orchestrator';
             task.activity = { at, text: `${actor}: ${task.note || `status ${task.status}`}` };
           }
           return result;
@@ -455,7 +455,7 @@ export async function main(argv = process.argv.slice(2)) {
       return;
     }
     if (command === 'brief') { console.log(app.brief(id, input.task)); return; }
-    if (['worktree', 'handover', 'merge_check', 'merge', 'run_check', 'run_sync_base', 'reconcile', 'linear_sync', 'linear_ack'].includes(command) && caller.kind !== 'orchestrator') fail('Only the orchestrator performs this action.');
+    if (['worktree', 'handover', 'merge_check', 'merge', 'run_check', 'run_sync_base', 'reconcile', 'linear_sync', 'linear_ack'].includes(command) && caller.kind !== 'orchestrator' && !(command === 'worktree' && proven?.kind === 'dispatcher')) fail('Only the orchestrator performs this action.');
     if (command === 'linear_sync') { console.log(JSON.stringify(await app.linearSync(id), null, 2)); return; }
     if (command === 'quarantine') result = await app.quarantine(id, input, caller);
     else if (command === 'linear_ack') result = await app.linearAck(id, input);
