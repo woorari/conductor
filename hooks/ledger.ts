@@ -198,10 +198,10 @@ function checkRecord(value: unknown, where: string): CheckRecord | undefined {
   }
 }
 
-/** An absolute path: a workspace is always named by where it is, never relative to anything. */
+/** An absolute path, POSIX or Windows (a drive letter): a workspace is always named by where it is, never relative to anything. */
 function absolute(from: Fields, key: string, where: string): string {
   const value = text(from, key, where)
-  if (!value.startsWith('/')) refuse(`${where}.${key}`, 'an absolute path', value)
+  if (!value.startsWith('/') && !/^[A-Za-z]:[\\/]/.test(value)) refuse(`${where}.${key}`, 'an absolute path', value)
 
   return value
 }
