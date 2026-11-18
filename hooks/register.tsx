@@ -52,6 +52,8 @@ import { checkWorkspaceOf, isInside, runBranchOf, runWorkspaceOf, taskBranchOf, 
 import type { RepositoryInfo } from './lore'
 import { pauseRun, unpauseRun } from './pause'
 import { LOOK_AGAIN_MIN, dueForLook, isUnderway, unsettled } from './problems'
+import { OWNER_ORIGINS, approveMain, approveRun, loreRunOf } from './approvals'
+import type { ApprovalHost } from './approvals'
 import { APPROVED, conducting, isApproval, newRun, planning, planningOf } from './plan'
 import { ORCHESTRATOR, briefing, digest, post, relative, rule, touch, waiting } from './posts'
 import { HELPER_TYPES, MAX_BUILDING, familyOf, route, unlocked } from './router'
@@ -2182,57 +2184,28 @@ async function settle($: EngineInterface, path: string, change: (raw: Raw) => Ou
   return written.value
 }
 
-/** The origins of a command that are the owner's own hand: the terminal, the desktop app, the owner's Remote Control. */
-const OWNER_ORIGINS: ReadonlySet<string> = new Set(['composer', 'sdk', 'bridge'])
-
-/** Approves the bound run's plan, by /approve or the owner's approving reply: what is said, and whether it was approved. */
-async function approveRun($: EngineInterface, path: string, delivery: 'complete' | 'review-only' = 'complete'): Promise<{ text: string; isApproved: boolean }> {
-  const notReady = await loreApprove($, path)
-  if (notReady !== undefined) return { text: `No plan was approved: ${notReady} Approve again once that is fixed.`, isApproved: false }
-  const base = await runBase($)
-  const written = await mutate($, path, raw => {
-    const outcome = approvePlan(raw, delivery, base)
-
-    return { value: outcome, isChanged: outcome.isChanged }
-  })
-  if (written.error !== undefined) return { text: written.error, isApproved: false }
-  if (!written.value.isError) {
-    await linearApproved($, path)
-    await issueDone($, path)
+/** What the owner's approvals need from the session: the module's host, over `$`. */
+function approvalHost($: EngineInterface): ApprovalHost {
+  return {
+    boundLedger: () => boundLedger($),
+    unbound: () => unbound($),
+    read: path => textAt($, path),
+    loreApprove: path => loreApprove($, path),
+    base: () => runBase($),
+    mutate: (path, change) => mutate($, path, change),
+    linearApproved: path => linearApproved($, path),
+    issueDone: path => issueDone($, path),
+    refresh: async () => {
+      seen = undefined
+      await refresh($, false)
+    },
+    mergeMain: (fromPlan, signal) => mergeRunMain($, fromPlan, signal),
   }
-  seen = undefined
-  await refresh($, false)
-
-  return { text: written.value.text, isApproved: written.value.isError !== true }
-}
-
-/** What a run's Lore side is, read for its base-branch commands; or why there is none. */
-async function loreRunOf($: EngineInterface): Promise<{ path: string; ledger: Ledger; runLore: NonNullable<Ledger['run']['lore']>; run: string } | { text: string }> {
-  const path = await boundLedger($)
-  if (path === undefined) return { text: await unbound($) }
-  const ledger = parseLedger((await textAt($, path)) ?? '').ledger
-  if (ledger === undefined) return { text: 'The ledger does not read.' }
-  const runLore = ledger.run.lore
-  if (runLore?.workspace === undefined) return { text: 'This run has no Lore workspace yet: it is made when the owner approves the plan with /approve.' }
-
-  return { path, ledger, runLore, run: runLore.workspace }
-}
-
-/**
- * `/approve-main`: the owner approves the run branch's revision for the base
- * branch, and the mod merges exactly that revision into the protected base,
- * protecting it again whatever happens. Refused while anything stands in the
- * way, when the run branch moved, or when the base moved since the run branch
- * last took it in.
- */
-async function approveMain($: EngineInterface, origin: string, signal?: AbortSignal): Promise<string> {
-  if (!OWNER_ORIGINS.has(origin)) return 'Not done. /approve-main is the owner\'s: only the owner types it, in the terminal, the desktop app or Remote Control. Nothing was merged.'
-  return mergeRunMain($, false, signal)
 }
 
 /** Full plan delivery uses the same checked, pinned, protected-base path without pretending to be an owner command. */
 async function mergeRunMain($: EngineInterface, fromPlan: boolean, signal?: AbortSignal): Promise<string> {
-  const found = await loreRunOf($)
+  const found = await loreRunOf(approvalHost($))
   if ('text' in found) return found.text
   const { path, ledger, runLore, run } = found
   const base = runLore.base
@@ -2450,7 +2423,7 @@ async function runSyncBase($: EngineInterface, call: ToolCall, signal?: AbortSig
   const fail = (reason: string) => ({ isError: true as const, result: `${NOT_DONE} ${reason}`, text: `${NOT_DONE} ${reason}` })
   const say = (text: string) => ({ result: text, text })
   if (callerOf(call.agentId).kind !== 'orchestrator') return fail('Only the orchestrator brings the base branch in.')
-  const found = await loreRunOf($)
+  const found = await loreRunOf(approvalHost($))
   if ('text' in found) return fail(found.text)
   const { path, ledger, runLore, run } = found
   const base = runLore.base
@@ -4151,7 +4124,7 @@ export const register: Register = (on, options) => {
     if (mode && mode !== 'review-only') return { text: 'Use /approve for complete delivery including reviewed merges, or /approve review-only to stop before main/base merges.' }
     const path = await boundLedger($)
     if (path === undefined) return { text: await unbound($) }
-    const { text, isApproved } = await approveRun($, path, mode === 'review-only' ? 'review-only' : 'complete')
+    const { text, isApproved } = await approveRun(approvalHost($), path, mode === 'review-only' ? 'review-only' : 'complete')
     if (isApproved) asks.push(APPROVED)
 
     return { text }
@@ -4164,14 +4137,14 @@ export const register: Register = (on, options) => {
     const path = await boundLedger($).catch(() => undefined)
     const plan = path === undefined ? undefined : parseLedger((await textAt($, path)) ?? '').ledger?.run.plan
     if (path === undefined || plan !== 'proposed') return next(e)
-    const { text, isApproved } = await approveRun($, path)
+    const { text, isApproved } = await approveRun(approvalHost($), path)
     const said = isApproved ? `${APPROVED} The owner's reply "${e.text.trim()}" counts as /approve. ${text}` : `Run board: the owner's reply "${e.text.trim()}" asks to approve the plan, and it is not approved: ${text}`
 
     return next({ ...e, context: [...(e.context ?? []), said] })
   })
 
   on('command.run', { command: 'approve-main' }, async ($, e, next) => {
-    const text = await approveMain($, e.origin.kind, next.signal)
+    const text = await approveMain(approvalHost($), e.origin.kind, next.signal)
     seen = undefined
     await refresh($, false)
 

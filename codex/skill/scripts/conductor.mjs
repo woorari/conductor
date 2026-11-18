@@ -8,7 +8,7 @@ import { approveMerge, mergeApproved, DELIVERY, ORCHESTRATOR_ROLE } from './core
 import { quarantine } from './quarantine.mjs';
 import { complexityOf, selectModel, staffLabel } from './core/models.mjs';
 import { RUN_ID, parseLedger, TIERS } from './core/ledger.mjs';
-import { conducting, newRun, canonicalPlan, planGate, mainGate, decisionLines, digestOutput } from './core/plan.mjs';
+import { conducting, newRun, canonicalPlan, mainGate, decisionLines, digestOutput } from './core/plan.mjs';
 import { CONFIG_PATH, parseConfig, runSetup } from './core/project.mjs';
 import * as signals from './core/signals.mjs';
 import { preflight, route } from './core/router.mjs';
@@ -18,6 +18,7 @@ import * as merges from './core/merge.mjs';
 import { linearKeyOf } from './core/linear.mjs';
 import { approvedMainAt } from './core/lore-merge.mjs';
 import { resolveCaller, callerMay, decisionMay, legacyCaller, runCallersOf, callersFolder, callersBound, withAgent } from './callers.mjs';
+import { approvalGate } from './core/approvals.mjs';
 import { openBoard, closeBoard } from './board-launcher.mjs';
 import { isLoreLedger } from './lore-host.mjs';
 import { approveLore, checkLore, mergeLore, mergeMainLore, syncBaseLore, worktreeLore } from './lore-commands.mjs';
@@ -207,11 +208,7 @@ export class Conductor {
   }
   // The owner's checks for an approval, shared by a Git run and a Lore run: the owner, the preflight, the plan's hash.
   approvalGate(raw, input, caller, at) {
-    if (caller.kind !== 'owner') fail('This action requires the owner’s explicit instruction in this chat.');
-    const ledger = parsed(raw);
-    const issues = preflight(ledger);
-    if (issues.length) fail(issues.join('\n'));
-    const gate = planGate(planHash(ledger, raw.codex.base), input, at);
+    const gate = approvalGate(raw, input, caller, at, text => crypto.createHash('sha256').update(text).digest('hex'));
     if (gate.error) fail(gate.error);
     return gate.decision;
   }
