@@ -8,7 +8,7 @@ import { quarantine } from './quarantine.mjs';
 import { complexityOf, selectModel, staffLabel } from './core/models.mjs';
 import { RUN_ID, parseLedger, TIERS } from './core/ledger.mjs';
 import { conducting, newRun } from './core/plan.mjs';
-import { CONFIG_PATH, parseConfig } from './core/project.mjs';
+import { CONFIG_PATH, parseConfig, runSetup } from './core/project.mjs';
 import * as signals from './core/signals.mjs';
 import { preflight, route } from './core/router.mjs';
 import { post, rule, digest } from './core/posts.mjs';
@@ -70,11 +70,14 @@ export function board(raw) {
 }
 
 export class Conductor {
-  constructor(root, { githubApi, linearApi = linearApiFromEnvironment() } = {}) {
+  // home: where the ledgers and the lock live, outside the project. callers: accepted here, used by a later task.
+  constructor(root, { githubApi, linearApi = linearApiFromEnvironment(), home, callers } = {}) {
+    this.callers = callers;
     this.githubApi = githubApi;
     this.linearApi = linearApi;
     this.root = fs.realpathSync(root);
-    this.home = path.join(this.root, '.codex/conductor');
+    this.isHomeOutside = home !== undefined;
+    this.home = home === undefined ? path.join(this.root, '.codex/conductor') : path.resolve(home);
   }
   ledgerFile(id) { return path.join(this.home, 'runs', validId(id), 'ledger.json'); }
   load(id) { const raw = readJSON(this.ledgerFile(id)); parsed(raw); return raw; }
@@ -99,6 +102,7 @@ export class Conductor {
   }
   init() {
     fs.mkdirSync(path.join(this.home, 'runs'), { recursive: true });
+    if (this.isHomeOutside) return ok('Conductor enabled for this home.');
     const ignore = path.join(this.root, '.gitignore');
     const before = fs.existsSync(ignore) ? fs.readFileSync(ignore, 'utf8') : '';
     const additions = ['.codex/conductor/runs/', '.codex/conductor/.adapter.lock/'].filter(line => !before.split('\n').includes(line));
@@ -116,12 +120,16 @@ export class Conductor {
       if (fs.existsSync(this.ledgerFile(request.id))) fail('That run already exists; read its board to resume it.');
       const issue = input.issue ?? issueFromSource(request.source);
       if (issue !== undefined && (typeof issue !== 'string' || !linearKeyOf(issue) || linearKeyOf(issue) !== issue)) fail('issue must be a Linear issue key, such as ABC-12.');
-      // Only the staffing block of the project's config is used here: this interface has no Lore and no places.
       const configFile = path.join(this.root, CONFIG_PATH);
       const project = fs.existsSync(configFile) ? parseConfig(fs.readFileSync(configFile, 'utf8')) : { config: {} };
       if (project.error) fail(project.error);
-      const staffing = project.config.staffing;
-      const raw = newRun(request.id, request.source, now(), request.title, { ...(issue ? { tickets: 'linear' } : {}), ...(staffing === undefined ? {} : { config: { staffing } }) });
+      const look = folder => {
+        const root = path.join(this.root, folder);
+        return { root, kind: !fs.existsSync(root) ? 'missing' : fs.existsSync(path.join(root, '.lore')) ? 'lore' : fs.existsSync(path.join(root, '.git')) ? 'git' : 'plain' };
+      };
+      const setup = runSetup(project.config, { place: input.place, base: input.base ?? 'main', look });
+      if (setup.error) fail(setup.error);
+      const raw = newRun(request.id, request.source, now(), request.title, { ...(issue ? { tickets: 'linear' } : {}), ...(setup.config === undefined ? {} : { config: setup.config }), ...(setup.workspace === undefined ? {} : { workspace: setup.workspace }) });
       if (issue) raw.run.issue = issue;
       raw.run.maxParallel = maxParallel;
       raw.codex = { adapterVersion: 1, base: input.base ?? 'main', workspaces: {} };
@@ -375,17 +383,17 @@ export class Conductor {
 export async function main(argv = process.argv.slice(2)) {
   const command = argv.shift();
   if (!command || command === 'help' || command === '--help') {
-    console.log('conductor.mjs <init|conduct|list|board|board_open|board_close|digest|brief|worktree|handover|task_add|task_update|run_plan|approve|approve_merge|quarantine|model_policy|tier|pause|unpause|merged|board_post|board_rule|problem_report|problem_assign|problem_resolve|merge_check|merge|reconcile|linear_sync|linear_ack> --root <project> [--run <id>] [--input <JSON file>] [--caller orchestrator|owner|worker:<task>]\nJSON input may also be read from stdin with --input -. Approval commands require --caller owner after the user explicitly requests them.');
+    console.log('conductor.mjs <init|conduct|list|board|board_open|board_close|digest|brief|worktree|handover|task_add|task_update|run_plan|approve|approve_merge|quarantine|model_policy|tier|pause|unpause|merged|board_post|board_rule|problem_report|problem_assign|problem_resolve|merge_check|merge|reconcile|linear_sync|linear_ack> --root <project> [--run <id>] [--input <JSON file>] [--caller orchestrator|owner|worker:<task>] [--home <dir>] [--callers <file>]\nJSON input may also be read from stdin with --input -. Approval commands require --caller owner after the user explicitly requests them.');
     return;
   }
   const options = {};
   while (argv.length) {
     const key = argv.shift();
-    if (!['--root', '--run', '--input', '--caller'].includes(key) || !argv.length) fail('Invalid arguments; see --help.');
+    if (!['--root', '--run', '--input', '--caller', '--home', '--callers'].includes(key) || !argv.length) fail('Invalid arguments; see --help.');
     options[key.slice(2)] = argv.shift();
   }
   if (!options.root) fail('Always provide --root (the original project root).');
-  const app = new Conductor(options.root);
+  const app = new Conductor(options.root, { home: options.home, callers: options.callers });
   const input = options.input ? readJSON(options.input === '-' ? 0 : options.input) : {};
   if (!input || typeof input !== 'object' || Array.isArray(input)) fail('Input must be a JSON object.');
   const callerName = options.caller ?? 'orchestrator';

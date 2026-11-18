@@ -3,7 +3,7 @@
  * and what a Lore project needs before a run can start. Pure.
  */
 
-import type { Place, ProjectConfig } from '../types'
+import type { Place, ProjectConfig, RunWorkspace } from '../types'
 import { TIERS } from './ledger'
 import { ignoreRules, isIgnored } from './lore'
 
@@ -207,6 +207,43 @@ export function placeConfig(place: Place, team: string): ProjectConfig {
     ...(place.lore === undefined ? {} : { lore: place.lore }),
     ...(place.check === undefined ? {} : { check: place.check }),
     ...(place.staffing === undefined ? {} : { staffing: place.staffing }),
+  }
+}
+
+/**
+ * What a run started from outside the mod keeps of its home: the whole config
+ * for a repository home, or for a home that is not a repository (it lists
+ * places) the workspace of the named place and that place's settings, with the
+ * place's first team as its ticket's team. `look` reads the disk: where the
+ * place's folder is, and whether it is there and what it holds (a folder that
+ * is no repository yet counts as git). Pure otherwise; answers the error text
+ * when no run may start.
+ */
+export function runSetup(
+  config: ProjectConfig,
+  ask: { place?: string; base: string; look: (folder: string) => { root: string; kind: 'missing' | 'plain' | 'git' | 'lore' } },
+): { config?: ProjectConfig; workspace?: RunWorkspace } | { error: string } {
+  const refused = (reason: string) => ({ error: `No run was started. ${reason}` })
+  if (config.places === undefined) {
+    if (ask.place !== undefined) return refused('This home is a repository and lists no places: the run works in it, so do not name a place.')
+    const problem = homeConfigProblem(config, 'repository')
+    if (problem !== undefined) return refused(problem)
+
+    return Object.keys(config).length === 0 ? {} : { config }
+  }
+  const problem = homeConfigProblem(config, 'folder')
+  if (problem !== undefined) return refused(problem)
+  const bare = (folder: string): string => folder.replace(/\/+$/, '')
+  const names = config.places.map(one => bare(one.folder)).join(', ')
+  if (ask.place === undefined) return refused(`This home is not a repository: name the place the run works in, one of ${names}.`)
+  const place = config.places.find(one => bare(one.folder) === bare(ask.place ?? ''))
+  if (place === undefined) return refused(`"${ask.place}" is no place of this home: one of ${names}.`)
+  const found = ask.look(place.folder)
+  if (found.kind === 'missing') return refused(`The folder of the place ${bare(place.folder)}, ${place.folder}, is no folder in this home: correct config.json, or make the folder.`)
+
+  return {
+    config: placeConfig(place, place.teams[0] ?? ''),
+    workspace: { kind: found.kind === 'lore' ? 'lore' : 'git', root: found.root, place: place.folder, base: place.base ?? ask.base },
   }
 }
 
