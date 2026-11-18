@@ -88,7 +88,7 @@ function who(command) {
   if (command === 'task_update') return ['orchestrator', 'worker', 'dispatcher'];
   if (command.startsWith('problem_') || ORCHESTRATOR.includes(command)) return ['orchestrator', ...(WORKER.includes(command) ? ['worker'] : [])];
   if (WORKER.includes(command)) return ['worker'];
-  // A dispatcher's approval is bound to a recorded person decision by a later task; here only kind, department and run are checked.
+  // A dispatcher's approve, approve_main, approve_merge, tier and model_policy are bound to a person decision by decisionMay; here only kind, department and run are checked.
   if (DECIDER.includes(command)) return ['decider', 'dispatcher'];
   if (command === 'pause' || command === 'unpause') return ['decider', 'dispatcher'];
   // The run's orchestrator lands the run on the base under the plan's decision; a dispatcher may too, for a person's go-ahead.
@@ -137,9 +137,17 @@ export function callerMay(proven, command, ctx = {}) {
 
 // The gates a recorded decision decides, and who may stand behind one: a decider as decider:<its department>, a dispatcher as person:<id> of the person its record names.
 const GATES = ['approve', 'approve_main'];
+// Open to a decider as it is, but a dispatcher passes them only on a person's decision {by, ref} (no hash, nothing recorded by Conductor).
+const PERSON_ONLY = ['approve_merge', 'tier', 'model_policy'];
 // proven: what resolveCaller returned, or null. ctx: { input, runCallers }. Returns true, or { refused } with the reason.
 // Without --callers nothing is required: the CI checks a hash or records a decision when one is given.
 export function decisionMay(proven, command, ctx = {}) {
+  if (proven?.kind === 'dispatcher' && !proven.refused && PERSON_ONLY.includes(command)) {
+    const decision = ctx.input?.decision;
+    if (!decision || typeof decision !== 'object' || Array.isArray(decision) || !text(decision.by) || !text(decision.ref)) return { refused: `A dispatcher's ${command} carries a decision {by, ref}.` };
+    if (!text(proven.person) || decision.by !== `person:${proven.person}`) return { refused: "A dispatcher's decision is by the person its record names (person:<id>); this caller has none or another." };
+    return true;
+  }
   if (!proven || proven.refused || !GATES.includes(command) || !['decider', 'dispatcher'].includes(proven.kind)) return true;
   const input = ctx.input ?? {};
   if (command === 'approve' && !text(input.planSha256)) return { refused: 'An approval by a proven caller names the plan hash it approves (planSha256).' };

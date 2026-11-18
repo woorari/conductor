@@ -19,7 +19,8 @@ import type { FlightHost, SettleHost, SurveyHost } from './github-merge'
 import { LINEAR_KEY, parseLedger } from './ledger'
 import { branchInfoOf, notInLore, statusOf } from './lore'
 import { approvedMain, baseBroughtIn, letGo, onBase, readyForBase, rev7, startLoreMerge, syncEnded } from './lore-merge'
-import { LONG_MS, LORE_LONG_MS, bringBase, landBase } from './lore-steps'
+import { LORE_CLAIM_STALE_MIN } from './lore-claims'
+import { LONG_MS, bringBase, landBase } from './lore-steps'
 import type { LoreHost } from './lore-steps'
 import { abandoned, closes, closingLine, messageOf, obstacles, onMain, precheck, pullOf, short, startMerge } from './merge'
 import { parseConfig } from './project'
@@ -32,13 +33,6 @@ import { isInside, runWorkspaceOf, taskBranchOf, workspaceOf, workspacesOf } fro
 export const NOT_DONE = 'Not done.'
 /** The merge tool's name, as a message names it. */
 export const TOOL_MERGE = 'mcp__conductor__merge'
-
-/**
- * A Lore claim older than this was not heard of again: longer than the
- * longest a live merge holds its claim (a switch, a merge and a push of up
- * to LORE_LONG_MS each, then a scan and a removal of up to LONG_MS each).
- */
-export const LORE_CLAIM_STALE_MIN = (3 * LORE_LONG_MS + 3 * LONG_MS) / 60_000
 
 const iso = (ms: number): string => new Date(ms).toISOString()
 
