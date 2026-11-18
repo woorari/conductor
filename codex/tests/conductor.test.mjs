@@ -497,7 +497,11 @@ async function homeFixture(t, { remote = true } = {}) {
   await add(app, 'one'); await propose(app); await approve(app);
   return { ...repo, app, home };
 }
-function ghStub(t) {
+// Node runs `gh` without a shell, and Windows finds only gh.exe on PATH, so a script stub cannot stand in there.
+// On Windows the adapter's own githubApi stands in: origin is still read from git, but the gh cwd is not observed.
+const onWindows = process.platform === 'win32';
+function ghStub(t, app) {
+  if (onWindows) return windowsGh(app);
   const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'conductor-gh-'));
   const log = path.join(bin, 'cwd.log');
   const sha = 'a'.repeat(40);
@@ -519,6 +523,18 @@ esac
   t.after(() => { process.env.PATH = before; fs.rmSync(bin, { recursive: true, force: true }); });
   return () => fs.existsSync(log) ? fs.readFileSync(log, 'utf8').split('\n').filter(Boolean) : [];
 }
+function windowsGh(app) {
+  const sha = 'a'.repeat(40);
+  let merged = false;
+  app.githubApi = async (endpoint, method = 'GET') => {
+    if (endpoint.endsWith('/merge')) { merged = true; throw new Error('Simulated dropped response'); }
+    if (endpoint.includes('/pulls/')) return { state: merged ? 'closed' : 'open', merged, mergeable: true, mergeable_state: 'clean', draft: false, base: { ref: 'main' }, head: { sha }, title: 'Change', body: '', merge_commit_sha: merged ? 'c'.repeat(40) : null };
+    if (endpoint.includes('/check-runs')) return { total_count: 1, check_runs: [{ name: 'tests', status: 'completed', conclusion: 'success' }] };
+    if (endpoint.includes('/status')) return { total_count: 0, statuses: [] };
+    return { commit: { sha: 'b'.repeat(40) } };
+  };
+  return () => [];
+}
 const ready = async app => {
   await app.apply('run', 'task_update', { task: 'one', pr: 1, status: 'green' });
   await app.apply('run', 'approve_merge', { task: 'one', head: 'a'.repeat(40) }, owner);
@@ -535,24 +551,24 @@ test("worktree uses the run's git workspace root under a non-repository root", a
 
 test("merge_check reads origin from the run's git workspace root", async t => {
   const { app, root } = await homeFixture(t);
-  const cwds = ghStub(t);
+  const cwds = ghStub(t, app);
   await ready(app);
   const check = await app.github('run', { task: 'one' });
   assert.equal(check.isError, false, check.text);
-  assert.ok(cwds().length > 0);
-  for (const cwd of cwds()) assert.equal(cwd, fs.realpathSync(root));
+  if (!onWindows) assert.ok(cwds().length > 0);
+  for (const cwd of cwds()) assert.equal(fs.realpathSync(cwd), fs.realpathSync(root));
 });
 
 test("reconcile reads origin from the run's git workspace root", async t => {
   const { app, root } = await homeFixture(t);
-  const cwds = ghStub(t);
+  const cwds = ghStub(t, app);
   await ready(app);
   await assert.rejects(() => app.github('run', { task: 'one', head: 'a'.repeat(40), told: [] }, true), /uncertain/);
   assert.ok(app.load('run').merge);
   await app.reconcile('run', {});
   assert.equal(app.load('run').tasks[0].status, 'done');
-  assert.ok(cwds().length > 0);
-  for (const cwd of cwds()) assert.equal(cwd, fs.realpathSync(root));
+  if (!onWindows) assert.ok(cwds().length > 0);
+  for (const cwd of cwds()) assert.equal(fs.realpathSync(cwd), fs.realpathSync(root));
 });
 
 test('a run without a workspace keeps the --root repository', async t => {
