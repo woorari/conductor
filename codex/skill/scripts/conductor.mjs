@@ -19,7 +19,8 @@ import { linearKeyOf } from './core/linear.mjs';
 import { approvedMainAt } from './core/lore-merge.mjs';
 import { resolveCaller, callerMay, decisionMay, legacyCaller, runCallersOf, callersFolder, callersBound, withAgent } from './callers.mjs';
 import { openBoard, closeBoard } from './board-launcher.mjs';
-import { approveLore, isLoreLedger, worktreeLore } from './lore-host.mjs';
+import { isLoreLedger } from './lore-host.mjs';
+import { approveLore, worktreeLore } from './lore-commands.mjs';
 import { issueFromSource, refreshLinear, pendingLinear, linearApiFromEnvironment, synchronizeLinear, acknowledgeLinear } from './linear.mjs';
 
 const now = () => new Date().toISOString();
