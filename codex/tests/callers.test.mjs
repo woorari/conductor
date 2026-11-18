@@ -129,7 +129,8 @@ const rows = [
   ['pause', {}, decider(), orchestrator()],
   ['unpause', {}, dispatcher(), worker('a')],
   ['run_merge_main', {}, dispatcher(), decider()],
-  ['run_merge_main', {}, dispatcher(), orchestrator()],
+  ['run_merge_main', {}, orchestrator(), worker('a')],
+  ['run_merge_main', {}, orchestrator(), orchestrator('other')],
   ['run_merge_main', {}, dispatcher(), worker('a')],
   ['merged', {}, dispatcher(), orchestrator()],
   ['conduct', { id: 'run', department: 'engineering' }, orchestrator(), decider()],
@@ -476,16 +477,30 @@ test('a decider with no agent in its record records none and cannot name one', (
   assert.deepEqual(withAgent(null, 'approve', input('x')), input('x'), 'without --callers the input stands');
 });
 
-test('run_merge_main is a dispatcher\'s call: a proven orchestrator and a call with no --callers are refused', async t => {
+test('run_merge_main: the run\'s orchestrator or a dispatcher; no call without --callers', async t => {
   const f = await started(t);
   const before = fs.readFileSync(f.ledger);
+  // The orchestrator of the run passes the caller gate (a non-Lore run then refuses on its own account: it has no Lore branch).
   const orchestrated = f.call('run_merge_main', { token: f.token });
-  assert.notEqual(orchestrated.status, 0);
-  assert.match(orchestrated.all, /may not run run_merge_main/);
+  assert.doesNotMatch(orchestrated.all, /may not run run_merge_main|needs --callers/);
+  for (const [name, record] of [['a worker', worker('a')], ['a decider', decider()], ['another run\'s orchestrator', orchestrator('other')]]) {
+    const refused = f.call('run_merge_main', { token: issueCaller(f.dir, record) });
+    assert.notEqual(refused.status, 0, name);
+  }
   for (const extra of [[], ['--caller', 'owner'], ['--caller', 'orchestrator']]) {
     const plain = spawnSync(process.execPath, [cli, 'run_merge_main', '--root', f.root, '--home', f.home, '--run', 'run', ...extra], { encoding: 'utf8' });
     assert.notEqual(plain.status, 0, `without --callers ${extra.join(' ')}`);
-    assert.match(plain.stdout + plain.stderr, /needs --callers and a dispatcher's token|requires proven callers/);
+    assert.match(plain.stdout + plain.stderr, /requires proven callers/);
+  }
+  // A run made without callers is refused by the command's own sentence.
+  const open = fixture(t);
+  const file = path.join(open.parent, 'start.json');
+  fs.writeFileSync(file, JSON.stringify({ id: 'run', source: 'Test request', title: 'Test run' }));
+  assert.equal(spawnSync(process.execPath, [cli, 'conduct', '--root', open.root, '--home', open.home, '--input', file], { encoding: 'utf8' }).status, 0);
+  for (const extra of [[], ['--caller', 'owner'], ['--caller', 'orchestrator']]) {
+    const plain = spawnSync(process.execPath, [cli, 'run_merge_main', '--root', open.root, '--home', open.home, '--run', 'run', ...extra], { encoding: 'utf8' });
+    assert.notEqual(plain.status, 0, `no callers ${extra.join(' ')}`);
+    assert.match(plain.stdout + plain.stderr, /needs --callers and the run's orchestrator or a dispatcher/);
   }
   assert.deepEqual(fs.readFileSync(f.ledger), before);
 });

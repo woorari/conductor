@@ -99,7 +99,6 @@ test('a whole Lore run with no person present', async t => {
 
   const orchestrator = issueCaller(dir, { kind: 'orchestrator', department: 'engineering', run: 'run', expiresAt: hours(12) });
   const decider = issueCaller(dir, { kind: 'decider', department: 'engineering', agent: 'lead-a', expiresAt: hours(24) });
-  const dispatcher = issueCaller(dir, { kind: 'dispatcher', department: 'engineering', person: 'p1', expiresAt: hours(1) });
   const worker = task => issueCaller(dir, { kind: 'worker', department: 'engineering', run: 'run', task, expiresAt: hours(12) });
 
   call('conduct', orchestrator, { id: 'run', source: 'Test request', title: 'Test run', place: 'game-code', department: 'engineering' }, { run: undefined });
@@ -126,9 +125,9 @@ test('a whole Lore run with no person present', async t => {
   use(AFTER({ runHead: HEAD2, status: HEAD2 }));
   assert.equal(call('run_check', orchestrator, {}).verdict, 'passed');
 
-  // A dispatcher merges the run into the base, by the plan decision that covers the head.
+  // The run's orchestrator merges the run into the base, by the plan decision that covers the head.
   use(AFTER({ runHead: HEAD2, status: HEAD2 }));
-  call('run_merge_main', dispatcher);
+  call('run_merge_main', orchestrator);
   const raw = JSON.parse(fs.readFileSync(path.join(home, 'runs/run/ledger.json'), 'utf8'));
   assert.equal(raw.run.merged.revision, HEAD2);
   assert.equal(raw.run.merged.revision, raw.run.lore.head, 'what went into the base is the head that was checked and decided');
@@ -136,6 +135,7 @@ test('a whole Lore run with no person present', async t => {
   assert.equal(raw.run.check.verdict, 'passed');
   const said = lore();
   assert.ok(said.indexOf('branch unprotect main') >= 0 && said.indexOf('branch protect main') > said.indexOf('branch unprotect main'), 'the base is unprotected for the merge and protected again');
+  assert.equal(fs.readFileSync(path.join(parent, 'check-ran.txt'), 'utf8').includes('_check'), true, 'the check ran in the check workspace');
   assert.ok(argvs.length >= 17);
   assert.equal(argvs.some(args => args.includes('--caller')), false, 'no call used --caller');
 });

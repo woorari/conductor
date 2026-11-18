@@ -473,7 +473,7 @@ export async function main(argv = process.argv.slice(2)) {
     else if (command === 'run_check') result = await app.runCheck(id, input);
     else if (command === 'run_sync_base') result = await app.runSyncBase(id);
     else if (command === 'run_merge_main') {
-      if (proven === null || proven.kind !== 'dispatcher') fail('run_merge_main needs --callers and a dispatcher\'s token: landing on the base is the dispatcher\'s work, not a model session\'s.');
+      if (proven === null) fail('run_merge_main needs --callers and the run\'s orchestrator or a dispatcher.');
       result = await app.runMergeMain(id);
     }
     else if (command === 'reconcile') result = await app.reconcile(id, input);
