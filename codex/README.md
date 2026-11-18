@@ -83,7 +83,7 @@ Who may run what with a proven caller (a command not listed here is refused to e
 | `brief` | the run's orchestrator, or a worker for its own task only |
 | `board_post` | the run's orchestrator, or any worker of the run |
 | `quarantine` | a worker (it quarantines in its own task's workspace) |
-| `approve`, `approve_main`, `approve_merge`, `tier`, `model_policy`, `pause`, `unpause` | a decider of the run's department, or a dispatcher |
+| `approve`, `approve_main`, `approve_merge`, `tier`, `model_policy`, `pause`, `unpause` | a decider of the run's department, or a dispatcher; a dispatcher needs a decision `{by, ref}` with `by` = `person:<the person its record names>` on `approve`, `approve_main`, `approve_merge`, `tier` and `model_policy` (refused otherwise), and none on `pause` and `unpause` |
 | `run_merge_main` | the run's orchestrator, or a dispatcher |
 | `merged` | a dispatcher |
 | `linear_sync`, `linear_ack` | no proven caller (they are not open to one) |
