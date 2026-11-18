@@ -97,6 +97,23 @@ export function callerMay(proven, command, ctx = {}) {
   return true;
 }
 
+// The gates a recorded decision decides, and who may stand behind one: a decider as decider:<its department>, a dispatcher as person:<id>.
+const GATES = ['approve', 'approve_main'];
+// proven: what resolveCaller returned, or null. ctx: { input, runCallers }. Returns true, or { refused } with the reason.
+// Without --callers nothing is required: the CI checks a hash or records a decision when one is given.
+export function decisionMay(proven, command, ctx = {}) {
+  if (!proven || proven.refused || !GATES.includes(command) || !['decider', 'dispatcher'].includes(proven.kind)) return true;
+  const input = ctx.input ?? {};
+  if (command === 'approve' && !text(input.planSha256)) return { refused: 'An approval by a proven caller names the plan hash it approves (planSha256).' };
+  const decision = input.decision;
+  if (!decision || typeof decision !== 'object' || Array.isArray(decision) || !text(decision.by) || !text(decision.ref)) return { refused: 'An approval by a proven caller carries a decision {by, ref}.' };
+  if (proven.kind === 'decider') {
+    const department = ctx.runCallers?.department;
+    if (!text(department) || decision.by !== `decider:${department}`) return { refused: `A decider's decision is by decider:${department ?? '<department>'}.` };
+  } else if (!/^person:\S+$/.test(decision.by)) return { refused: "A dispatcher's decision is by a person (person:<id>)." };
+  return true;
+}
+
 // The shape the command bodies already take.
 export function legacyCaller(proven) {
   if (!proven || proven.refused) return { kind: 'stranger' };

@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { approveMerge, mergeApproved, DELIVERY, ORCHESTRATOR_ROLE } from './core/delivery.mjs';
 import { quarantine } from './quarantine.mjs';
 import { complexityOf, selectModel, staffLabel } from './core/models.mjs';
 import { RUN_ID, parseLedger, TIERS } from './core/ledger.mjs';
-import { conducting, newRun } from './core/plan.mjs';
+import { conducting, newRun, canonicalPlan, planGate, mainGate, decisionLines, factsLines } from './core/plan.mjs';
 import { CONFIG_PATH, parseConfig, runSetup } from './core/project.mjs';
 import * as signals from './core/signals.mjs';
 import { preflight, route } from './core/router.mjs';
@@ -15,7 +16,8 @@ import { post, rule, digest } from './core/posts.mjs';
 import { pauseRun, unpauseRun } from './core/pause.mjs';
 import * as merges from './core/merge.mjs';
 import { linearKeyOf } from './core/linear.mjs';
-import { resolveCaller, callerMay, legacyCaller, runCallersOf } from './callers.mjs';
+import { approvedMainAt } from './core/lore-merge.mjs';
+import { resolveCaller, callerMay, decisionMay, legacyCaller, runCallersOf } from './callers.mjs';
 import { openBoard, closeBoard } from './board-launcher.mjs';
 import { issueFromSource, refreshLinear, pendingLinear, linearApiFromEnvironment, synchronizeLinear, acknowledgeLinear } from './linear.mjs';
 
@@ -23,6 +25,8 @@ const now = () => new Date().toISOString();
 const fail = message => { throw new Error(message); };
 const ok = (text, more = {}) => ({ isChanged: true, isError: false, text, ...more });
 const validId = value => typeof value === 'string' && RUN_ID.test(value) ? value : fail('Use a run/task id of 1–64 letters, digits, hyphens or underscores.');
+// The hash of what a plan approval covers: sha256 of canonicalPlan, in hex.
+const planHash = (ledger, base) => crypto.createHash('sha256').update(canonicalPlan(ledger, base)).digest('hex');
 const readJSON = file => JSON.parse(fs.readFileSync(file, 'utf8'));
 function parsed(raw) {
   const result = parseLedger(JSON.stringify(raw));
@@ -53,6 +57,7 @@ function sameDirectory(left, right) {
 export function board(raw) {
   const ledger = parsed(raw);
   const lines = [`# ${ledger.run.title} (${ledger.run.id})`, `Plan: ${ledger.run.plan ?? 'approved'}${ledger.run.pausedAt ? ' · PAUSED' : ''}`, '', '| Task | Status | Complexity | Staffing | Next worker model | Depends on | Expected files | Note |', '| --- | --- | --- | --- | --- | --- | --- | --- |'];
+  lines.splice(2, 0, ...decisionLines(ledger));
   lines.splice(2, 0, `Delivery: ${ledger.run.delivery === 'review-only' ? 'review only; base merges reserved' : ledger.run.delivery === 'complete' ? `complete, including reviewed merges into ${ledger.run.deliveryBase}` : ['draft', 'proposed'].includes(ledger.run.plan) ? 'approval will cover complete delivery including reviewed base merges; honor explicit owner limits' : 'legacy approval; retain its recorded limits'}. Expected files may be adjusted to deliver the approved outcome.`);
   const cell = value => String(value ?? '').replaceAll('|', '\\|').replaceAll('\n', ' ');
   for (const task of ledger.tasks) lines.push(`| ${cell(task.id)}: ${cell(task.title)} | ${task.status} | ${complexityOf(task.tier)} | ${cell(staffLabel(task))} | ${task.status === 'done' ? '—' : cell(selectModel('codex', task.tier, raw.codex?.models).label)} | ${(task.dependsOn ?? []).join(', ')} | ${cell((task.files ?? []).join(', '))} | ${cell(task.note)} |`);
@@ -236,14 +241,24 @@ export class Conductor {
             ...result,
             text: 'Plan proposed. Explain that approval covers complete delivery, necessary implementation adjustments and reviewed merges into the base, unless the owner limits delivery to review. Render the full board below in your next user-visible reply, outside a code block, then wait for approval. Tool output alone is not the approval presentation.',
             board: board(raw),
+            planSha256: planHash(parsed(raw), raw.codex?.base),
             approvalRequired: true,
           };
         }
         case 'approve': {
           owner();
-          const issues = preflight(parsed(raw));
+          const ledger = parsed(raw);
+          const issues = preflight(ledger);
           if (issues.length) fail(issues.join('\n'));
-          return signals.approvePlan(raw, input.delivery ?? 'complete', raw.codex.base);
+          const gate = planGate(planHash(ledger, raw.codex.base), input, at);
+          if (gate.error) fail(gate.error);
+          return signals.approvePlan(raw, input.delivery ?? 'complete', raw.codex.base, gate.decision);
+        }
+        case 'approve_main': {
+          owner();
+          const gate = mainGate(input, at);
+          if (gate.error) fail(gate.error);
+          return approvedMainAt(raw, at, { revision: input.revision, base: input.base }, gate.decision);
         }
         case 'tier': owner(); if (input.tier !== undefined && !TIERS.includes(input.tier)) fail('tier must be opus, sonnet or haiku (planning labels).'); return signals.ownerStaffs(raw, input.task, { tier: input.tier, agent: input.agent, effort: input.effort });
         case 'pause': owner(); return pauseRun(raw, at);
@@ -385,7 +400,7 @@ export class Conductor {
 export async function main(argv = process.argv.slice(2)) {
   const command = argv.shift();
   if (!command || command === 'help' || command === '--help') {
-    console.log('conductor.mjs <init|conduct|list|board|board_open|board_close|digest|brief|worktree|handover|task_add|task_update|run_plan|approve|approve_merge|quarantine|model_policy|tier|pause|unpause|merged|board_post|board_rule|problem_report|problem_assign|problem_resolve|merge_check|merge|reconcile|linear_sync|linear_ack> --root <project> [--run <id>] [--input <JSON file>] [--caller orchestrator|owner|worker:<task>] [--home <dir>] [--callers <dir>]\nJSON input may also be read from stdin with --input -. Approval commands require --caller owner after the user explicitly requests them.');
+    console.log('conductor.mjs <init|conduct|list|board|board_open|board_close|digest|brief|worktree|handover|task_add|task_update|run_plan|approve|approve_main|approve_merge|quarantine|model_policy|tier|pause|unpause|merged|board_post|board_rule|problem_report|problem_assign|problem_resolve|merge_check|merge|reconcile|linear_sync|linear_ack> --root <project> [--run <id>] [--input <JSON file>] [--caller orchestrator|owner|worker:<task>] [--home <dir>] [--callers <dir>]\nJSON input may also be read from stdin with --input -. Approval commands require --caller owner after the user explicitly requests them.');
     return;
   }
   const options = {};
@@ -401,8 +416,11 @@ export async function main(argv = process.argv.slice(2)) {
   const proven = options.callers === undefined ? null : resolveCaller(options.callers, process.env.CONDUCTOR_TOKEN, new Date());
   const askedRun = command === 'conduct' ? input.id : options.run;
   const ledgerFile = typeof askedRun === 'string' && RUN_ID.test(askedRun) ? app.ledgerFile(askedRun) : undefined;
-  const verdict = callerMay(proven, command, { run: askedRun, input, callerFlag: options.caller, runCallers: ledgerFile && fs.existsSync(ledgerFile) ? readJSON(ledgerFile).run?.callers : undefined });
+  const runCallers = ledgerFile && fs.existsSync(ledgerFile) ? readJSON(ledgerFile).run?.callers : undefined;
+  const verdict = callerMay(proven, command, { run: askedRun, input, callerFlag: options.caller, runCallers });
   if (verdict !== true) fail(verdict.refused);
+  const bound = decisionMay(proven, command, { input, runCallers });
+  if (bound !== true) fail(bound.refused);
   const callerName = options.caller ?? 'orchestrator';
   const caller = proven !== null ? legacyCaller(proven) : callerName.startsWith('worker:') ? { kind: 'worker', taskId: validId(callerName.slice(7)) } : { kind: callerName };
   if (proven === null && !['orchestrator', 'owner', 'worker'].includes(caller.kind)) fail('Invalid caller.');
@@ -420,7 +438,13 @@ export async function main(argv = process.argv.slice(2)) {
       console.log(JSON.stringify(command === 'board_open' ? { boardView: await openBoard(app.root, id) } : await closeBoard(app.root, id), null, 2)); return;
     }
     if (command === 'board') { console.log(board(app.load(id))); return; }
-    if (command === 'digest') { console.log(digest(parsed(app.load(id)), caller)); return; }
+    if (command === 'digest') {
+      const raw = app.load(id);
+      const ledger = parsed(raw);
+      const text = digest(ledger, caller);
+      console.log(proven === null ? text : [caller.kind === 'worker' ? text : '', factsLines(ledger, planHash(ledger, raw.codex?.base)).join('\n')].filter(Boolean).join('\n\n'));
+      return;
+    }
     if (command === 'brief') { console.log(app.brief(id, input.task)); return; }
     if (['worktree', 'handover', 'merge_check', 'merge', 'reconcile', 'linear_sync', 'linear_ack'].includes(command) && caller.kind !== 'orchestrator') fail('Only the orchestrator performs this action.');
     if (command === 'linear_sync') { console.log(JSON.stringify(await app.linearSync(id), null, 2)); return; }

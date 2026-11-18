@@ -2,6 +2,7 @@ import { REVISION } from './lore'
 import type {
   Activity,
   CheckRecord,
+  GateDecision,
   Ledger,
   Merge,
   ModelTier,
@@ -255,6 +256,37 @@ function approval(value: unknown): Ledger['run']['approval'] {
   const from = fields(value, where)
 
   return { revision: revisionOf(from, 'revision', where), base: revisionOf(from, 'base', where), at: timeOf(from, 'at', where) }
+}
+
+function gateOf(from: Fields, where: string): GateDecision {
+  return { by: text(from, 'by', where), agent: optionalText(from, 'agent', where), ref: text(from, 'ref', where), at: timeOf(from, 'at', where) }
+}
+
+function decisions(value: unknown): Ledger['run']['decisions'] {
+  if (value === undefined) return undefined
+  const where = 'run.decisions'
+  const from = fields(value, where)
+  const plan = from.plan === undefined ? undefined : fields(from.plan, `${where}.plan`)
+  const main = from.main === undefined ? undefined : fields(from.main, `${where}.main`)
+
+  return {
+    ...(plan === undefined
+      ? {}
+      : {
+          plan: {
+            ...gateOf(plan, `${where}.plan`),
+            sha256: revisionOf(plan, 'sha256', `${where}.plan`),
+            delivery: oneOf(plan, 'delivery', `${where}.plan`, ['complete', 'review-only'] as const),
+          },
+        }),
+    ...(main === undefined ? {} : { main: { ...gateOf(main, `${where}.main`), revision: revisionOf(main, 'revision', `${where}.main`), base: revisionOf(main, 'base', `${where}.main`) } }),
+  }
+}
+
+function callersOf(value: unknown): Ledger['run']['callers'] {
+  if (value === undefined) return undefined
+
+  return { department: text(fields(value, 'run.callers'), 'department', 'run.callers') }
 }
 
 function mergedRun(value: unknown): Ledger['run']['merged'] {
@@ -546,6 +578,8 @@ export function parseLedger(source: string): Parsed {
         candidates: candidates(run.candidates),
         lore: loreRun(run.lore),
         approval: approval(run.approval),
+        callers: callersOf(run.callers),
+        decisions: decisions(run.decisions),
         merged: mergedRun(run.merged),
         check: checkRecord(run.check, 'run.check'),
       },

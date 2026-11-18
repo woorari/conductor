@@ -2,6 +2,7 @@ import type { Ledger, Merge, Problem, Task } from '../types'
 import { DELIVERY, ORCHESTRATOR_ROLE } from './delivery'
 import { short } from './merge'
 import { staffLabel } from './models'
+import { decisionLines } from './plan'
 import { standing, standingText } from './problems'
 import { preflight } from './router'
 
@@ -84,6 +85,7 @@ export function handover(ledger: Ledger, moment: Moment): string {
     ...(ledger.run.pausedAt === undefined
       ? []
       : [`The run is paused by the owner since ${ledger.run.pausedAt}: no worker starts and nothing is merged until they type /unpause. Workers that are building finish and hand back.`]),
+    ...decisionLines(ledger),
     ...(ledger.merge === undefined ? [] : [flightLine(ledger.merge)]),
     ...(ledger.orchestrator?.held === undefined
       ? []

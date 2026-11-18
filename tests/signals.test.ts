@@ -1,10 +1,12 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import { parseLedger } from '../hooks/ledger'
+import { approvedMain, approvedMainAt } from '../hooks/lore-merge'
 import {
   acted,
   activityText,
   addTask,
+  approvePlan,
   ownerSetsTier,
   ownerStaffs,
   reportProblem,
@@ -527,4 +529,73 @@ test('a new reservation clears only the old model; a failed start restores it an
   reserved(ledger, AT, { taskId: 't392-1', name: 't392-1', slot: 2 })
   spawned(ledger, AT, { name: 't392-1', agentId: 'new-worker', model: 'claude-haiku-current' })
   expect(task(ledger, 't392-1').model).toBe('claude-haiku-current')
+})
+
+describe('approvals by a recorded decision', () => {
+  const planned = (): Raw => {
+    const ledger = raw()
+    run(ledger).plan = 'proposed'
+    return ledger
+  }
+  const gate = { by: 'decider:engineering', agent: 'lead-a', ref: 'D1', at: AT, sha256: 'a'.repeat(64) }
+  const run = (ledger: Raw): Record<string, unknown> => ledger.run as Record<string, unknown>
+  const decisions = (ledger: Raw): unknown => run(ledger).decisions
+
+  test('a decider approval is recorded with its ref, hash and delivery', () => {
+    const ledger = planned()
+    expect(approvePlan(ledger, 'review-only', 'main', gate)).toMatchObject({ isChanged: true })
+    expect(run(ledger).plan).toBe('approved')
+    expect(decisions(ledger)).toEqual({ plan: { ...gate, delivery: 'review-only' } })
+    expect(parseLedger(JSON.stringify(ledger)).ledger?.run.decisions?.plan).toEqual({ ...gate, delivery: 'review-only' })
+  })
+
+  test('the typed approve is unchanged: no decision, no record', () => {
+    const ledger = planned()
+    expect(approvePlan(ledger)).toMatchObject({ isChanged: true })
+    expect(run(ledger).plan).toBe('approved')
+    expect(decisions(ledger)).toBeUndefined()
+    expect('decisions' in run(ledger)).toBe(false)
+  })
+
+  test('a refused approval records nothing', () => {
+    const ledger = planned()
+    expect(approvePlan(ledger, 'sideways' as 'complete', 'main', gate).isError).toBe(true)
+    expect(decisions(ledger)).toBeUndefined()
+  })
+
+  const lored = (): Raw => {
+    const ledger = raw()
+    run(ledger).lore = { remote: 'r', repository: 'x', base: 'main', branch: 'run/demo', head: 'c'.repeat(64), baseAt: 'd'.repeat(64) }
+    return ledger
+  }
+  const mainGate = { by: 'person:p1', ref: 'D2', at: AT }
+
+  test('approve_main binds the revision the run branch is at', () => {
+    const ledger = lored()
+    const stale = approvedMainAt(ledger, AT, { revision: 'e'.repeat(64), base: 'd'.repeat(64) }, mainGate)
+    expect(stale.isError).toBe(true)
+    expect(stale.text).toContain('c'.repeat(7))
+    expect(run(ledger).approval).toBeUndefined()
+    expect(decisions(ledger)).toBeUndefined()
+    expect(approvedMainAt(ledger, AT, { revision: 'c'.repeat(64), base: 'not-a-revision' }, mainGate).isError).toBe(true)
+    expect(approvedMainAt(raw(), AT, { revision: 'c'.repeat(64), base: 'd'.repeat(64) }, mainGate).isError).toBe(true)
+
+    expect(approvedMainAt(ledger, AT, { revision: 'c'.repeat(64), base: 'd'.repeat(64) }, mainGate)).toMatchObject({ isChanged: true })
+    expect(run(ledger).approval).toEqual({ revision: 'c'.repeat(64), base: 'd'.repeat(64), at: AT })
+    expect(decisions(ledger)).toEqual({ main: { ...mainGate, revision: 'c'.repeat(64), base: 'd'.repeat(64) } })
+    expect(parseLedger(JSON.stringify(ledger)).ledger?.run.decisions?.main).toEqual({ ...mainGate, revision: 'c'.repeat(64), base: 'd'.repeat(64) })
+  })
+
+  test('approve_main without a decision still binds the revision and records the approval only', () => {
+    const ledger = lored()
+    expect(approvedMainAt(ledger, AT, { revision: 'e'.repeat(64), base: 'd'.repeat(64) }).isError).toBe(true)
+    expect(approvedMainAt(ledger, AT, { revision: 'c'.repeat(64), base: 'd'.repeat(64) })).toMatchObject({ isChanged: true })
+    expect(decisions(ledger)).toBeUndefined()
+  })
+
+  test('the owner approval of the main revision is unchanged: no decision, no record', () => {
+    const ledger = lored()
+    expect(approvedMain(ledger, AT, { revision: 'e'.repeat(64), base: 'd'.repeat(64) })).toMatchObject({ isChanged: true })
+    expect(decisions(ledger)).toBeUndefined()
+  })
 })

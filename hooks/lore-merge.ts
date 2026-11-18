@@ -5,8 +5,9 @@
  * board then holds.
  */
 
-import type { Ledger, Task } from '../types'
+import type { GateDecision, Ledger, Task } from '../types'
 import type { Flight } from './merge'
+import { REVISION } from './lore'
 import { afterDone, lookLines, named, unsettled } from './problems'
 import { changed, refused } from './signals'
 import type { Caller, Outcome, Raw } from './signals'
@@ -144,11 +145,29 @@ export function readyForBase(ledger: Ledger, head: string | undefined): string[]
 }
 
 /** The owner's approval of the run branch's revision, and where the base stood then. */
-export function approvedMain(raw: Raw, at: string, approval: { revision: string; base: string }): Outcome {
+export function approvedMain(raw: Raw, at: string, approval: { revision: string; base: string }, decision?: GateDecision): Outcome {
   const run = raw.run as Loose
   run.approval = { revision: approval.revision, base: approval.base, at }
+  if (decision !== undefined) run.decisions = { ...(run.decisions as object | undefined), main: { ...decision, revision: approval.revision, base: approval.base } }
 
   return changed(`Approved ${rev7(approval.revision)} for the base branch.`)
+}
+
+/**
+ * `approve_main`: an approval by name, for a revision that is the run branch's
+ * head as the board last left it, and a base that is a revision. Refused for a
+ * run with no Lore branch or any other revision; the owner's own approval of
+ * the head the mod just read goes through approvedMain.
+ */
+export function approvedMainAt(raw: Raw, at: string, approval: { revision: string; base: string }, decision?: GateDecision): Outcome {
+  const head = (raw.run as Loose & { lore?: Loose }).lore?.head
+  if ((raw.run as Loose & { lore?: Loose }).lore === undefined) return refused('This run has no Lore branch.')
+  if (!REVISION.test(approval.revision) || !REVISION.test(approval.base)) return refused('revision and base are Lore revisions (64 hex characters).')
+  if (approval.revision !== head) {
+    return refused(`The run branch is at ${head === undefined ? 'no revision the board knows of' : rev7(String(head))}, not ${rev7(approval.revision)}: approve the revision the run branch is at now.`)
+  }
+
+  return approvedMain(raw, at, approval, decision)
 }
 
 /** The run branch is on the base branch: the run is merged. */

@@ -1,4 +1,4 @@
-import type { Ledger, Staffing } from '../types'
+import type { GateDecision, Ledger, Staffing } from '../types'
 import { RUN_ID } from './ledger'
 import { linearKeyOf } from './linear'
 import { FILES_PER_TASK, tidy } from './signals'
@@ -159,4 +159,114 @@ export function isApproval(text: string): boolean {
   if (first < 0 || (words[first] !== 'approve' && words[first] !== 'approved')) return false
 
   return words.slice(first + 1).every(word => GO.has(word))
+}
+
+/** JSON with every object's keys in sorted order: the same value is always the same text. */
+function sorted(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(sorted).join(',')}]`
+  if (typeof value === 'object' && value !== null) {
+    const kept = Object.entries(value).filter(([, one]) => one !== undefined)
+
+    return `{${kept.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([key, one]) => `${JSON.stringify(key)}:${sorted(one)}`).join(',')}}`
+  }
+
+  return JSON.stringify(value)
+}
+
+/**
+ * What a plan approval covers, as text: the run's id, title and base, and each
+ * task's id, title, tier, agent, effort, dependencies and files, tasks by id,
+ * dependencies and files sorted. Status, notes, workers, revisions and
+ * problems are not part of it. The caller hashes it (sha256, hex): this stays
+ * pure. The base is the one given, else the run branch's, else the run
+ * workspace's, else `main`.
+ */
+export function canonicalPlan(ledger: Ledger, base?: string): string {
+  const by = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0)
+
+  return sorted({
+    run: { id: ledger.run.id, title: ledger.run.title, base: base ?? ledger.run.lore?.base ?? ledger.run.workspace?.base ?? 'main' },
+    tasks: [...ledger.tasks]
+      .sort((a, b) => by(a.id, b.id))
+      .map(one => ({
+        id: one.id,
+        title: one.title,
+        tier: one.tier,
+        agent: one.agent,
+        effort: one.effort,
+        dependsOn: [...(one.dependsOn ?? [])].sort(by),
+        files: [...(one.files ?? [])].sort(by),
+      })),
+  })
+}
+
+/** The decision a call names, stamped with the time the CI gives it; or what is wrong with it. */
+function decisionOf(input: unknown, at: string): GateDecision | { error: string } {
+  const one = typeof input === 'object' && input !== null && !Array.isArray(input) ? (input as Record<string, unknown>) : undefined
+  const isText = (value: unknown): value is string => typeof value === 'string' && value.trim() !== ''
+  if (one === undefined || !isText(one.by) || !isText(one.ref) || (one.agent !== undefined && !isText(one.agent))) {
+    return { error: 'A decision is {by, ref} and may name its agent: by is decider:<department> or person:<id>, ref is its id in the decisions log.' }
+  }
+
+  return { by: one.by, ...(one.agent === undefined ? {} : { agent: one.agent as string }), ref: one.ref, at }
+}
+
+/**
+ * A plan approval's hash and decision, checked against the plan's own hash
+ * (`current`, which the caller took): refused when the plan changed after the
+ * approval named it, or when a decision does not say which plan it decides.
+ * Without either, nothing is checked and nothing is recorded.
+ */
+export function planGate(
+  current: string,
+  input: { planSha256?: unknown; decision?: unknown },
+  at: string,
+): { error: string } | { decision?: GateDecision & { sha256: string } } {
+  const given = input.planSha256
+  if (given !== undefined && (typeof given !== 'string' || !/^[0-9a-f]{64}$/.test(given))) return { error: 'planSha256 is the 64 hex characters of the plan hash (digest prints it).' }
+  if (given !== undefined && given !== current) {
+    return { error: `The plan changed after the hash you approved: you named ${given}, the plan hashes to ${current} now. Nothing was approved; read the board and approve the current plan.` }
+  }
+  if (input.decision === undefined) return {}
+  if (given === undefined) return { error: 'A decision names the plan hash it approves (planSha256).' }
+  const decision = decisionOf(input.decision, at)
+
+  return 'error' in decision ? decision : { decision: { ...decision, sha256: given } }
+}
+
+/** `approve_main`'s decision: the same shape, no hash. */
+export function mainGate(input: { decision?: unknown }, at: string): { error: string } | { decision?: GateDecision } {
+  if (input.decision === undefined) return {}
+  const decision = decisionOf(input.decision, at)
+
+  return 'error' in decision ? decision : { decision }
+}
+
+const decidedBy = (one: GateDecision): string => `${one.by}${one.agent === undefined ? '' : ` (${one.agent})`}, decision ${one.ref}, at ${one.at}`
+
+/** Who decided each gate, with the decision's ref and the hash or revision it covers: for the board, the digest and the handover. */
+export function decisionLines(ledger: Ledger): string[] {
+  const { plan, main } = ledger.run.decisions ?? {}
+
+  return [
+    ...(plan === undefined ? [] : [`Plan approved by ${decidedBy(plan)}: plan sha256 ${plan.sha256}, delivery ${plan.delivery}.`]),
+    ...(main === undefined ? [] : [`Merge into the base approved by ${decidedBy(main)}: revision ${main.revision}, base at ${main.base}.`]),
+  ]
+}
+
+/** What a decider reads before it decides: the run's department and place, the plan hash, the delivery, the Lore head and base, the check, and who decided what already. */
+export function factsLines(ledger: Ledger, planSha256: string): string[] {
+  const { run } = ledger
+  const check = run.check
+
+  return [
+    ...(run.callers === undefined ? [] : [`Department: ${run.callers.department}`]),
+    ...(run.workspace === undefined ? [] : [`Place: ${run.workspace.place}`]),
+    `Plan: ${run.plan ?? 'approved'}`,
+    `Plan sha256: ${planSha256}`,
+    `Delivery: ${run.delivery === undefined ? 'not decided yet' : `${run.delivery}${run.deliveryBase === undefined ? '' : `, base ${run.deliveryBase}`}`}`,
+    ...(run.lore === undefined ? [] : [`Lore head: ${run.lore.head ?? 'none yet'}`, `Lore base at: ${run.lore.baseAt ?? 'none yet'}`]),
+    `Check: ${check === undefined ? 'none recorded' : `${check.verdict} on ${check.revision} at ${check.at}`}`,
+    ...decisionLines(ledger),
+  ]
 }

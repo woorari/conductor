@@ -3,7 +3,8 @@ import type { Engine } from 'claude-code/testing'
 
 import { parseLedger } from '../hooks/ledger'
 import { handover } from '../hooks/handover'
-import { APPROVED, CONDUCT_USAGE, PLANNING, conducting, newRun, planning, planningOf } from '../hooks/plan'
+import { APPROVED, CONDUCT_USAGE, PLANNING, canonicalPlan, conducting, decisionLines, factsLines, newRun, planGate, planning, planningOf } from '../hooks/plan'
+import { boardView } from '../hooks/board'
 import { briefing } from '../hooks/posts'
 import { preflight, route } from '../hooks/router'
 import { addTask, approvePlan, proposePlan, spawned, updateTask } from '../hooks/signals'
@@ -287,4 +288,113 @@ test('/conduct takes a title, a name of its own and a spec document; /board take
   expect((await board($, '#12')).text).toContain('This session is bound to run 12.')
   expect(engine.store['bound:session-1']).toMatchObject({ run: '12' })
   expect((await board($, '#x')).text).toBe('"#x" is not a run id: letters, digits, _ and -, at most 64.')
+})
+
+describe('the plan hash', () => {
+  const copy = (ledger: Ledger = LEDGER): Ledger => JSON.parse(JSON.stringify(ledger)) as Ledger
+  const one = (ledger: Ledger, id: string) => ledger.tasks.find(each => each.id === id)!
+  const ON = 'a'.repeat(64)
+
+  test('the plan hash ignores status and notes', () => {
+    const plain = canonicalPlan(LEDGER)
+    const moved = copy()
+    one(moved, 't392-1').status = 'green'
+    one(moved, 't392-1').note = 'Halfway through the router.'
+    one(moved, 't392-1').worker = 'someone-else'
+    one(moved, 't392-1').revision = 'b'.repeat(64)
+    moved.problems = []
+    moved.run.pausedAt = '2026-10-09T10:00:00Z'
+    expect(canonicalPlan(moved)).toBe(plain)
+
+    const edits: Array<[string, (ledger: Ledger) => void]> = [
+      ['title', l => (one(l, 't392-1').title = 'Another title')],
+      ['tier', l => (one(l, 't392-1').tier = 'opus')],
+      ['agent', l => (one(l, 't392-1').agent = 'builder')],
+      ['effort', l => (one(l, 't392-1').effort = 'high')],
+      ['dependency', l => (one(l, 't392-1').dependsOn = ['t390-1'])],
+      ['file', l => (one(l, 't392-1').files = [...(one(l, 't392-1').files ?? []), 'extra.ts'])],
+      ['run title', l => (l.run.title = 'Another run')],
+      ['task', l => l.tasks.pop()],
+    ]
+    for (const [name, edit] of edits) {
+      const changed = copy()
+      edit(changed)
+      expect(canonicalPlan(changed), name).not.toBe(plain)
+    }
+  })
+
+  test('the plan is the same whatever order its tasks, files and dependencies come in', () => {
+    const shuffled = copy()
+    shuffled.tasks.reverse()
+    for (const each of shuffled.tasks) {
+      each.files = [...(each.files ?? [])].reverse()
+      each.dependsOn = [...(each.dependsOn ?? [])].reverse()
+    }
+    expect(canonicalPlan(shuffled)).toBe(canonicalPlan(LEDGER))
+    const parsed = JSON.parse(canonicalPlan(LEDGER)) as { run: Record<string, string>; tasks: { id: string }[] }
+    expect(Object.keys(parsed.run)).toEqual(['base', 'id', 'title'])
+    expect(parsed.tasks.map(each => each.id)).toEqual([...parsed.tasks.map(each => each.id)].sort())
+  })
+
+  test('the base is the run branch base, the workspace base or main, and a given base wins', () => {
+    expect(JSON.parse(canonicalPlan(LEDGER)).run.base).toBe('main')
+    const lore = copy()
+    lore.run.lore = { remote: 'r', repository: 'x', base: 'develop', branch: 'run/demo' }
+    expect(JSON.parse(canonicalPlan(lore)).run.base).toBe('develop')
+    expect(JSON.parse(canonicalPlan(lore, 'release')).run.base).toBe('release')
+  })
+
+  test('a stale plan hash is refused, naming both hashes', () => {
+    const gate = planGate(ON, { planSha256: 'b'.repeat(64), decision: { by: 'decider:engineering', ref: 'D1' } }, AT)
+    expect(gate).toEqual({ error: expect.stringContaining('b'.repeat(64)) })
+    expect('error' in gate && gate.error).toContain(ON)
+  })
+
+  test('a decision names the plan hash, and what it names is what is recorded', () => {
+    expect(planGate(ON, { decision: { by: 'decider:engineering', ref: 'D1' } }, AT)).toEqual({ error: expect.stringContaining('planSha256') })
+    expect(planGate(ON, { planSha256: ON, decision: { by: 'decider:engineering', agent: 'lead-a', ref: 'D1', at: 'forged' } }, AT)).toEqual({
+      decision: { by: 'decider:engineering', agent: 'lead-a', ref: 'D1', at: AT, sha256: ON },
+    })
+    expect(planGate(ON, {}, AT)).toEqual({})
+    expect(planGate(ON, { planSha256: ON }, AT)).toEqual({})
+    for (const decision of ['x', { by: 'decider:engineering' }, { ref: 'D1' }, { by: 7, ref: 'D1' }, { by: 'decider:engineering', ref: 'D1', agent: 4 }]) {
+      expect('error' in planGate(ON, { planSha256: ON, decision }, AT), JSON.stringify(decision)).toBe(true)
+    }
+    expect('error' in planGate(ON, { planSha256: 'nope', decision: { by: 'decider:engineering', ref: 'D1' } }, AT)).toBe(true)
+  })
+
+  test('the board, the digest and the handover say who decided each gate, with the ref and the hash or revision', () => {
+    const decided = copy()
+    decided.run.decisions = {
+      plan: { by: 'decider:engineering', agent: 'lead-a', ref: 'D1', at: AT, sha256: ON, delivery: 'complete' },
+      main: { by: 'person:p1', ref: 'D2', at: AT, revision: 'c'.repeat(64), base: 'd'.repeat(64) },
+    }
+    const lines = decisionLines(decided)
+    expect(lines).toHaveLength(2)
+    expect(lines[0]).toContain('decider:engineering')
+    for (const piece of ['lead-a', 'D1', ON, 'complete']) expect(lines[0], piece).toContain(piece)
+    for (const piece of ['person:p1', 'D2', 'c'.repeat(64)]) expect(lines[1], piece).toContain(piece)
+    expect(decisionLines(LEDGER)).toEqual([])
+    expect(boardView(decided, NOW).decisions).toEqual(lines)
+    expect(boardView(LEDGER, NOW).decisions).toBeUndefined()
+    expect(handover(decided, { at: AT })).toContain(lines[0]!)
+    expect(handover(LEDGER, { at: AT })).not.toContain('approved by')
+    const facts = factsLines(decided, ON)
+    expect(facts.join('\n')).toContain(`Plan sha256: ${ON}`)
+    expect(facts.join('\n')).toContain(lines[1]!)
+  })
+
+  test('the facts a decider reads: department, place, delivery, the Lore head and base, the check', () => {
+    const run = copy()
+    run.run.callers = { department: 'engineering' }
+    run.run.workspace = { kind: 'lore', root: '/h/game-code', place: 'game-code', base: 'main' }
+    run.run.delivery = 'review-only'
+    run.run.deliveryBase = 'main'
+    run.run.lore = { remote: 'r', repository: 'x', base: 'main', branch: 'run/demo', head: 'c'.repeat(64), baseAt: 'd'.repeat(64) }
+    run.run.check = { revision: 'c'.repeat(64), verdict: 'passed', at: AT }
+    const text = factsLines(run, ON).join('\n')
+    for (const piece of ['Department: engineering', 'Place: game-code', 'Delivery: review-only', `Lore head: ${'c'.repeat(64)}`, `Lore base at: ${'d'.repeat(64)}`, 'Check: passed', ON]) {
+      expect(text, piece).toContain(piece)
+    }
+  })
 })

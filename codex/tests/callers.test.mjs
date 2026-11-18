@@ -10,7 +10,8 @@ import { buildSkill } from '../build.mjs';
 const built = fs.mkdtempSync(path.join(os.tmpdir(), 'conductor-callers-built-'));
 const skillPath = buildSkill(path.join(built, 'conductor'));
 const callers = await import(pathToFileURL(path.join(skillPath, 'scripts', 'callers.mjs')).href);
-const { issueCaller, resolveCaller, revokeCaller, callerMay } = callers;
+const { issueCaller, resolveCaller, revokeCaller, callerMay, decisionMay } = callers;
+const { Conductor } = await import(pathToFileURL(path.join(skillPath, 'scripts', 'conductor.mjs')).href);
 const cli = path.join(skillPath, 'scripts', 'conductor.mjs');
 process.on('exit', () => fs.rmSync(built, { recursive: true, force: true }));
 
@@ -190,4 +191,164 @@ test('records are stored by hash with mode 0600', { skip: process.platform === '
     assert.equal(fs.readFileSync(path.join(dir, name), 'utf8').includes(token), false, 'the token is in no file');
     assert.equal(resolveCaller(dir, token, new Date()).department, 'engineering');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+// Gates: the plan hash and approvals by a recorded decision.
+const HASH = /[0-9a-f]{64}/;
+const REV = ch => ch.repeat(64);
+const asDecider = (ref, extra = {}) => ({ by: 'decider:engineering', agent: 'lead-a', ref, ...extra });
+const ledgerOf = f => JSON.parse(fs.readFileSync(f.ledger, 'utf8'));
+async function proposed(t) {
+  const f = await started(t);
+  const app = new Conductor(f.root, { home: f.home, callers: f.dir });
+  const plan = await app.apply('run', 'run_plan', {}, { kind: 'orchestrator' });
+  assert.equal(plan.isError, false, plan.text);
+  return { ...f, app, plan, orchestrator: f.token, hash: plan.planSha256 };
+}
+
+test('run_plan and digest output the plan hash, and digest the facts of the run', async t => {
+  const f = await proposed(t);
+  assert.match(f.hash, /^[0-9a-f]{64}$/);
+  const read = f.call('digest', { token: issueCaller(f.dir, decider()) });
+  assert.equal(read.status, 0, read.all);
+  assert.ok(read.out.includes(`Plan sha256: ${f.hash}`));
+  for (const piece of ['Department: engineering', 'Delivery:', 'Check:']) assert.ok(read.out.includes(piece), piece);
+  const plain = spawnSync(process.execPath, [cli, 'digest', '--root', f.root, '--home', f.home, '--run', 'run', '--caller', 'worker:a'], { encoding: 'utf8' });
+  assert.equal(plain.status, 0, 'a call without --callers still reads');
+  assert.equal(plain.stdout.includes('Plan sha256'), false, 'and prints what it printed before');
+});
+
+test('a decider approval is recorded and the board shows who decided', async t => {
+  const f = await proposed(t);
+  const token = issueCaller(f.dir, decider());
+  const done = f.call('approve', { token, input: { planSha256: f.hash, delivery: 'review-only', decision: asDecider('D-1') } });
+  assert.equal(done.status, 0, done.all);
+  const run = ledgerOf(f).run;
+  assert.equal(run.plan, 'approved');
+  assert.equal(run.delivery, 'review-only');
+  assert.deepEqual({ ...run.decisions.plan, at: undefined }, { by: 'decider:engineering', agent: 'lead-a', ref: 'D-1', sha256: f.hash, delivery: 'review-only', at: undefined });
+  assert.ok(Date.parse(run.decisions.plan.at) > 0, 'the time is the CI\'s own');
+  const board = spawnSync(process.execPath, [cli, 'board', '--root', f.root, '--home', f.home, '--run', 'run'], { encoding: 'utf8' });
+  for (const piece of ['decider:engineering', 'lead-a', 'D-1', f.hash]) assert.ok(board.stdout.includes(piece), `the board shows ${piece}`);
+  assert.ok(f.call('digest', { token }).out.includes('D-1'));
+  const handover = f.call('handover', { token: f.orchestrator });
+  assert.equal(handover.status, 0, handover.all);
+  assert.ok(fs.readFileSync(path.join(f.home, 'runs/run/handover.md'), 'utf8').includes('D-1'));
+});
+
+test('a stale plan hash is refused and the plan stays proposed', async t => {
+  const f = await proposed(t);
+  const added = f.call('task_add', { token: f.orchestrator, input: { id: 'b', title: 'Task b', tier: 'sonnet', tierReason: 'Implementation task', files: ['b.txt'] } });
+  assert.equal(added.status, 0, added.all);
+  const before = fs.readFileSync(f.ledger);
+  const done = f.call('approve', { token: issueCaller(f.dir, decider()), input: { planSha256: f.hash, decision: asDecider('D-1') } });
+  assert.notEqual(done.status, 0);
+  assert.ok(done.err.includes(f.hash), 'names the hash that was approved');
+  assert.equal(done.err.match(new RegExp(HASH, 'g')).length >= 2, true, 'and the hash the plan has now');
+  assert.deepEqual(fs.readFileSync(f.ledger), before);
+  assert.equal(ledgerOf(f).run.plan, 'proposed');
+  const fresh = f.call('digest', { token: f.orchestrator }).out.match(/Plan sha256: ([0-9a-f]{64})/)[1];
+  assert.notEqual(fresh, f.hash);
+  assert.equal(f.call('approve', { token: issueCaller(f.dir, decider()), input: { planSha256: fresh, decision: asDecider('D-2') } }).status, 0);
+});
+
+test('a proven approval carries the hash and a decision bound to its caller', async t => {
+  const f = await proposed(t);
+  const token = issueCaller(f.dir, decider());
+  const dispatch = issueCaller(f.dir, dispatcher());
+  const person = { by: 'person:p1', ref: 'D-9' };
+  const cases = [
+    ['a decider without a decision', token, { planSha256: f.hash }],
+    ['a decider without the hash', token, { decision: asDecider('D-1') }],
+    ['a decider deciding as a person', token, { planSha256: f.hash, decision: person }],
+    ['a decider deciding for another department', token, { planSha256: f.hash, decision: asDecider('D-1', { by: 'decider:art' }) }],
+    ['a decision without a ref', token, { planSha256: f.hash, decision: { by: 'decider:engineering' } }],
+    ['a dispatcher deciding as a decider', dispatch, { planSha256: f.hash, decision: asDecider('D-1') }],
+    ['a dispatcher without a decision', dispatch, { planSha256: f.hash }],
+    ['a dispatcher deciding as a bare person', dispatch, { planSha256: f.hash, decision: { by: 'person:', ref: 'D-9' } }],
+  ];
+  const before = fs.readFileSync(f.ledger);
+  for (const [name, who, input] of cases) {
+    const done = f.call('approve', { token: who, input });
+    assert.notEqual(done.status, 0, `${name}: refused`);
+    assert.deepEqual(fs.readFileSync(f.ledger), before, `${name}: the ledger is unchanged`);
+  }
+  const done = f.call('approve', { token: dispatch, input: { planSha256: f.hash, decision: person } });
+  assert.equal(done.status, 0, done.all);
+  assert.equal(ledgerOf(f).run.decisions.plan.by, 'person:p1');
+  assert.equal(ledgerOf(f).run.decisions.plan.agent, undefined);
+});
+
+test('without --callers a hash is checked and a decision recorded when given, and nothing is needed', async t => {
+  const f = fixture(t);
+  const plain = (command, input, extra = []) => {
+    const file = path.join(f.parent, `in-${Math.random().toString(16).slice(2)}.json`);
+    fs.writeFileSync(file, JSON.stringify(input ?? {}));
+    return spawnSync(process.execPath, [cli, command, '--root', f.root, '--home', f.home, '--run', 'run', '--input', file, ...extra], { encoding: 'utf8' });
+  };
+  const made = spawnSync(process.execPath, [cli, 'conduct', '--root', f.root, '--home', f.home, '--input', (() => { const file = path.join(f.parent, 'start.json'); fs.writeFileSync(file, JSON.stringify({ id: 'run', source: 'Test request', title: 'Test run' })); return file; })()], { encoding: 'utf8' });
+  assert.equal(made.status, 0, made.stderr);
+  assert.equal(plain('task_add', { id: 'a', title: 'Task a', tier: 'sonnet', tierReason: 'Implementation task', files: ['a.txt'] }).status, 0);
+  const app = new Conductor(f.root, { home: f.home });
+  const plan = await app.apply('run', 'run_plan', {}, { kind: 'orchestrator' });
+  const stale = plain('approve', { planSha256: REV('0') }, ['--caller', 'owner']);
+  assert.notEqual(stale.status, 0);
+  assert.equal(ledgerOf(f).run.plan, 'proposed');
+  const done = plain('approve', { planSha256: plan.planSha256, decision: { by: 'person:p1', ref: 'D-3' } }, ['--caller', 'owner']);
+  assert.equal(done.status, 0, done.stdout + done.stderr);
+  assert.equal(ledgerOf(f).run.decisions.plan.ref, 'D-3');
+});
+
+test('approve with no hash and no decision is the typed approve, and records no decision', async t => {
+  const f = fixture(t);
+  const app = new Conductor(f.root, { home: f.home });
+  await app.conduct({ id: 'run', source: 'Test request', title: 'Test run' });
+  await app.apply('run', 'task_add', { id: 'a', title: 'Task a', tier: 'sonnet', tierReason: 'Implementation task', files: ['a.txt'] });
+  await app.apply('run', 'run_plan');
+  const done = await app.apply('run', 'approve', {}, { kind: 'owner' });
+  assert.equal(done.isError, false, done.text);
+  assert.equal(app.load('run').run.plan, 'approved');
+  assert.equal('decisions' in app.load('run').run, false);
+});
+
+test('approve_main binds the revision the run branch is at', async t => {
+  const f = await proposed(t);
+  const dispatch = issueCaller(f.dir, dispatcher());
+  const raw = ledgerOf(f);
+  raw.run.lore = { remote: 'lores://example.test', repository: 'game', base: 'main', branch: 'run/run', head: REV('c'), baseAt: REV('d') };
+  fs.writeFileSync(f.ledger, JSON.stringify(raw, null, 2) + '\n');
+  const person = { by: 'person:p1', ref: 'D-4' };
+  const before = fs.readFileSync(f.ledger);
+  for (const [name, who, input] of [
+    ['another revision', dispatch, { revision: REV('e'), base: REV('d'), decision: person }],
+    ['no decision', dispatch, { revision: REV('c'), base: REV('d') }],
+    ['a decider as a person', issueCaller(f.dir, decider()), { revision: REV('c'), base: REV('d'), decision: person }],
+  ]) {
+    const done = f.call('approve_main', { token: who, input });
+    assert.notEqual(done.status, 0, `${name}: refused`);
+    assert.deepEqual(fs.readFileSync(f.ledger), before, `${name}: the ledger is unchanged`);
+  }
+  const done = f.call('approve_main', { token: dispatch, input: { revision: REV('c'), base: REV('d'), decision: person } });
+  assert.equal(done.status, 0, done.all);
+  const run = ledgerOf(f).run;
+  assert.equal(run.approval.revision, REV('c'));
+  assert.deepEqual({ ...run.decisions.main, at: undefined }, { ...person, revision: REV('c'), base: REV('d'), at: undefined });
+  const board = spawnSync(process.execPath, [cli, 'board', '--root', f.root, '--home', f.home, '--run', 'run'], { encoding: 'utf8' });
+  assert.ok(board.stdout.includes('D-4') && board.stdout.includes(REV('c')));
+});
+
+test('a decision is checked against its caller by one function', () => {
+  const run = { department: 'engineering' };
+  const ask = (record, command, input) => decisionMay(record, command, { input, runCallers: run });
+  const good = { planSha256: REV('a'), decision: asDecider('D-1') };
+  assert.equal(ask(decider(), 'approve', good), true);
+  assert.equal(ask(dispatcher(), 'approve', { planSha256: REV('a'), decision: { by: 'person:p1', ref: 'D-1' } }), true);
+  assert.equal(ask(decider(), 'approve_main', { revision: REV('c'), base: REV('d'), decision: asDecider('D-1') }), true);
+  assert.equal(ask(orchestrator(), 'approve', {}), true, 'only deciders and dispatchers are bound; callerMay refuses the rest');
+  assert.equal(ask(decider(), 'pause', {}), true, 'only approve and approve_main carry a decision');
+  assert.equal(decisionMay(null, 'approve', { input: {}, runCallers: undefined }), true, 'no --callers, nothing is required');
+  assert.ok(ask(decider(), 'approve', { decision: asDecider('D-1') }).refused);
+  assert.ok(ask(decider(), 'approve', { planSha256: REV('a'), decision: asDecider('D-1', { by: 'decider:art' }) }).refused);
+  assert.ok(ask(dispatcher(), 'approve', good).refused);
+  assert.ok(ask(decider(), 'approve', { planSha256: REV('a') }).refused);
 });
