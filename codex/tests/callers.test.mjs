@@ -439,6 +439,35 @@ test('a decision is checked against its caller by one function', () => {
   assert.ok(ask(decider(), 'approve', { planSha256: REV('a') }).refused);
 });
 
+test('a dispatcher on approve_merge, tier and model_policy needs a decision by its person; a decider does not', () => {
+  const run = { department: 'engineering' };
+  const ask = (record, command, decision) => decisionMay(record, command, { input: { task: 'a', ...(decision === undefined ? {} : { decision }) }, runCallers: run });
+  for (const command of ['approve_merge', 'tier', 'model_policy']) {
+    assert.ok(ask(dispatcher('engineering', 'p1'), command).refused, `${command}: a dispatcher without a decision`);
+    assert.ok(ask(dispatcher('engineering', 'p1'), command, { by: 'person:p2', ref: 'D-1' }).refused, `${command}: another person`);
+    assert.ok(ask(dispatcher('engineering', 'p1'), command, { by: 'decider:engineering', ref: 'D-1' }).refused, `${command}: a dispatcher as a decider`);
+    assert.ok(ask(dispatcher(), command, { by: 'person:p1', ref: 'D-1' }).refused, `${command}: a record with no person`);
+    assert.equal(ask(dispatcher('engineering', 'p1'), command, { by: 'person:p1', ref: 'D-1' }), true, `${command}: its own person`);
+    assert.equal(ask(decider(), command), true, `${command}: a decider needs no decision`);
+  }
+  assert.equal(ask(dispatcher('engineering', 'p1'), 'pause'), true, 'pause stays open to a dispatcher');
+  assert.equal(ask(dispatcher('engineering', 'p1'), 'unpause'), true, 'unpause stays open to a dispatcher');
+  assert.equal(decisionMay(dispatcher('engineering', 'p1'), 'approve', { input: { planSha256: REV('a') }, runCallers: run }).refused !== undefined, true, 'approve still needs its hash and decision');
+  assert.equal(withAgent(decider(), 'tier', { task: 'a', decision: { by: 'decider:engineering', ref: 'D-1' } }).decision.agent, undefined, 'withAgent stays on approve and approve_main');
+});
+
+test('a dispatcher passes model_policy with a decision, and the command takes the extra key', async t => {
+  const f = await proposed(t);
+  const dispatch = issueCaller(f.dir, dispatcher('engineering', 'p1'));
+  const before = fs.readFileSync(f.ledger);
+  assert.notEqual(f.call('model_policy', { token: dispatch, input: {} }).status, 0, 'no decision');
+  assert.notEqual(f.call('model_policy', { token: dispatch, input: { decision: { by: 'person:p2', ref: 'D-1' } } }).status, 0, 'another person');
+  assert.deepEqual(fs.readFileSync(f.ledger), before, 'refused calls change nothing');
+  const done = f.call('model_policy', { token: dispatch, input: { decision: { by: 'person:p1', ref: 'D-1' } } });
+  assert.equal(done.status, 0, done.all);
+  assert.equal(f.call('model_policy', { token: issueCaller(f.dir, decider()), input: {} }).status, 0, 'a decider needs no decision');
+});
+
 test('a dispatcher decides only as the person its record names', () => {
   const run = { department: 'engineering' };
   const input = by => ({ planSha256: REV('a'), decision: { by, ref: 'D-1' } });
