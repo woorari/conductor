@@ -32,14 +32,17 @@ export type Ran = { exitCode: number; out: string; err: string }
 export type LoreHost = {
   /** Runs `lore --non-interactive <args>` in a folder. `ms` is the limit; one of `LORE_LONG_MS` or more is a long step. */
   lore(args: string[], cwd: string, ms?: number): Promise<Ran>
-  freeGb(path: string): Promise<number | undefined>
+  /** Whole GB free on the disk that holds a path; throws why it could not be read. */
+  freeGb(path: string): Promise<number>
   sameDisk(a: string, b: string): Promise<boolean>
   /** Copies the named top-level entries of one folder into another, copy-on-write where the disk allows. */
   copyTree(from: string, to: string, entries: string[]): Promise<void>
   mkdir(path: string): Promise<void>
   remove(path: string): Promise<void>
-  /** Removes many paths in one go (and never a folder's own `.lore`: the steps name only what lies in a copy). */
+  /** Removes many paths, files or folders with what lies in them, in one go (the steps name only what lies in a copy). */
   removeMany(paths: string[]): Promise<void>
+  /** Removes many files and nothing else: a folder among them is not removed, and the call fails. */
+  removeFiles(paths: string[]): Promise<void>
   exists(path: string): Promise<boolean>
   /** Writes the ready mark: the file that says a workspace was finished. */
   mark(path: string): Promise<void>
@@ -57,11 +60,6 @@ export const readyMark = (root: string, runId: string, taskId: string): string =
 
 /** The last line a program printed, for saying why it failed. */
 export const lastLine = (ran: { exitCode: number; out: string }): string => ran.out.trim().split(/\n/).filter(line => line.trim() !== '').at(-1)?.trim() ?? `exit ${ran.exitCode}`
-
-/** Removes the paths, if there are any. */
-const removeAll = async (host: LoreHost, paths: string[]): Promise<void> => {
-  if (paths.length > 0) await host.removeMany(paths)
-}
 
 const why = (cause: unknown): string => (cause instanceof Error ? cause.message : String(cause))
 
@@ -90,8 +88,12 @@ export async function prepareWorkspace(host: LoreHost, at: Making): Promise<{ er
   if (!(await host.sameDisk(at.root, at.path).catch(() => false))) {
     return fail(`${at.path} lies on another disk than ${at.root} (or its disk could not be read), so a copy there would be a full copy, not a copy-on-write one. Put the workspaces on the same disk (lore.workspaces in .claude/conductor/config.json)`)
   }
-  const freeGb = await host.freeGb(at.path).catch(() => undefined)
-  if (freeGb === undefined) return fail('df did not say how much disk is free')
+  let freeGb: number
+  try {
+    freeGb = await host.freeGb(at.path)
+  } catch (cause) {
+    return fail(why(cause))
+  }
   if (freeGb < at.minFreeGB) {
     return fail(`only ${freeGb} GB are free on the disk that holds ${at.path}, and a worker's workspace needs at least ${at.minFreeGB} GB free (lore.minFreeGB in .claude/conductor/config.json)`)
   }
@@ -114,7 +116,8 @@ export async function prepareWorkspace(host: LoreHost, at: Making): Promise<{ er
     .map(line => (line.startsWith(`${at.path}/`) ? line.slice(at.path.length + 1) : line))
     .join('\n')
   try {
-    await removeAll(host, removals(relativeListing, rules, at.carry).map(one => `${at.path}/${one}`).filter(one => isInside(at.path, one)))
+    const out = removals(relativeListing, rules, at.carry).map(one => `${at.path}/${one}`).filter(one => isInside(at.path, one))
+    if (out.length > 0) await host.removeMany(out)
   } catch (cause) {
     return fail(`what the copy must not hold could not be removed: ${why(cause)}`)
   }
@@ -126,7 +129,8 @@ export async function prepareWorkspace(host: LoreHost, at: Making): Promise<{ er
   const status = statusOf(scanned.out)
   if (scanned.exitCode !== 0 || status === undefined) return fail(`lore could not read the copy's status: ${lastLine(scanned)}`)
   try {
-    await removeAll(host, status.untracked.map(one => `${at.path}/${one}`).filter(one => isInside(at.path, one)))
+    const stray = status.untracked.map(one => `${at.path}/${one}`).filter(one => isInside(at.path, one))
+    if (stray.length > 0) await host.removeFiles(stray)
   } catch (cause) {
     return fail(`the copy's untracked files could not be removed: ${why(cause)}`)
   }

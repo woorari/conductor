@@ -26,6 +26,7 @@ function recording(table: readonly [string, Said | (() => Said)][], more: Partia
       return { exitCode: said.exitCode ?? 0, out: said.out ?? '', err: '' }
     },
     freeGb: async () => (note('freeGb'), 100),
+    removeFiles: async paths => note(`removeFiles ${paths.join(',')}`),
     sameDisk: async () => (note('sameDisk'), true),
     copyTree: async (_from, _to, entries) => void note(`copyTree ${entries.join(',')}`),
     mkdir: async () => note('mkdir'),
@@ -79,6 +80,29 @@ test('prepareWorkspace refuses below the disk floor', async () => {
   expect(calls.some(call => call.startsWith('lore '))).toBe(false)
   // The half-made folder is taken away again.
   expect(calls.at(-1)).toBe(`remove ${MAKING.path}`)
+})
+
+test('prepareWorkspace says why the free disk could not be read, as the host says it', async () => {
+  const { host, calls } = recording([], {
+    freeGb: async () => {
+      throw new Error('df did not say how much disk is free: no such device')
+    },
+  })
+  const said = await prepareWorkspace(host, MAKING)
+  expect(said.error).toBe('df did not say how much disk is free: no such device')
+  expect(calls.some(call => call.startsWith('copyTree'))).toBe(false)
+  expect(calls.at(-1)).toBe(`remove ${MAKING.path}`)
+})
+
+test('prepareWorkspace removes the copy\'s untracked entries as files only', async () => {
+  const { host, calls } = recording([
+    ['status --scan', { out: STATUS_CLEAN.replace('No tracked changes', 'Untracked files:\nA stray.txt\nTracked changes: 1 added') }],
+    ['branch info conductor/ENG-1/lead-a', { out: BRANCH_INFO_PUSHED }],
+  ])
+  expect((await prepareWorkspace(host, MAKING)).error).toBeUndefined()
+  expect(calls).toContain(`removeFiles ${MAKING.path}/stray.txt`)
+  // The folders the ignore rules take out are the only recursive removal.
+  expect(calls.filter(call => call.startsWith('removeMany'))).toEqual([`removeMany ${MAKING.path}/Source/Intermediate`])
 })
 
 test('prepareWorkspace copies the seed then switches and creates the task branch', async () => {

@@ -934,8 +934,9 @@ function loreHost($: EngineInterface, making?: Making): LoreHost {
     },
     freeGb: async path => {
       const free = await freeGbAt($, path)
+      if (typeof free === 'string') throw new Error(free)
 
-      return typeof free === 'number' ? free : undefined
+      return free
     },
     sameDisk: async (a, b) => {
       const [first, second] = [await runProgram($, ['stat', '-f', '%d', a]), await runProgram($, ['stat', '-f', '%d', b])]
@@ -958,6 +959,10 @@ function loreHost($: EngineInterface, making?: Making): LoreHost {
     },
     removeMany: async paths => {
       const failed = await onPaths($, ['rm', '-rf', '--'], paths)
+      if (failed !== undefined) throw new Error(lastLine(failed))
+    },
+    removeFiles: async paths => {
+      const failed = await onPaths($, ['rm', '-f', '--'], paths)
       if (failed !== undefined) throw new Error(lastLine(failed))
     },
     exists: path => Promise.resolve($.fs.exists(path)),
