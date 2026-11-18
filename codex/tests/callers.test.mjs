@@ -129,7 +129,8 @@ const rows = [
   ['pause', {}, decider(), orchestrator()],
   ['unpause', {}, dispatcher(), worker('a')],
   ['run_merge_main', {}, dispatcher(), decider()],
-  ['run_merge_main', {}, orchestrator(), worker('a')],
+  ['run_merge_main', {}, dispatcher(), orchestrator()],
+  ['run_merge_main', {}, dispatcher(), worker('a')],
   ['merged', {}, dispatcher(), orchestrator()],
   ['conduct', { id: 'run', department: 'engineering' }, orchestrator(), decider()],
 ];
@@ -473,4 +474,18 @@ test('a decider with no agent in its record records none and cannot name one', (
   assert.equal(withAgent(bare, 'approve', input()).decision.agent, undefined);
   assert.equal(withAgent(decider(), 'approve', input()).decision.agent, 'lead-a');
   assert.deepEqual(withAgent(null, 'approve', input('x')), input('x'), 'without --callers the input stands');
+});
+
+test('run_merge_main is a dispatcher\'s call: a proven orchestrator and a call with no --callers are refused', async t => {
+  const f = await started(t);
+  const before = fs.readFileSync(f.ledger);
+  const orchestrated = f.call('run_merge_main', { token: f.token });
+  assert.notEqual(orchestrated.status, 0);
+  assert.match(orchestrated.all, /may not run run_merge_main/);
+  for (const extra of [[], ['--caller', 'owner'], ['--caller', 'orchestrator']]) {
+    const plain = spawnSync(process.execPath, [cli, 'run_merge_main', '--root', f.root, '--home', f.home, '--run', 'run', ...extra], { encoding: 'utf8' });
+    assert.notEqual(plain.status, 0, `without --callers ${extra.join(' ')}`);
+    assert.match(plain.stdout + plain.stderr, /needs --callers and a dispatcher's token|requires proven callers/);
+  }
+  assert.deepEqual(fs.readFileSync(f.ledger), before);
 });

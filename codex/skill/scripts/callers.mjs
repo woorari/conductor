@@ -87,7 +87,7 @@ function who(command) {
   if (DECIDER.includes(command)) return ['decider', 'dispatcher'];
   if (command === 'pause' || command === 'unpause') return ['decider', 'dispatcher'];
   // The run's orchestrator lands the run on the base under the plan's decision; a dispatcher may too, for a person's go-ahead.
-  if (command === 'run_merge_main') return ['orchestrator', 'dispatcher'];
+  if (command === 'run_merge_main') return ['dispatcher'];
   if (command === 'merged') return ['dispatcher'];
   return [];
 }
