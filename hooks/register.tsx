@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { CatchHandler, Elements, EngineInterface, Hook, Register } from 'claude-code'
 
-import type { BoardState, Candidate, Ledger, ModelTier, Place, RunWorkspace, Task } from '../types'
+import type { BoardState, Ledger, ModelTier, Task } from '../types'
 import {
   API,
   CLAIM_GRACE_MIN,
@@ -35,6 +35,8 @@ import { approveMerge, mergeApproved, planDeliversMain, DELIVERY, ORCHESTRATOR_R
 import { launchHtmlBoard, boardRequest, htmlActions } from './html-board'
 import { KEEP, ROTATE_AT, carried, handover } from './handover'
 import { LINEAR_KEY, RUN_ID, STATUSES, TIERS, parseLedger } from './ledger'
+import { pickWorkspace, placeRun } from './place-run'
+import type { PlaceHost } from './place-run'
 import { checkOnGreen, runCheck, startCheck, watchChecks } from './checks'
 import type { CheckHost } from './checks'
 import { approvedMain, baseBroughtIn, conflicted, letGo, loreReady, onBase, onRunBranch, readyForBase, rev7, startLoreMerge, syncEnded } from './lore-merge'
@@ -42,16 +44,15 @@ import { LINEAR_API, M_CREATE, M_UPDATE, Q_ISSUE, Q_TEAM, apiKeyOf, createdOf, e
 import { branchInfoOf, loreByHand, notInLore, pinLine, pinned, repositoryInfoOf, someOf, statusOf } from './lore'
 import { LONG_MS, LORE_LONG_MS, approveStep, bringBase, landBase, landTask, prepareWorkspace as prepareSteps, readyMark } from './lore-steps'
 import type { LoreHost, Making } from './lore-steps'
-import { candidatesFor, findHome, trustedRootsOf, workspaceOfSpec } from './home'
+import { findHome, trustedRootsOf } from './home'
 import type { Home, Io } from './home'
-import { CONFIG_PATH, LORE_DEFAULTS, PLACEHOLDER_SNIPPET, hasPlaceholder, homeConfigProblem, parseConfig, placeConfig, runsIgnored } from './project'
+import { CONFIG_PATH, LORE_DEFAULTS, PLACEHOLDER_SNIPPET, hasPlaceholder, homeConfigProblem, parseConfig, runsIgnored } from './project'
 import type { ProjectConfig } from './project'
 import { checkWorkspaceOf, isInside, runBranchOf, runWorkspaceOf, taskBranchOf, workspaceOf, workspacesOf } from './workspace'
 import type { RepositoryInfo } from './lore'
 import { pauseRun, unpauseRun } from './pause'
 import { LOOK_AGAIN_MIN, dueForLook, isUnderway, unsettled } from './problems'
 import { APPROVED, conducting, isApproval, newRun, planning, planningOf } from './plan'
-import type { Conducting } from './plan'
 import { ORCHESTRATOR, briefing, digest, post, relative, rule, touch, waiting } from './posts'
 import { HELPER_TYPES, MAX_BUILDING, familyOf, route, unlocked } from './router'
 import type { Route, Spawn } from './router'
@@ -731,91 +732,27 @@ async function loreBackendAt($: EngineInterface, found: string): Promise<LoreBac
   return lored
 }
 
-/** What a run in a home that is not a repository starts with: its workspace once fixed, or the ones the orchestrator picks from. */
-type Placed = { config: ProjectConfig; workspace?: RunWorkspace; candidates?: Candidate[]; lore?: Ledger['run']['lore'] }
+/** A `PlaceHost` over the mod's `$`: the disk as the home's finder reads it, the session, and the programs. */
+function placeHost($: EngineInterface): PlaceHost {
+  return {
+    io: () => ioOf($),
+    isInGit: async () => (await $.session.repo().catch(() => null)) !== null,
+    cwd: async () => await $.session.cwd().catch(() => ''),
+    read: path => textAt($, path),
+    hasLore: async cwd => (await loreBin($, cwd)) !== undefined,
+    loreMissing: LORE_MISSING,
+    lore: async (args, cwd) => {
+      const ran = await lore($, args, cwd)
 
-const ISSUE_IN_FOLDER =
-  "No run was started. In a home that is not a repository, tickets are Linear: give the ticket's key, like /conduct ABC-12. A GitHub issue is run from a session in its own repository."
+      return { exitCode: ran.exitCode, out: ran.out }
+    },
+    run: async argv => {
+      const ran = await runProgram($, argv)
 
-/** A Linear key's team: the part before the dash. */
-const teamOfKey = (key: string): string => key.slice(0, key.indexOf('-'))
-
-/** Whether the folder the session started in declares the WorktreeCreate placeholder: Claude Code reads project settings there. */
-async function placeholderHere($: EngineInterface): Promise<{ isThere: boolean; folder: string }> {
-  const folder = (await $.session.cwd().catch(() => '')).replace(/\/+$/, '')
-
-  return { isThere: hasPlaceholder([await textAt($, `${folder}/.claude/settings.json`), await textAt($, `${folder}/.claude/settings.local.json`)]), folder }
-}
-
-const placeholderMissing = (folder: string): string =>
-  `No run was started. Outside git, Claude Code lets the mod make each worker's workspace only when the project declares a WorktreeCreate hook, in the folder the session started in. Add this to ${folder}/.claude/settings.local.json (or ${folder}/.claude/settings.json), then give /conduct again; if a worker still cannot start, start a new session:\n\n${PLACEHOLDER_SNIPPET}`
-
-/**
- * Fixes the workspace a run works in, doing what /conduct does for its kind:
- * for Lore, the repository's info and the run's branch; for git, its origin.
- * Either way the session's folder must declare the placeholder when it is not
- * inside git. The run keeps its place's settings, with the ticket's team.
- */
-async function fixWorkspace(
-  $: EngineInterface,
-  run: { id: string; source: string; title?: string },
-  candidate: Candidate,
-  place: Place,
-  team: string,
-): Promise<{ workspace: RunWorkspace; config: ProjectConfig; lore?: Ledger['run']['lore'] } | { error: string }> {
-  const base = place.base ?? config.base
-  const settings = placeConfig(place, team)
-  const isInGit = (await $.session.repo().catch(() => null)) !== null
-  if (!isInGit) {
-    const here = await placeholderHere($)
-    if (!here.isThere) return { error: placeholderMissing(here.folder) }
+      return { exitCode: ran.exitCode, stdout: ran.stdout }
+    },
+    baseBranch: config.base,
   }
-  if (candidate.kind === 'lore') {
-    const bin = await loreBin($, candidate.root)
-    if (bin === undefined) return { error: `No run was started. ${LORE_MISSING}` }
-    const asked = await lore($, ['repository', 'info'], candidate.root)
-    const info = asked.exitCode === 0 ? repositoryInfoOf(asked.out) : undefined
-    if (info === undefined) return { error: `No run was started. lore could not read the repository of ${candidate.root}: ${asked.out.trim() || `exit ${asked.exitCode}`}` }
-
-    return {
-      workspace: { kind: 'lore', root: candidate.root, place: place.folder, base },
-      config: settings,
-      lore: { remote: info.remote, repository: info.name, base, branch: runBranchOf(place.lore?.branchPrefix ?? LORE_DEFAULTS.branchPrefix, run.source, run.id, run.title) },
-    }
-  }
-  const ran = await runProgram($, ['git', '-C', candidate.root, 'remote', 'get-url', 'origin'])
-  const remote = ran.exitCode === 0 ? ran.stdout.trim() : ''
-
-  return { workspace: { kind: 'git', root: candidate.root, place: place.folder, base, ...(remote === '' ? {} : { remote }) }, config: settings }
-}
-
-/**
- * Where a run started in a home that is not a repository works: the
- * workspace of its spec, the one workspace its ticket's team has, or the
- * candidates the orchestrator picks from.
- */
-async function placeRun($: EngineInterface, homeRoot: string, asked: Conducting, project: ProjectConfig): Promise<Placed | { error: string }> {
-  const problem = homeConfigProblem(project, 'folder')
-  if (problem !== undefined) return { error: `No run was started: ${problem}` }
-  if (asked.kind === 'issue') return { error: ISSUE_IN_FOLDER }
-  const places = project.places ?? []
-  const io = await ioOf($)
-  const placeOf = (candidate: Candidate): Place | undefined => places.find(one => one.folder === candidate.place)
-  if (asked.kind === 'spec') {
-    const found = await workspaceOfSpec(io, homeRoot, places, asked.source)
-    if ('error' in found) return found
-    const place = placeOf(found.candidate)
-
-    return place === undefined ? { error: 'No run was started: the spec\'s place is not in config.json.' } : await fixWorkspace($, asked, found.candidate, place, found.team)
-  }
-  const team = teamOfKey(asked.source)
-  const found = await candidatesFor(io, homeRoot, places, team)
-  if ('error' in found) return found
-  const only = found.candidates.length === 1 ? found.candidates[0] : undefined
-  const place = only === undefined ? undefined : placeOf(only)
-  if (only !== undefined && place !== undefined) return await fixWorkspace($, asked, only, place, team)
-
-  return { config: { places: places.filter(one => one.teams.includes(team)) }, candidates: found.candidates }
 }
 
 /** A workspace as the owner reads it: relative to the home, when it lies inside. */
@@ -841,7 +778,7 @@ async function worksIn($: EngineInterface): Promise<string> {
  * several. The workspaces are looked up again in the places frozen at
  * /conduct, never the live config; the pick is fixed once the plan is approved.
  */
-async function pickWorkspace($: EngineInterface, call: ToolCall): Promise<{ result: string; text: string; isError?: true }> {
+async function runWorkspaceTool($: EngineInterface, call: ToolCall): Promise<{ result: string; text: string; isError?: true }> {
   const fail = (reason: string) => ({ isError: true as const, result: `${NOT_DONE} ${reason}`, text: `${NOT_DONE} ${reason}` })
   if (call.agentId !== undefined) return fail("Only the orchestrator picks the run's workspace.")
   const path = await boundLedger($)
@@ -852,18 +789,9 @@ async function pickWorkspace($: EngineInterface, call: ToolCall): Promise<{ resu
   if (ledger === undefined) return fail("The run's ledger could not be read.")
   if (ledger.run.plan === 'approved') return fail("This run's workspace is fixed: the plan naming it is approved.")
   if (ledger.run.candidates === undefined) return fail("This run's workspace was fixed when it started: there is nothing to pick.")
-  const asked = typeof call.path === 'string' ? call.path.replace(/\/+$/, '') : ''
-  const places = ledger.run.config?.places ?? []
-  const source = ledger.run.source ?? ledger.run.id
-  const team = teamOfKey(source)
-  const fresh = await candidatesFor(await ioOf($), found.root, places, team)
-  if ('error' in fresh) return fail(fresh.error)
-  const chosen = fresh.candidates.find(one => one.root === asked)
-  const place = chosen === undefined ? undefined : places.find(one => one.folder === chosen.place)
-  if (chosen === undefined || place === undefined) return fail(`${asked || 'That'} is not one of the workspaces this run lists: ${fresh.candidates.map(one => one.root).join(', ')}.`)
-  const title = ledger.run.title === `Run ${ledger.run.id}` ? undefined : ledger.run.title
-  const fixed = await fixWorkspace($, { id: ledger.run.id, source, ...(title === undefined ? {} : { title }) }, chosen, place, team)
-  if ('error' in fixed) return fail(fixed.error)
+  const picked = await pickWorkspace(placeHost($), ledger, found.root, call.path)
+  if ('error' in picked) return fail(picked.error)
+  const { chosen, places, fixed } = picked
   const written = await mutate($, path, raw => {
     const run = raw.run as Record<string, unknown>
     if (run.plan === 'approved') return { value: false, isChanged: false }
@@ -3896,7 +3824,7 @@ export const register: Register = (on, options) => {
 
     return where === '' ? answered : { ...answered, result: `${answered.result} ${where}`, text: `${answered.text} ${where}` }
   }).catch(broke)
-  on('tool.call', { tool: /^mcp__conductor__run_workspace$/ }, ($, e) => pickWorkspace($, e as unknown as ToolCall)).catch(broke)
+  on('tool.call', { tool: /^mcp__conductor__run_workspace$/ }, ($, e) => runWorkspaceTool($, e as unknown as ToolCall)).catch(broke)
   on('tool.call', { tool: /^mcp__conductor__task_add$/ }, ($, e) =>
     answer($, e as unknown as ToolCall, (raw, _at, caller, input) => addTask(raw, caller, input)),
   ).catch(broke)
@@ -4155,7 +4083,7 @@ export const register: Register = (on, options) => {
     if ('error' in configRead) return { text: `No run was started: ${configRead.error}` }
     const project = configRead.config
     // A home that is not a repository: the run's workspace comes from its ticket or spec, and its settings from the place.
-    const placed = (await isFolderHome($)) ? await placeRun($, root, asked, project) : undefined
+    const placed = (await isFolderHome($)) ? await placeRun(placeHost($), root, asked, project) : undefined
     if (placed !== undefined && 'error' in placed) return { text: placed.error }
     const own = placed === undefined ? homeConfigProblem(project, 'repository') : undefined
     if (own !== undefined) return { text: `No run was started: ${own}` }
