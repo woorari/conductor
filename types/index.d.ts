@@ -322,6 +322,8 @@ export type Ledger = {
     /** The project's config as it was when the run started: what the run keeps to. */
     config?: ProjectConfig
     /** A Lore run: the repository, the base branch, the run's own branch and its workspace. */
+    /** A run made with proven callers: its department. Every later call that is not a read needs `--callers`. */
+    callers?: { department: string }
     /** In a home that is not a repository: the workspace the run works in, once fixed. */
     workspace?: RunWorkspace
     /** In a home that is not a repository: the workspaces the orchestrator picks from, while none is fixed. */

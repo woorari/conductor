@@ -1,0 +1,111 @@
+// Proven callers. A run that is given --callers <dir> trusts only a caller whose token has a record there.
+// The folder holds <sha256(token)>.json files. A token is 64 hex characters, it is never stored and never
+// written in a message: it reaches a session through the launch environment (CONDUCTOR_TOKEN).
+import fs from 'node:fs';
+import path from 'node:path';
+import crypto from 'node:crypto';
+
+const KINDS = ['orchestrator', 'worker', 'decider', 'dispatcher'];
+const TOKEN = /^[0-9a-f]{64}$/;
+const hashOf = token => crypto.createHash('sha256').update(token).digest('hex');
+const same = (a, b) => a.length === b.length && crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
+const text = value => typeof value === 'string' && value !== '';
+
+// Writes <sha256>.json (mode 0600, atomic) and returns the token.
+export function issueCaller(dir, record) {
+  if (!record || !KINDS.includes(record.kind)) throw new Error('A caller is an orchestrator, worker, decider or dispatcher.');
+  if (!text(record.department)) throw new Error('A caller names its department.');
+  if ((record.kind === 'orchestrator' || record.kind === 'worker') && !text(record.run)) throw new Error('An orchestrator or worker record names its run.');
+  if (record.kind === 'worker' && !text(record.task)) throw new Error('A worker record names its task.');
+  if (!(Date.parse(record.expiresAt) > 0)) throw new Error('A caller record has an expiry time (ISO 8601).');
+  const token = crypto.randomBytes(32).toString('hex');
+  const sha256 = hashOf(token);
+  const file = path.join(dir, `${sha256}.json`);
+  const temp = `${file}.${process.pid}.tmp`;
+  fs.mkdirSync(dir, { recursive: true });
+  try {
+    fs.writeFileSync(temp, JSON.stringify({ ...record, sha256 }, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
+    fs.renameSync(temp, file);
+  } finally { if (fs.existsSync(temp)) fs.unlinkSync(temp); }
+  return token;
+}
+
+// The record the token proves, or { refused } with a reason that holds no token text.
+export function resolveCaller(dir, token, now) {
+  if (typeof token !== 'string' || !TOKEN.test(token)) return { refused: 'This call has no valid caller token (CONDUCTOR_TOKEN).' };
+  const sha256 = hashOf(token);
+  let record;
+  try { record = JSON.parse(fs.readFileSync(path.join(dir, `${sha256}.json`), 'utf8')); }
+  catch { return { refused: 'The caller token is not known to this run.' }; }
+  if (!record || typeof record.sha256 !== 'string' || !same(record.sha256, sha256)) return { refused: 'The caller token is not known to this run.' };
+  if (!KINDS.includes(record.kind) || !text(record.department)) return { refused: 'The caller record is malformed.' };
+  if (!(Date.parse(record.expiresAt) > now.getTime())) return { refused: 'The caller token has expired.' };
+  const { sha256: _hash, ...rest } = record;
+  return rest;
+}
+
+export function revokeCaller(dir, token) {
+  if (typeof token !== 'string' || !TOKEN.test(token)) return;
+  fs.rmSync(path.join(dir, `${hashOf(token)}.json`), { force: true });
+}
+
+// The command map: who may run what with a proven caller. Not listed: refused.
+const OPEN = ['list', 'board', 'digest'];
+const ORCHESTRATOR = ['init', 'conduct', 'board_open', 'board_close', 'task_add', 'task_update', 'run_plan', 'worktree', 'merge_check', 'merge', 'run_sync_base', 'run_check', 'handover', 'reconcile', 'quarantine', 'board_rule', 'brief'];
+const WORKER = ['task_update', 'board_post', 'brief'];
+const DECIDER = ['approve', 'approve_main', 'approve_merge', 'tier', 'model_policy'];
+const WORKER_STATUS = ['review', 'blocked', 'failed'];
+function who(command) {
+  if (command.startsWith('problem_') || ORCHESTRATOR.includes(command)) return ['orchestrator', ...(WORKER.includes(command) ? ['worker'] : [])];
+  if (WORKER.includes(command)) return ['worker'];
+  // A dispatcher's approval is bound to a recorded person decision by a later task; here only kind, department and run are checked.
+  if (DECIDER.includes(command)) return ['decider', 'dispatcher'];
+  if (command === 'pause' || command === 'unpause') return ['decider', 'dispatcher'];
+  if (command === 'run_merge_main' || command === 'merged') return ['dispatcher'];
+  return [];
+}
+
+// proven: what resolveCaller returned, or null when the call has no --callers.
+// ctx: { run, runCallers (the ledger's run.callers), input, callerFlag (the --caller option) }.
+// Returns true, or { refused } with the reason.
+export function callerMay(proven, command, ctx = {}) {
+  const input = ctx.input ?? {};
+  if (proven === null || proven === undefined) {
+    if (OPEN.includes(command)) return true;
+    return ctx.runCallers ? { refused: 'This run requires proven callers (--callers) for every call that is not a read.' } : true;
+  }
+  if (ctx.callerFlag !== undefined) return { refused: '--caller is not accepted with --callers; the caller is proven by CONDUCTOR_TOKEN.' };
+  if (OPEN.includes(command)) return true;
+  if (proven.refused) return { refused: proven.refused };
+  const kinds = who(command);
+  if (kinds.length === 0) return { refused: `Command ${command} is not open to any proven caller.` };
+  if (!kinds.includes(proven.kind)) return { refused: `A ${proven.kind} may not run ${command}.` };
+  if (command === 'init') return true;
+  if (command === 'conduct') {
+    if (input.id !== proven.run) return { refused: 'A run is started only by the orchestrator proven for that run id.' };
+    if (!text(input.department)) return { refused: 'conduct with callers needs department in its input.' };
+    if (input.department !== proven.department) return { refused: 'A caller starts runs only in its own department.' };
+    return true;
+  }
+  if (!ctx.runCallers) return { refused: `Run ${ctx.run} was not created with callers.` };
+  if (proven.department !== ctx.runCallers.department) return { refused: 'This caller belongs to another department.' };
+  if (proven.run !== undefined && proven.run !== ctx.run) return { refused: 'This caller is proven for another run.' };
+  if (proven.kind === 'worker') {
+    if ((command === 'task_update' || command === 'brief') && input.task !== proven.task) return { refused: 'A worker uses only its own task.' };
+    if (command === 'task_update' && input.status !== undefined && !WORKER_STATUS.includes(input.status)) return { refused: 'A worker sets its task to review, blocked or failed.' };
+  }
+  return true;
+}
+
+// The shape the command bodies already take.
+export function legacyCaller(proven) {
+  if (!proven || proven.refused) return { kind: 'stranger' };
+  if (proven.kind === 'orchestrator') return { kind: 'orchestrator' };
+  if (proven.kind === 'worker') return { kind: 'worker', taskId: proven.task };
+  return { kind: 'owner' };
+}
+
+// What conduct records for a run made with callers: { department }, or { refused }.
+export function runCallersOf(input) {
+  return text(input?.department) ? { department: input.department } : { refused: 'conduct with callers needs department in its input.' };
+}

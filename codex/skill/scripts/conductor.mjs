@@ -15,6 +15,7 @@ import { post, rule, digest } from './core/posts.mjs';
 import { pauseRun, unpauseRun } from './core/pause.mjs';
 import * as merges from './core/merge.mjs';
 import { linearKeyOf } from './core/linear.mjs';
+import { resolveCaller, callerMay, legacyCaller, runCallersOf } from './callers.mjs';
 import { openBoard, closeBoard } from './board-launcher.mjs';
 import { issueFromSource, refreshLinear, pendingLinear, linearApiFromEnvironment, synchronizeLinear, acknowledgeLinear } from './linear.mjs';
 
@@ -70,7 +71,7 @@ export function board(raw) {
 }
 
 export class Conductor {
-  // home: where the ledgers and the lock live, outside the project. callers: accepted here, used by a later task.
+  // home: where the ledgers and the lock live, outside the project. callers: the folder of caller records; a run made with it records its department.
   constructor(root, { githubApi, linearApi = linearApiFromEnvironment(), home, callers } = {}) {
     this.callers = callers;
     this.githubApi = githubApi;
@@ -132,6 +133,7 @@ export class Conductor {
       const raw = newRun(request.id, request.source, now(), request.title, { ...(issue ? { tickets: 'linear' } : {}), ...(setup.config === undefined ? {} : { config: setup.config }), ...(setup.workspace === undefined ? {} : { workspace: setup.workspace }) });
       if (issue) raw.run.issue = issue;
       raw.run.maxParallel = maxParallel;
+      if (this.callers !== undefined) { const kept = runCallersOf(input); if (kept.refused) fail(kept.refused); raw.run.callers = kept; }
       raw.codex = { adapterVersion: 1, base: setup.base, workspaces: {} };
       this.save(request.id, raw);
       return ok(`Started run ${request.id}. Read the source and draft tasks; propose the plan before asking for approval.`, { run: request.id });
@@ -383,7 +385,7 @@ export class Conductor {
 export async function main(argv = process.argv.slice(2)) {
   const command = argv.shift();
   if (!command || command === 'help' || command === '--help') {
-    console.log('conductor.mjs <init|conduct|list|board|board_open|board_close|digest|brief|worktree|handover|task_add|task_update|run_plan|approve|approve_merge|quarantine|model_policy|tier|pause|unpause|merged|board_post|board_rule|problem_report|problem_assign|problem_resolve|merge_check|merge|reconcile|linear_sync|linear_ack> --root <project> [--run <id>] [--input <JSON file>] [--caller orchestrator|owner|worker:<task>] [--home <dir>] [--callers <file>]\nJSON input may also be read from stdin with --input -. Approval commands require --caller owner after the user explicitly requests them.');
+    console.log('conductor.mjs <init|conduct|list|board|board_open|board_close|digest|brief|worktree|handover|task_add|task_update|run_plan|approve|approve_merge|quarantine|model_policy|tier|pause|unpause|merged|board_post|board_rule|problem_report|problem_assign|problem_resolve|merge_check|merge|reconcile|linear_sync|linear_ack> --root <project> [--run <id>] [--input <JSON file>] [--caller orchestrator|owner|worker:<task>] [--home <dir>] [--callers <dir>]\nJSON input may also be read from stdin with --input -. Approval commands require --caller owner after the user explicitly requests them.');
     return;
   }
   const options = {};
@@ -396,9 +398,14 @@ export async function main(argv = process.argv.slice(2)) {
   const app = new Conductor(options.root, { home: options.home, callers: options.callers });
   const input = options.input ? readJSON(options.input === '-' ? 0 : options.input) : {};
   if (!input || typeof input !== 'object' || Array.isArray(input)) fail('Input must be a JSON object.');
+  const proven = options.callers === undefined ? null : resolveCaller(options.callers, process.env.CONDUCTOR_TOKEN, new Date());
+  const askedRun = command === 'conduct' ? input.id : options.run;
+  const ledgerFile = typeof askedRun === 'string' && RUN_ID.test(askedRun) ? app.ledgerFile(askedRun) : undefined;
+  const verdict = callerMay(proven, command, { run: askedRun, input, callerFlag: options.caller, runCallers: ledgerFile && fs.existsSync(ledgerFile) ? readJSON(ledgerFile).run?.callers : undefined });
+  if (verdict !== true) fail(verdict.refused);
   const callerName = options.caller ?? 'orchestrator';
-  const caller = callerName.startsWith('worker:') ? { kind: 'worker', taskId: validId(callerName.slice(7)) } : { kind: callerName };
-  if (!['orchestrator', 'owner', 'worker'].includes(caller.kind)) fail('Invalid caller.');
+  const caller = proven !== null ? legacyCaller(proven) : callerName.startsWith('worker:') ? { kind: 'worker', taskId: validId(callerName.slice(7)) } : { kind: callerName };
+  if (proven === null && !['orchestrator', 'owner', 'worker'].includes(caller.kind)) fail('Invalid caller.');
   let result;
   if (command === 'init') { if (caller.kind !== 'orchestrator') fail('Only the orchestrator initializes.'); result = await app.locked(() => app.init()); }
   else if (command === 'conduct') { if (caller.kind !== 'orchestrator') fail('Only the orchestrator starts a run.'); result = await app.conduct(input); }
