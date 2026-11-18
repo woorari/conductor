@@ -8,16 +8,12 @@ import {
   DEFAULTS,
   abandoned,
   byHand,
-  checksOf,
   closes,
   closingLine,
   configOf,
   elsewhere,
-  flightsOf,
   githubRepo,
-  headOf,
   isForges,
-  judge,
   messageOf,
   obstacles,
   onMain,
@@ -27,7 +23,7 @@ import {
   short,
   startMerge,
 } from './merge'
-import type { Config, Facts, Flight, Look, Verdict } from './merge'
+import type { Config } from './merge'
 import { DONE_SHOWN, boardView, clock, detail, orchestratorLine, problemDetail, runMinutes, summary, timeline } from './board'
 import type { TaskRow } from './board'
 import { dashboardSvg } from './dashboard'
@@ -37,6 +33,8 @@ import { KEEP, ROTATE_AT, carried, handover } from './handover'
 import { LINEAR_KEY, RUN_ID, STATUSES, TIERS, parseLedger } from './ledger'
 import { pickWorkspace, placeRun } from './place-run'
 import type { PlaceHost } from './place-run'
+import { flights, lookAtBase, settle, survey } from './github-merge'
+import type { FlightHost, SettleHost, SurveyHost } from './github-merge'
 import { checkOnGreen, runCheck, startCheck, watchChecks } from './checks'
 import type { CheckHost } from './checks'
 import { approvedMain, baseBroughtIn, conflicted, letGo, loreReady, onBase, onRunBranch, readyForBase, rev7, startLoreMerge, syncEnded } from './lore-merge'
@@ -1671,7 +1669,7 @@ async function lookAgain($: EngineInterface): Promise<void> {
     const at = iso(await $.clock.now())
     // Asked of the file again inside the write queue (`askAgain`), so a problem taken up meanwhile is left alone.
     if (dueForLook(ledger, Date.parse(at)).length === 0) return
-    await settle($, path, raw => askAgain(raw, at))
+    await settle(settleHost($), path, raw => askAgain(raw, at))
   } catch {
     // Tried again at the next look.
   } finally {
@@ -1704,7 +1702,7 @@ async function watchStalls($: EngineInterface): Promise<void> {
       loops = undefined
     }
     // Asked of the file again inside the write queue, so a worker heard from meanwhile is not said to be silent.
-    await settle($, path, raw => sayStalls(raw, at, loops))
+    await settle(settleHost($), path, raw => sayStalls(raw, at, loops))
   } catch {
     // Tried again at the next look.
   } finally {
@@ -1732,7 +1730,7 @@ async function watchMain($: EngineInterface): Promise<void> {
     if (!(await isAtForge($))) return
     const now = await $.clock.now()
     const at = iso(now)
-    const look = await lookAtBase($)
+    const look = await lookAtBase(surveyHost($))
     if ('error' in look) return
     if (look.verdict.verdict === 'running') {
       if (now - Date.parse(ledger.main.since) > MAIN_WATCH_MIN * 60_000) await mutate($, path, raw => ({ value: delete raw.main, isChanged: true }))
@@ -1741,10 +1739,10 @@ async function watchMain($: EngineInterface): Promise<void> {
     }
     if (look.verdict.verdict === 'failed') {
       // A newer push may have cancelled the checks of the commit before it: only a head that stood still counts.
-      const again = await lookAtBase($)
+      const again = await lookAtBase(surveyHost($))
       const line = `${short(look.head)}: ${look.verdict.failed.join(', ')}`
       if ('error' in again || again.head !== look.head || ledger.main.failed === line) return
-      await settle($, path, raw => {
+      await settle(settleHost($), path, raw => {
         const main = raw.main as Record<string, unknown> | undefined
         if (main === undefined) return { isChanged: false, isError: true, text: '' }
         main.failed = line
@@ -2106,82 +2104,30 @@ async function wantsLinear($: EngineInterface): Promise<boolean> {
   return 'config' in read && read.config.tickets === 'linear'
 }
 
-/** A commit's checks, check runs and commit statuses both, and their verdict. */
-async function checksAt($: EngineInterface, sha: string): Promise<Verdict | { error: string }> {
-  const [runs, status] = await Promise.all([github($, `/commits/${sha}/check-runs?per_page=100`), github($, `/commits/${sha}/status?per_page=100`)])
-  if (runs.error !== undefined) return { error: runs.error }
-  if (status.error !== undefined) return { error: status.error }
-  const read = runs.status === 200 && status.status === 200 ? checksOf(runs.json, status.json) : undefined
-  if (read === undefined) return { error: `the checks of ${short(sha)} could not be read (HTTP ${runs.status} and ${status.status})` }
-
-  return judge(read)
+/** What a merge asks of GitHub: the module's host, over `$`. */
+function surveyHost($: EngineInterface): SurveyHost {
+  return { github: (path, init) => github($, path, init), base: () => runBase($), repo: () => repoHere() }
 }
 
-/** The base branch's head and the verdict of its checks. */
-async function lookAtBase($: EngineInterface): Promise<Look> {
-  const base = await runBase($)
-  const branch = await github($, `/branches/${encodeURIComponent(base)}`)
-  if (branch.error !== undefined) return { error: branch.error }
-  const head = branch.status === 200 ? headOf(branch.json) : undefined
-  if (head === undefined) return { error: `the head of ${base} could not be read (HTTP ${branch.status})` }
-  const verdict = await checksAt($, head)
-  if ('error' in verdict) return { error: verdict.error }
-
-  return { head, verdict }
-}
-
-/** What GitHub says about a pull request and about the base branch, right now. */
-async function survey($: EngineInterface, pr: number): Promise<{ facts: Facts; error?: undefined } | { error: string }> {
-  const branchName = await runBase($)
-  const [pulled, base] = await Promise.all([github($, `/pulls/${pr}`), lookAtBase($)])
-  if (pulled.error !== undefined) return { error: pulled.error }
-  if (pulled.status === 404) return { error: `it knows no pull request ${pr} in ${repoHere() ?? 'this repository'}` }
-  const pull = pulled.status === 200 ? pullOf(pulled.json) : undefined
-  if (pull === undefined) return { error: `pull request ${pr} could not be read (HTTP ${pulled.status})` }
-  if ('error' in base) return { error: base.error }
-  // A merged pull request's own checks decide nothing any more.
-  const checks: Verdict | { error: string } = pull.isMerged ? { verdict: 'green', line: 'merged', failed: [] } : await checksAt($, pull.head)
-  if ('error' in checks) return { error: checks.error }
-
-  return { facts: { pull, checks, base: branchName, baseHead: base.head, main: base.verdict } }
-}
-
-/** The merges other runs of this repository have in flight. Never throws: a run that does not read is no reason to refuse. */
-async function flights($: EngineInterface, own: string, now: number): Promise<Flight[]> {
-  if (typeof root !== 'string') return []
-  const runs = `${root}/${RUNS_DIR}`
-  const ledgers: Ledger[] = []
-  try {
-    for (const entry of await $.fs.list(runs)) {
-      if (entry.kind !== 'dir' || !RUN_ID.test(entry.name)) continue
-      try {
-        const parsed = parseLedger(await $.fs.read(`${runs}/${entry.name}/ledger.json`))
-        if (parsed.ledger !== undefined) ledgers.push(parsed.ledger)
-      } catch {
-        // A run folder without a ledger has no merge.
-      }
-    }
-  } catch {
-    return []
+/** The run folders other runs of this repository keep: the module's host, over `$`. */
+function flightHost($: EngineInterface): FlightHost {
+  return {
+    runsDir: () => (typeof root === 'string' ? `${root}/${RUNS_DIR}` : undefined),
+    list: dir => $.fs.list(dir),
+    read: path => $.fs.read(path),
   }
-
-  return flightsOf(ledgers, own, now)
 }
 
-/** Writes how a merge in flight went on or ended, and has the orchestrator told. Never throws. */
-async function settle($: EngineInterface, path: string, change: (raw: Raw) => Outcome): Promise<Outcome | undefined> {
-  const written = await mutate($, path, raw => {
-    const outcome = change(raw)
-
-    return { value: outcome, isChanged: outcome.isChanged }
-  })
-  // The pane shows it at once, not at its next poll.
-  seen = undefined
-  await refresh($, false)
-  if (written.error !== undefined || written.value.isError) return undefined
-  carry(written.value)
-
-  return written.value
+/** What writing a merge claim needs from the board: the module's host, over `$`. */
+function settleHost($: EngineInterface): SettleHost {
+  return {
+    mutate: (path, change) => mutate($, path, change),
+    redraw: async () => {
+      seen = undefined
+      await refresh($, false)
+    },
+    carry,
+  }
 }
 
 /** What the owner's approvals need from the session: the module's host, over `$`. */
@@ -2215,7 +2161,7 @@ async function mergeRunMain($: EngineInterface, fromPlan: boolean, signal?: Abor
   if (head === undefined || baseNow === undefined) return `Nothing was merged: lore did not say where ${head === undefined ? runLore.branch : base} stands on the server.`
   const blocks = readyForBase(ledger, head)
   if (blocks.length > 0) return [`The run cannot go into ${base} yet:`, ...blocks.map(one => `- ${one}`)].join('\n')
-  const other = (await flights($, ledger.run.id, await $.clock.now()))[0]
+  const other = (await flights(flightHost($), ledger.run.id, await $.clock.now()))[0]
   if (other !== undefined) return `Nothing was merged: Run ${other.run} is merging ${other.task} since ${other.startedAt}. One merge at a time, across runs too: ${fromPlan ? 'retry once it is settled; the plan approval stands' : 'approve again once it is settled'}.`
   if (baseNow !== runLore.baseAt) {
     return `Nothing was merged: ${base} moved since the run branch last took it in (it is at ${rev7(baseNow)}; the run branch took in ${runLore.baseAt === undefined ? 'no revision of it on record' : rev7(runLore.baseAt)}). ${fromPlan ? 'Bring it in with mcp__conductor__run_sync_base, review and check the result, then retry run_merge_main under the existing plan approval.' : 'Merging into it now would land a result nobody approved. Ask the orchestrator to bring it in with mcp__conductor__run_sync_base, then approve again.'}`
@@ -2266,7 +2212,7 @@ type ApproveJob = {
  */
 async function landOnBase($: EngineInterface, job: ApproveJob): Promise<string> {
   const { path, ledger, runLore, run, base, head, baseNow, at } = job
-  const giveUp = async (why: string): Promise<string> => (await settle($, path, raw => letGo(raw, why)))?.text ?? `Nothing was merged: ${why}.`
+  const giveUp = async (why: string): Promise<string> => (await settle(settleHost($), path, raw => letGo(raw, why)))?.text ?? `Nothing was merged: ${why}.`
   const result = await landBase(loreHost($), { runWorkspace: run, runBranch: runLore.branch, base, baseAt: baseNow, revision: head, message: `Run ${ledger.run.id}: ${ledger.run.title}`, fromPlan: job.fromPlan })
   let protectLine = ''
   if (result.unprotected) {
@@ -2280,7 +2226,7 @@ async function landOnBase($: EngineInterface, job: ApproveJob): Promise<string> 
   }
   if (result.error !== undefined) return `${await giveUp(result.error)}${protectLine}`
   const landed = result.landed
-  const done = await settle($, path, raw => onBase(raw, at, landed, base))
+  const done = await settle(settleHost($), path, raw => onBase(raw, at, landed, base))
   const issue = ledger.run.issue ?? (LINEAR_KEY.test(ledger.run.source ?? '') ? ledger.run.source : undefined)
   if (issue !== undefined) await moveIssue($, path, issue, 'completed')
   const notArchived: string[] = []
@@ -2473,7 +2419,7 @@ async function bringBaseIn($: EngineInterface, job: SyncJob): Promise<Said> {
   const fail = (reason: string) => ({ isError: true as const, result: `${NOT_DONE} ${reason}`, text: `${NOT_DONE} ${reason}` })
   const say = (text: string) => ({ result: text, text })
   const giveUp = async (reason: string): Promise<Said> => {
-    await settle($, path, syncEnded)
+    await settle(settleHost($), path, syncEnded)
 
     return fail(reason)
   }
@@ -2492,7 +2438,7 @@ async function bringBaseIn($: EngineInterface, job: SyncJob): Promise<Said> {
   }
   if (result.error !== undefined) return giveUp(result.error)
   const broughtHead = result.head
-  const written = await settle($, path, raw => baseBroughtIn(raw, baseNow, broughtHead))
+  const written = await settle(settleHost($), path, raw => baseBroughtIn(raw, baseNow, broughtHead))
   if (written === undefined) return fail('the board could not be written.')
   const now2 = parseLedger((await textAt($, path)) ?? '').ledger
   if (now2 !== undefined) await startCheck(checkHost($), path, now2, { cwd: run, revision: broughtHead })
@@ -2518,7 +2464,7 @@ async function loreMergeTool($: EngineInterface, call: ToolCall, isCheckOnly: bo
   if (runLore?.workspace === undefined) return fail('This run has no Lore workspace yet: it is made when the owner approves the plan with /approve.')
   const run = runLore.workspace
   const now = await $.clock.now()
-  const asked = loreReady(ledger, callerOf(call.agentId), call, await flights($, ledger.run.id, now))
+  const asked = loreReady(ledger, callerOf(call.agentId), call, await flights(flightHost($), ledger.run.id, now))
   if ('error' in asked) return fail(asked.error)
   const { task, revision } = asked
   const id = task.id
@@ -2576,14 +2522,14 @@ async function landLore($: EngineInterface, job: LoreLanding): Promise<Said> {
   const fail = (reason: string) => ({ isError: true as const, result: `${NOT_DONE} ${reason}`, text: `${NOT_DONE} ${reason}` })
   const say = (text: string) => ({ result: text, text })
   const giveUp = async (why: string) => {
-    const outcome = await settle($, path, raw => letGo(raw, why))
+    const outcome = await settle(settleHost($), path, raw => letGo(raw, why))
 
     return fail(outcome?.text ?? `${id} was not merged: ${why}.`)
   }
   const result = await landTask(loreHost($), { runWorkspace: run, runBranch: runLore.branch, taskBranch: branch, revision, runHead: runLore.head, message: `${id}: ${task.title}` })
   if (result.error !== undefined) return giveUp(result.error)
   if (result.conflict !== undefined) {
-    const said = await settle($, path, raw => conflicted(raw, at, id, result.conflictFiles))
+    const said = await settle(settleHost($), path, raw => conflicted(raw, at, id, result.conflictFiles))
 
     return fail(said?.text ?? `${id} conflicts with the run branch; nothing was merged.`)
   }
@@ -2607,7 +2553,7 @@ async function landLore($: EngineInterface, job: LoreLanding): Promise<Said> {
     }
   }
   const removed = workspaceLine.startsWith('Its workspace was moved into _deleted')
-  const done = await settle($, path, raw => {
+  const done = await settle(settleHost($), path, raw => {
     const result = onRunBranch(raw, iso(now), id, sentRevision, runLore.branch, workspaceLine)
     const kept = raw.tasks.find(one => one.id === id)
     if (removed && kept !== undefined) delete kept.workspace
@@ -2658,9 +2604,9 @@ async function mergeTool(
     return fail(`There is no ledger at ${path}.`)
   }
   const now = await $.clock.now()
-  const asked = precheck(ledger, callerOf(call.agentId), call, await flights($, ledger.run.id, now), isCheckOnly)
+  const asked = precheck(ledger, callerOf(call.agentId), call, await flights(flightHost($), ledger.run.id, now), isCheckOnly)
   if ('error' in asked) return fail(asked.error)
-  const surveyed = await survey($, asked.pr)
+  const surveyed = await survey(surveyHost($), asked.pr)
   if (surveyed.error !== undefined) {
     return fail(`GitHub did not say what a merge needs to know (${surveyed.error}). Nothing was merged. A request that failed is no verdict: try again.`)
   }
@@ -2672,7 +2618,7 @@ async function mergeTool(
   if (pull.isMerged) {
     const where = pull.commit === undefined ? '' : ` as ${short(pull.commit)}`
     if (isCheckOnly) return say(`PR ${asked.pr} is merged already${where}, outside the board. ${TOOL_MERGE} takes it over and marks ${id} done.`)
-    const adopted = await settle($, path, raw => onMain(raw, iso(now), pull.commit ?? pull.head, base, { isAdopted: true, task: id, pr: asked.pr }))
+    const adopted = await settle(settleHost($), path, raw => onMain(raw, iso(now), pull.commit ?? pull.head, base, { isAdopted: true, task: id, pr: asked.pr }))
     await retireWorktree($, ledger, id)
     if (adopted !== undefined) await issueDone($, path, id)
 
@@ -2711,7 +2657,7 @@ async function mergeTool(
   const settled = after.error !== undefined || after.status !== 200 ? undefined : pullOf(after.json)
   if (settled?.isMerged === true) {
     const commit = settled.commit ?? pull.head
-    const done = await settle($, path, raw => onMain(raw, now2, commit, base))
+    const done = await settle(settleHost($), path, raw => onMain(raw, now2, commit, base))
     await retireWorktree($, ledger, id)
     if (done !== undefined) await issueDone($, path, id)
 
@@ -2837,7 +2783,7 @@ async function settleStuckLore($: EngineInterface, path: string, ledger: Ledger)
     protectLine = again.exitCode === 0 ? ` ${runLore.base} is protected again.` : ` ${runLore.base} could not be protected again (${lastLine(again)}): protect it by hand.`
   }
   const at = iso(now)
-  await settle($, path, raw => {
+  await settle(settleHost($), path, raw => {
     const out = letGo(raw, `nobody heard how it ended for ${LORE_CLAIM_STALE_MIN} minutes (the session may have stopped mid-merge)`)
     reportProblem(raw, at, { kind: 'orchestrator' }, {
       text: `The merge of ${flight.task} into ${into} was let go unheard after ${LORE_CLAIM_STALE_MIN} minutes.${protectLine} Check lore history --branch ${into} to see whether it landed before anything else merges.`,
@@ -2869,13 +2815,13 @@ async function watchClaim($: EngineInterface): Promise<void> {
     const at = iso(now)
     if (pull.isMerged) {
       // Nobody heard the merge tool's answer: the orchestrator is told now, and woken if it is idle.
-      await settle($, path, raw => {
+      await settle(settleHost($), path, raw => {
         const done = onMain(raw, at, pull.commit ?? flight.head, base)
 
         return done.isError ? done : { ...done, wake: `Run board: PR ${flight.pr} (${flight.task}) is merged as ${short(pull.commit ?? flight.head)}, and the task is done.`, asks: `merge ${flight.task}` }
       })
       await issueDone($, path, flight.task)
-    } else await settle($, path, raw => abandoned(raw, 'the merge call did not go through'))
+    } else await settle(settleHost($), path, raw => abandoned(raw, 'the merge call did not go through'))
   } catch {
     // A look that failed is tried again on the next one.
   } finally {

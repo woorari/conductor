@@ -19,6 +19,7 @@ import { linearKeyOf } from './core/linear.mjs';
 import { approvedMainAt } from './core/lore-merge.mjs';
 import { resolveCaller, callerMay, decisionMay, legacyCaller, runCallersOf, callersFolder, callersBound, withAgent } from './callers.mjs';
 import { approvalGate } from './core/approvals.mjs';
+import { checksAt, reconcileRun } from './core/github-merge.mjs';
 import { openBoard, closeBoard } from './board-launcher.mjs';
 import { isLoreLedger } from './lore-host.mjs';
 import { approveLore, checkLore, mergeLore, mergeMainLore, syncBaseLore, worktreeLore } from './lore-commands.mjs';
@@ -56,6 +57,9 @@ function sameDirectory(left, right) {
   const b = fs.statSync(right, { bigint: true });
   return a.isDirectory() && b.isDirectory() && a.dev === b.dev && a.ino === b.ino;
 }
+
+// The module's host over the adapter's GitHub function, which answers bare JSON and throws when it fails.
+const githubHost = (api, repo) => ({ github: async path => ({ status: 200, json: await api(`repos/${repo()}${path}`), text: '' }), now: () => Date.now() });
 
 export function board(raw) {
   const ledger = parsed(raw);
@@ -352,13 +356,11 @@ export class Conductor {
         return { ...result, text: `PR ${asked.pr} was already merged; board reconciled. Check the base branch’s CI now.` };
       }
       const baseHead = merges.headOf(await api(`${prefix}/branches/${encodeURIComponent(base)}`)) ?? fail('Cannot read the base head.');
+      const host = githubHost(api, () => repo);
       const checks = async sha => {
-        const [runs, status] = await Promise.all([
-          api(`${prefix}/commits/${sha}/check-runs?per_page=100`),
-          api(`${prefix}/commits/${sha}/status?per_page=100`),
-        ]);
-        const read = merges.checksOf(runs, status) ?? fail('Cannot read all check results.');
-        return merges.judge(read);
+        const verdict = await checksAt(host, sha);
+        if ('error' in verdict) fail('Cannot read all check results.');
+        return verdict;
       };
       const [headChecks, main] = await Promise.all([checks(pull.head), checks(baseHead)]);
       const facts = { pull, checks: headChecks, base, baseHead, main };
@@ -389,20 +391,13 @@ export class Conductor {
   async reconcile(id, input) {
     return this.locked(async () => {
       const raw = this.load(id);
-      const flight = raw.merge ?? fail('No merge claim needs reconciliation.');
-      const repo = merges.githubRepo(git(this.root, ['remote', 'get-url', 'origin'])) ?? fail('Origin is not on GitHub.');
-      const response = this.githubApi
-        ? await this.githubApi(`repos/${repo}/pulls/${flight.pr}`, 'GET')
-        : JSON.parse(run('gh', ['api', '--hostname', 'github.com', `repos/${repo}/pulls/${flight.pr}`], this.root));
-      const pull = merges.pullOf(response) ?? fail('Cannot read the PR.');
-      let result;
-      if (pull.isMerged && pull.commit) result = { ...merges.onMain(raw, now(), pull.commit, raw.codex.base), text: 'Merge verified and board reconciled. Check base-branch CI now.' };
-      else {
-        if (input.release !== true) return { isError: false, isChanged: false, text: 'GitHub does not report it merged. Claim retained. Inspect the PR; reconcile with release:true when the write has definitively settled.' };
-        if (Date.now() - Date.parse(flight.startedAt) < 120000) fail('Wait at least two minutes before releasing an uncertain merge claim.');
-        result = merges.abandoned(raw, 'After inspection, the merge was not applied.');
-      }
-      this.save(id, raw); return result;
+      const repo = () => merges.githubRepo(git(this.root, ['remote', 'get-url', 'origin'])) ?? fail('Origin is not on GitHub.');
+      const api = endpoint => this.githubApi
+        ? this.githubApi(endpoint, 'GET')
+        : JSON.parse(run('gh', ['api', '--hostname', 'github.com', endpoint], this.root));
+      const result = await reconcileRun(githubHost(api, repo), raw, input);
+      if (result.isChanged) this.save(id, raw);
+      return result;
     });
   }
 }
