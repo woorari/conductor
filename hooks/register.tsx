@@ -8,47 +8,40 @@ import {
   DEFAULTS,
   abandoned,
   byHand,
-  closes,
-  closingLine,
   configOf,
   elsewhere,
   githubRepo,
   isForges,
-  messageOf,
-  obstacles,
   onMain,
   ownerSaysMerged,
-  precheck,
   pullOf,
   short,
-  startMerge,
 } from './merge'
 import type { Config } from './merge'
 import { DONE_SHOWN, boardView, clock, detail, orchestratorLine, problemDetail, runMinutes, summary, timeline } from './board'
 import type { TaskRow } from './board'
 import { dashboardSvg } from './dashboard'
-import { approveMerge, mergeApproved, planDeliversMain, DELIVERY, ORCHESTRATOR_ROLE } from './delivery'
+import { approveMerge, planDeliversMain, DELIVERY, ORCHESTRATOR_ROLE } from './delivery'
 import { launchHtmlBoard, boardRequest, htmlActions } from './html-board'
 import { KEEP, ROTATE_AT, carried, handover } from './handover'
 import { LINEAR_KEY, RUN_ID, STATUSES, TIERS, parseLedger } from './ledger'
 import { pickWorkspace, placeRun } from './place-run'
 import type { PlaceHost } from './place-run'
-import { flights, lookAtBase, settle, survey } from './github-merge'
+import { flights, lookAtBase, settle } from './github-merge'
 import { LORE_CLAIM_STALE_MIN, NOT_DONE, TOOL_MERGE, because, bringBaseIn, isRemovable, landOnBase, mergeRun, mergeRunMain, projectOf } from './land'
 import type { ApproveJob, LandHost, MergeOutcome, Said, SyncJob } from './land'
 import type { FlightHost, SettleHost, SurveyHost } from './github-merge'
 import { checkOnGreen, runCheck, startCheck, watchChecks } from './checks'
 import type { CheckHost } from './checks'
-import { approvedMain, baseBroughtIn, conflicted, letGo, loreReady, onBase, onRunBranch, readyForBase, rev7, startLoreMerge, syncEnded } from './lore-merge'
+import { conflicted, letGo, loreReady, onRunBranch, rev7, startLoreMerge } from './lore-merge'
 import { LINEAR_API, M_CREATE, M_UPDATE, Q_ISSUE, Q_TEAM, apiKeyOf, createdOf, errorsOf, issueOf, issueText, linearIssueComplete, linearRunIssue, stateFor, teamOf, updatedOf } from './linear'
 import { branchInfoOf, loreByHand, notInLore, pinLine, pinned, repositoryInfoOf, someOf, statusOf } from './lore'
-import { LONG_MS, LORE_LONG_MS, approveStep, bringBase, landBase, landTask, prepareWorkspace as prepareSteps, readyMark } from './lore-steps'
+import { LONG_MS, LORE_LONG_MS, approveStep, landTask, prepareWorkspace as prepareSteps, readyMark } from './lore-steps'
 import type { LoreHost, Making } from './lore-steps'
 import { findHome, trustedRootsOf } from './home'
 import type { Home, Io } from './home'
 import { CONFIG_PATH, LORE_DEFAULTS, PLACEHOLDER_SNIPPET, hasPlaceholder, homeConfigProblem, parseConfig, runsIgnored } from './project'
-import type { ProjectConfig } from './project'
-import { checkWorkspaceOf, isInside, runBranchOf, runWorkspaceOf, taskBranchOf, workspaceOf, workspacesOf } from './workspace'
+import { isInside, runBranchOf, runWorkspaceOf, taskBranchOf, workspaceOf, workspacesOf } from './workspace'
 import type { RepositoryInfo } from './lore'
 import { pauseRun, unpauseRun } from './pause'
 import { LOOK_AGAIN_MIN, dueForLook, isUnderway, unsettled } from './problems'
@@ -62,7 +55,6 @@ import {
   acted,
   activityText,
   addTask,
-  approvePlan,
   askAgain,
   assignProblem,
   ownerSetsTier,
@@ -72,7 +64,6 @@ import {
   markRead,
   overweight,
   proposePlan,
-  refused,
   released,
   reportProblem,
   reserved,
