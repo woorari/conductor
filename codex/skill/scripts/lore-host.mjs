@@ -4,7 +4,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { approveStep, prepareWorkspace, readyMark } from './core/lore-steps.mjs';
+import { approveStep, LONG_MS, prepareWorkspace, readyMark } from './core/lore-steps.mjs';
 import { repositoryInfoOf } from './core/lore.mjs';
 import { startLoreMerge, syncEnded } from './core/lore-merge.mjs';
 import { complexityOf, selectModel } from './core/models.mjs';
@@ -48,8 +48,8 @@ function loreProgram() {
   return /\.(mjs|cjs|js)$/i.test(bin) ? { file: process.execPath, lead: [bin] } : { file: bin, lead: [] };
 }
 
-/** Runs `lore --non-interactive <args>` with no shell. Never rejects: a program that could not run, or ran too long, is a non-zero exit with why. */
-function runLore(args, cwd, ms = 30_000) {
+/** Runs a program with argv and no shell. Never rejects: a program that could not run, or ran too long, is a non-zero exit with why. */
+function runProgram(file, args, cwd, ms = 30_000, missingText = `${file} could not be run: it is not on the PATH.`) {
   return new Promise(resolve => {
     const [stdout, stderr] = [keeper(), keeper()];
     let isDone = false;
@@ -66,10 +66,9 @@ function runLore(args, cwd, ms = 30_000) {
     // A token for Conductor's callers never reaches a program it starts.
     const env = { ...process.env };
     delete env.CONDUCTOR_TOKEN;
-    const { file, lead } = loreProgram();
     let child;
     try {
-      child = spawn(file, [...lead, '--non-interactive', ...args], { cwd, env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+      child = spawn(file, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
     } catch (cause) {
       return done(1, why(cause));
     }
@@ -77,9 +76,9 @@ function runLore(args, cwd, ms = 30_000) {
     child.stderr.setEncoding('utf8');
     child.stdout.on('data', text => stdout.add(text));
     child.stderr.on('data', text => stderr.add(text));
-    child.on('error', cause => done(cause.code === 'ENOENT' ? 127 : 1, cause.code === 'ENOENT' ? LORE_MISSING : why(cause)));
-    const stopped = `lore ${args.slice(0, 2).join(' ')} was still running after ${ms >= 60_000 ? `${Math.round(ms / 60_000)} minutes` : `${Math.round(ms / 1000)} seconds`} and was stopped`;
-    child.on('close', (code, signal) => done(code ?? 1, signal === null ? '' : `lore ${args.slice(0, 2).join(' ')} was ended by ${signal}`));
+    child.on('error', cause => done(cause.code === 'ENOENT' ? 127 : 1, cause.code === 'ENOENT' ? missingText : why(cause)));
+    const stopped = `${file === process.execPath ? 'lore' : path.basename(file)} ${args.slice(0, 3).join(' ')} was still running after ${ms >= 60_000 ? `${Math.round(ms / 60_000)} minutes` : `${Math.round(ms / 1000)} seconds`} and was stopped`;
+    child.on('close', (code, signal) => done(code ?? 1, signal === null ? '' : `${path.basename(file)} was ended by ${signal}`));
     timer = setTimeout(() => {
       child.kill('SIGTERM');
       // A program that does not end when asked is left behind, and its step is over.
@@ -88,6 +87,12 @@ function runLore(args, cwd, ms = 30_000) {
     child.on('close', () => clearTimeout(hard));
     timer.unref?.();
   });
+}
+
+/** Runs `lore --non-interactive <args>` with no shell. */
+function runLore(args, cwd, ms) {
+  const { file, lead } = loreProgram();
+  return runProgram(file, [...lead, '--non-interactive', ...args], cwd, ms, LORE_MISSING);
 }
 
 /** Every folder (a line ending in `/`) and file below a folder. Lore's own state is named but not entered: no rule of the project applies to it. */
@@ -104,7 +109,7 @@ async function walk(folder, at = '') {
 const missing = cause => cause?.code === 'ENOENT' || cause?.code === 'ENOTDIR';
 
 /** The `LoreHost` of the steps over Node: `child_process.spawn` without a shell, and the file system through `fs`. */
-export function nodeHost() {
+export function nodeHost({ platform = process.platform, program = runProgram } = {}) {
   return {
     lore: (args, cwd, ms) => runLore(args, cwd, ms),
     async freeGb(folder) {
@@ -121,6 +126,12 @@ export function nodeHost() {
     },
     async copyTree(from, to, entries) {
       for (const entry of entries) {
+        if (platform === 'darwin') {
+          // Node cannot clone on macOS (COPYFILE_FICLONE_FORCE is ENOSYS there); `cp -c` does, and copies the bytes where it cannot.
+          const copied = await program('cp', ['-c', '-R', `${from}/${entry}`, `${to}/`], undefined, LONG_MS);
+          if (copied.exitCode !== 0) throw new Error(`${entry} could not be copied: ${copied.err.trim().split('\n').pop() || `cp exit ${copied.exitCode}`}`);
+          continue;
+        }
         try {
           // COPYFILE_FICLONE asks for a copy-on-write clone and copies the bytes where the disk or Node cannot clone.
           await fs.promises.cp(path.join(from, entry), path.join(to, entry), { recursive: true, mode: fs.constants.COPYFILE_FICLONE, verbatimSymlinks: true, errorOnExist: true, force: false });

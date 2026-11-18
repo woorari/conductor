@@ -171,3 +171,22 @@ test('a worker starts only on an approved plan', async t => {
   assert.equal(fs.existsSync(f.workspaces), false, 'no workspace is made');
   assert.equal(f.app.load('run').tasks[0].status, 'queued');
 });
+
+test('on macOS a copy is a clone: cp -c -R, spawned with argv and no shell', async () => {
+  const { nodeHost } = await import(pathToFileURL(path.join(skillPath, 'scripts', 'lore-host.mjs')).href);
+  const asked = [];
+  const host = nodeHost({ platform: 'darwin', program: async (file, args, cwd, ms) => { asked.push({ file, args, ms }); return { exitCode: 0, out: '', err: '' }; } });
+  await host.copyTree('/from/place', '/to/copy', ['Source', 'game.cfg']);
+  assert.deepEqual(asked.map(one => [one.file, ...one.args]), [['cp', '-c', '-R', '/from/place/Source', '/to/copy/'], ['cp', '-c', '-R', '/from/place/game.cfg', '/to/copy/']]);
+  const failing = nodeHost({ platform: 'darwin', program: async () => ({ exitCode: 1, out: '', err: 'cp: no space left' }) });
+  await assert.rejects(failing.copyTree('/a', '/b', ['X']), /X could not be copied: .*no space left/);
+  // Another system keeps Node's own copy and spawns nothing.
+  const other = nodeHost({ platform: 'linux', program: async () => { throw new Error('no program is spawned'); } });
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'conductor-copy-'));
+  fs.mkdirSync(path.join(dir, 'from'));
+  fs.writeFileSync(path.join(dir, 'from', 'f.txt'), 'x');
+  fs.mkdirSync(path.join(dir, 'to'));
+  await other.copyTree(path.join(dir, 'from'), path.join(dir, 'to'), ['f.txt']);
+  assert.equal(fs.readFileSync(path.join(dir, 'to', 'f.txt'), 'utf8'), 'x');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
