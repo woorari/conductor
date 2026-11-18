@@ -34,6 +34,8 @@ import { LINEAR_KEY, RUN_ID, STATUSES, TIERS, parseLedger } from './ledger'
 import { pickWorkspace, placeRun } from './place-run'
 import type { PlaceHost } from './place-run'
 import { flights, lookAtBase, settle, survey } from './github-merge'
+import { LORE_CLAIM_STALE_MIN, NOT_DONE, TOOL_MERGE, because, bringBaseIn, isRemovable, landOnBase, mergeRun, mergeRunMain, projectOf } from './land'
+import type { ApproveJob, LandHost, MergeOutcome, Said, SyncJob } from './land'
 import type { FlightHost, SettleHost, SurveyHost } from './github-merge'
 import { checkOnGreen, runCheck, startCheck, watchChecks } from './checks'
 import type { CheckHost } from './checks'
@@ -97,7 +99,6 @@ const TOOL_PLAN = 'mcp__conductor__run_plan'
 const TOOL_POST = 'mcp__conductor__board_post'
 const TOOL_RULE = 'mcp__conductor__board_rule'
 const TOOL_READ = 'mcp__conductor__board_read'
-const TOOL_MERGE = 'mcp__conductor__merge'
 const TOOL_CHECK = 'mcp__conductor__merge_check'
 /** How long GitHub may take over one request before it counts as not answering. */
 const ASK_TIMEOUT_MS = 20_000
@@ -119,7 +120,6 @@ const ROUTER_BROKE = 'conductor: the router failed, so no agent was started. /bo
 const TOOL_REPORT = 'mcp__conductor__problem_report'
 const TOOL_RESOLVE = 'mcp__conductor__problem_resolve'
 const TOOL_ASSIGN = 'mcp__conductor__problem_assign'
-const NOT_DONE = 'Not done.'
 /** A ticket in a tool's schema: a GitHub issue's number, or a Linear issue's key. */
 const TICKET_PATTERN = LINEAR_KEY.source
 /** After a merge the base branch's checks are watched this long at most, in minutes (proposed): a branch nothing checks has nothing to wait for. */
@@ -1031,23 +1031,6 @@ async function loreApprove($: EngineInterface, path: string): Promise<string | u
   })
 
   return written.error ?? (written.value ? undefined : 'the run has no Lore branch any more.')
-}
-
-/** A run's config, checked again as it is read: a hand-edited ledger may hold what /conduct would have refused. */
-function projectOf(ledger: Ledger): ProjectConfig | undefined {
-  const read = parseConfig(JSON.stringify(ledger.run.config ?? {}))
-
-  return 'config' in read ? read.config : undefined
-}
-
-/** Whether a folder is one of this run's own workspaces, safe to remove: inside its workspaces folder, apart from the owner's workspace. */
-function isRemovable(root: string, ledger: Ledger, folder: string): boolean {
-  const project = projectOf(ledger)
-  if (project === undefined) return false
-  const base = workspacesOf(root, project.lore?.workspaces)
-  const isOwners = folder === root || folder.startsWith(`${root}/`) || root.startsWith(`${folder}/`)
-
-  return base !== '' && base !== '/' && isInside(base, folder) && !isOwners
 }
 
 /** How many files of a copy are compared with the owner's workspace: past these, the copy is kept anyway. */
@@ -2130,6 +2113,28 @@ function settleHost($: EngineInterface): SettleHost {
   }
 }
 
+/** What landing needs from the session: the module's host, over `$`. */
+function landHost($: EngineInterface): LandHost {
+  return {
+    ...surveyHost($),
+    ...flightHost($),
+    ...settleHost($),
+    steps: loreHost($),
+    approvals: approvalHost($),
+    now: () => $.clock.now(),
+    caller: callerOf,
+    remember: path => remember($, path),
+    retireWorktree: (ledger, taskId) => retireWorktree($, ledger, taskId),
+    issueDone: path => issueDone($, path),
+    moveIssue: (path, key) => moveIssue($, path, key, 'completed'),
+    method: () => config.method,
+    hereRoot: async () => (await backendOf($))?.root ?? null,
+    copiedIn: (backendRoot, folder, untracked) => copiedIn($, backendRoot, folder, untracked),
+    startCheck: (path, ledger, target) => startCheck(checkHost($), path, ledger, target),
+    outlasting: (key, work, signal, broke) => outlasting($, key, work, signal, broke),
+  }
+}
+
 /** What the owner's approvals need from the session: the module's host, over `$`. */
 function approvalHost($: EngineInterface): ApprovalHost {
   return {
@@ -2145,117 +2150,8 @@ function approvalHost($: EngineInterface): ApprovalHost {
       seen = undefined
       await refresh($, false)
     },
-    mergeMain: (fromPlan, signal) => mergeRunMain($, fromPlan, signal),
+    mergeMain: (fromPlan, signal) => mergeRunMain(landHost($), fromPlan, signal),
   }
-}
-
-/** Full plan delivery uses the same checked, pinned, protected-base path without pretending to be an owner command. */
-async function mergeRunMain($: EngineInterface, fromPlan: boolean, signal?: AbortSignal): Promise<string> {
-  const found = await loreRunOf(approvalHost($))
-  if ('text' in found) return found.text
-  const { path, ledger, runLore, run } = found
-  const base = runLore.base
-  if (fromPlan && !planDeliversMain(ledger, base)) return 'Nothing was merged: this run has no complete-delivery plan approval for its base. Honor the owner’s review-only limit; an existing explicit full-delivery instruction can be recorded with /approve.'
-  const head = branchInfoOf((await lore($, ['branch', 'info', runLore.branch], run)).out)?.remoteLatest
-  const baseNow = branchInfoOf((await lore($, ['branch', 'info', base], run)).out)?.remoteLatest
-  if (head === undefined || baseNow === undefined) return `Nothing was merged: lore did not say where ${head === undefined ? runLore.branch : base} stands on the server.`
-  const blocks = readyForBase(ledger, head)
-  if (blocks.length > 0) return [`The run cannot go into ${base} yet:`, ...blocks.map(one => `- ${one}`)].join('\n')
-  const other = (await flights(flightHost($), ledger.run.id, await $.clock.now()))[0]
-  if (other !== undefined) return `Nothing was merged: Run ${other.run} is merging ${other.task} since ${other.startedAt}. One merge at a time, across runs too: ${fromPlan ? 'retry once it is settled; the plan approval stands' : 'approve again once it is settled'}.`
-  if (baseNow !== runLore.baseAt) {
-    return `Nothing was merged: ${base} moved since the run branch last took it in (it is at ${rev7(baseNow)}; the run branch took in ${runLore.baseAt === undefined ? 'no revision of it on record' : rev7(runLore.baseAt)}). ${fromPlan ? 'Bring it in with mcp__conductor__run_sync_base, review and check the result, then retry run_merge_main under the existing plan approval.' : 'Merging into it now would land a result nobody approved. Ask the orchestrator to bring it in with mcp__conductor__run_sync_base, then approve again.'}`
-  }
-  const at = iso(await $.clock.now())
-  const claimed = await mutate($, path, raw => {
-    const fresh = parseLedger(JSON.stringify(raw)).ledger
-    if (fresh === undefined || (fromPlan && !planDeliversMain(fresh, base))) return { value: refused('The delivery approval or pause state changed before the merge.'), isChanged: false }
-    const freshBlocks = readyForBase(fresh, head)
-    if (freshBlocks.length) return { value: refused(freshBlocks.join('\n')), isChanged: false }
-    approvedMain(raw, at, { revision: head, base: baseNow })
-    const outcome = startLoreMerge(raw, at, { task: ledger.run.id, revision: head, target: 'base' })
-
-    return { value: outcome, isChanged: true }
-  })
-  if (claimed.error !== undefined) return `Nothing was merged: ${claimed.error}`
-  if (claimed.value.isError) return `Nothing was merged: ${claimed.value.text}`
-  // The merge goes on in the session's own way, as a task's merge does: the owner may type or press Stop meanwhile.
-  const job: ApproveJob = { path, ledger, runLore, run, base, head, baseNow, at, fromPlan }
-  const said = await outlasting($, `approve ${ledger.run.id}`, { kind: 'approve', job }, signal, cause => {
-    const text = `Run ${ledger.run.id} broke off on its way into ${base} (${because(cause)}). The claim stays until the board lets it go, ${LORE_CLAIM_STALE_MIN} minutes after it was made, and ${base} is protected again then; look at lore history --branch ${base} before anything else merges.`
-
-    return { result: text, text }
-  })
-
-  return said?.text ?? `Run ${ledger.run.id} is merging into ${base}, and it goes on in the background: a large Lore merge can take up to an hour. The board tells the orchestrator when it has landed or why it did not, and ${base} is protected again either way.`
-}
-
-/** An approval, claimed: what merging the run branch into the base works from. */
-type ApproveJob = {
-  fromPlan?: boolean
-  path: string
-  ledger: Ledger
-  runLore: NonNullable<Ledger['run']['lore']>
-  run: string
-  base: string
-  head: string
-  baseNow: string
-  at: string
-}
-
-/**
- * An approved run, claimed, from the switch to the run branch to its
- * workspaces removed: the run branch merged into the unprotected base, the
- * base protected again whatever happens, the issue moved and the task
- * branches archived. What it says is what /approve-main answers, or what the
- * orchestrator is told when the merge outlasted the command.
- */
-async function landOnBase($: EngineInterface, job: ApproveJob): Promise<string> {
-  const { path, ledger, runLore, run, base, head, baseNow, at } = job
-  const giveUp = async (why: string): Promise<string> => (await settle(settleHost($), path, raw => letGo(raw, why)))?.text ?? `Nothing was merged: ${why}.`
-  const result = await landBase(loreHost($), { runWorkspace: run, runBranch: runLore.branch, base, baseAt: baseNow, revision: head, message: `Run ${ledger.run.id}: ${ledger.run.title}`, fromPlan: job.fromPlan })
-  let protectLine = ''
-  if (result.unprotected) {
-    protectLine = ` ${base} could not be protected again (${result.protectError}): it is a blocker on the board. Protect it by hand with lore branch protect ${base}.`
-    const failedAt = iso(await $.clock.now())
-    await mutate($, path, raw => {
-      const outcome2 = reportProblem(raw, failedAt, { kind: 'orchestrator' }, { text: `${base} is not protected: lore branch protect ${base} failed after the run's merge (${result.protectError}). Protect it by hand.`, severity: 'blocker' })
-
-      return { value: outcome2, isChanged: outcome2.isChanged }
-    })
-  }
-  if (result.error !== undefined) return `${await giveUp(result.error)}${protectLine}`
-  const landed = result.landed
-  const done = await settle(settleHost($), path, raw => onBase(raw, at, landed, base))
-  const issue = ledger.run.issue ?? (LINEAR_KEY.test(ledger.run.source ?? '') ? ledger.run.source : undefined)
-  if (issue !== undefined) await moveIssue($, path, issue, 'completed')
-  const notArchived: string[] = []
-  for (const one of ledger.tasks) {
-    if (one.branch === undefined) continue
-    const archived = await lore($, ['branch', 'archive', taskBranchOf(runLore.branch, one.id)], run)
-    if (archived.exitCode !== 0) notArchived.push(one.id)
-  }
-  const kept: string[] = []
-  const hereBase = await backendOf($)
-  const ownBase = hereBase === null ? '' : workspacesOf(hereBase.root, projectOf(ledger)?.lore?.workspaces)
-  // The folders removed are the ones the mod derives for this run, never a path read off the ledger.
-  const derivedFolders = ownBase === '' ? [] : ledger.tasks.flatMap(one => (one.workspace === undefined ? [] : [workspaceOf(ownBase, ledger.run.id, one.id)]))
-  for (const folder of [...derivedFolders, ...(ownBase === '' ? [] : [runWorkspaceOf(ownBase, ledger.run.id)])]) {
-    const scanned = statusOf((await lore($, ['status', '--scan'], folder, LONG_MS)).out)
-    const here = await backendOf($)
-    const isOwn = here !== null && isRemovable(here.root, ledger, folder)
-    const left = scanned === undefined || here === null || !isOwn ? undefined : notInLore(scanned, await copiedIn($, here.root, folder, scanned.untracked))
-    if (left !== undefined && left.length === 0) {
-      const moved = await runProgram($, ['rm', '-rf', '--', folder], LONG_MS)
-      if (moved.exitCode !== 0) kept.push(folder)
-    } else kept.push(folder)
-  }
-  const tail = [
-    notArchived.length === 0 ? "Its tasks' branches are archived." : `The branches of ${notArchived.join(', ')} could not be archived.`,
-    kept.length === 0 ? 'Its workspaces were moved into _deleted.' : `Kept for inspection or a retry: ${kept.join(', ')}.`,
-  ].join(' ')
-
-  return `${done?.text ?? `Merged: run ${ledger.run.id} is on ${base} as ${rev7(landed)}.`} ${tail}${protectLine}`
 }
 
 /**
@@ -2397,55 +2293,6 @@ async function runSyncBase($: EngineInterface, call: ToolCall, signal?: AbortSig
   return said ?? say(`${base} is being brought into ${runLore.branch}, and it goes on in the background: a large Lore merge can take up to an hour. The board tells you when it is in or why it is not. Merge nothing until then; anything else may go on.`)
 }
 
-/** Bringing the base branch in, claimed: what the merge after the claim works from. */
-type SyncJob = {
-  path: string
-  base: string
-  baseNow: string
-  runHead: string
-  run: string
-  runLore: NonNullable<Ledger['run']['lore']>
-}
-
-/**
- * The base branch brought into the run branch, from the switch to the run
- * branch to the push: a conflict is a blocker on the board, and whatever does
- * not go through lets the claim go and leaves the run branch where it stood.
- * What it says is what run_sync_base answers, or what the orchestrator is
- * told when it outlasted the tool call.
- */
-async function bringBaseIn($: EngineInterface, job: SyncJob): Promise<Said> {
-  const { path, base, baseNow, runHead, run, runLore } = job
-  const fail = (reason: string) => ({ isError: true as const, result: `${NOT_DONE} ${reason}`, text: `${NOT_DONE} ${reason}` })
-  const say = (text: string) => ({ result: text, text })
-  const giveUp = async (reason: string): Promise<Said> => {
-    await settle(settleHost($), path, syncEnded)
-
-    return fail(reason)
-  }
-  const result = await bringBase(loreHost($), { runWorkspace: run, runBranch: runLore.branch, base, baseAt: baseNow, runHead })
-  if (result.conflict !== undefined) {
-    const files = result.conflict
-    const at = iso(await $.clock.now())
-    await mutate($, path, raw => {
-      syncEnded(raw)
-      const reported = reportProblem(raw, at, { kind: 'orchestrator' }, { text: `Bringing ${base} into ${runLore.branch} conflicts in: ${files}. Give it a task that resolves it on the run branch, then call run_sync_base again.`, severity: 'blocker' })
-
-      return { value: reported, isChanged: true }
-    })
-
-    return fail(`${base} conflicts with ${runLore.branch} in: ${files}. Nothing was merged; it is a blocker on the board.`)
-  }
-  if (result.error !== undefined) return giveUp(result.error)
-  const broughtHead = result.head
-  const written = await settle(settleHost($), path, raw => baseBroughtIn(raw, baseNow, broughtHead))
-  if (written === undefined) return fail('the board could not be written.')
-  const now2 = parseLedger((await textAt($, path)) ?? '').ledger
-  if (now2 !== undefined) await startCheck(checkHost($), path, now2, { cwd: run, revision: broughtHead })
-
-  return say(`Brought ${base} into ${runLore.branch} as ${rev7(broughtHead)}. ${now2 && planDeliversMain(now2, base) ? 'Review and check the result, then use run_merge_main. The complete-delivery plan approval stands.' : 'A new approval is needed: tell the owner what changed and ask them to type /approve-main.'}`)
-}
-
 /**
  * `merge` and `merge_check` in a Lore run: a judged task's branch into the
  * run branch, pinned to the revision its worker handed back, one at a time,
@@ -2572,114 +2419,18 @@ async function landLore($: EngineInterface, job: LoreLanding): Promise<Said> {
 
 /**
  * `merge` and `merge_check`: the one way a pull request of a run reaches the
- * base branch. The board's own side first, then GitHub's facts read just now,
- * then the claim, then the merge pinned to the head those facts graded.
- * `merge_check` stops before the claim and changes nothing.
+ * base branch. A Lore run goes its own way; elsewhere the pull request is
+ * merged as `land.ts` does it.
  */
-async function mergeTool(
-  $: EngineInterface,
-  call: ToolCall,
-  isCheckOnly: boolean,
-  signal?: AbortSignal,
-): Promise<{ result: string; text: string; isError?: undefined } | { isError: true; result: string; text: string }> {
-  const base = await runBase($)
-  const say = (text: string) => ({ result: text, text })
-  const fail = (reason: string) => {
-    const text = `${NOT_DONE} ${reason}`
-
-    return { isError: true as const, result: text, text }
-  }
+async function mergeTool($: EngineInterface, call: ToolCall, isCheckOnly: boolean, signal?: AbortSignal): Promise<MergeOutcome> {
   const path = await boundLedger($)
-  if (path === undefined) return fail(NOT_BOUND)
+  if (path === undefined) return { isError: true, result: `${NOT_DONE} ${NOT_BOUND}`, text: `${NOT_DONE} ${NOT_BOUND}` }
   // Before anything is asked of GitHub: a pull request's number means something only in a repository on GitHub.
   if ((await backendOf($))?.kind === 'lore') return loreMergeTool($, call, isCheckOnly, signal)
-  if (!(await isAtForge($))) return fail(elsewhere(origin))
-  await remember($, path)
-  let ledger: Ledger
-  try {
-    const parsed = parseLedger(await $.fs.read(path))
-    if (parsed.ledger === undefined) return fail(`The ledger does not read: ${parsed.error}.`)
-    ledger = parsed.ledger
-  } catch {
-    return fail(`There is no ledger at ${path}.`)
-  }
-  const now = await $.clock.now()
-  const asked = precheck(ledger, callerOf(call.agentId), call, await flights(flightHost($), ledger.run.id, now), isCheckOnly)
-  if ('error' in asked) return fail(asked.error)
-  const surveyed = await survey(surveyHost($), asked.pr)
-  if (surveyed.error !== undefined) {
-    return fail(`GitHub did not say what a merge needs to know (${surveyed.error}). Nothing was merged. A request that failed is no verdict: try again.`)
-  }
-  const { facts } = surveyed
-  const { pull } = facts
-  const id = asked.task.id
+  if (!(await isAtForge($))) return { isError: true, result: `${NOT_DONE} ${elsewhere(origin)}`, text: `${NOT_DONE} ${elsewhere(origin)}` }
 
-  // Merged outside the board: nothing to merge, and the task is done.
-  if (pull.isMerged) {
-    const where = pull.commit === undefined ? '' : ` as ${short(pull.commit)}`
-    if (isCheckOnly) return say(`PR ${asked.pr} is merged already${where}, outside the board. ${TOOL_MERGE} takes it over and marks ${id} done.`)
-    const adopted = await settle(settleHost($), path, raw => onMain(raw, iso(now), pull.commit ?? pull.head, base, { isAdopted: true, task: id, pr: asked.pr }))
-    await retireWorktree($, ledger, id)
-    if (adopted !== undefined) await issueDone($, path, id)
-
-    return adopted === undefined ? fail(`${id} could not be taken over: the board could not be written.`) : say(adopted.text)
-  }
-
-  const blocks = obstacles(facts, asked)
-  if (isCheckOnly) {
-    if (blocks.length > 0) return say(`${id} cannot merge yet:\n${blocks.map(one => `- ${one}`).join('\n')}`)
-
-    return say(
-      `${id} may merge now. PR ${asked.pr} is open and mergeable into ${base}, its checks are green on ${short(pull.head)} (${facts.checks.line}), the checks on ${base} are ${facts.main.verdict} for ${short(facts.baseHead)}, and ${closingLine(closes(`${pull.title}\n${pull.body}`))}. GitHub would merge it with its ${config.method} method. Before you call ${TOOL_MERGE}: tell the other sessions that may merge (ListAgents shows them) and name them in told.`,
-    )
-  }
-  if (blocks.length > 0) return fail(`Nothing was merged. ${id} cannot merge now:\n${blocks.map(one => `- ${one}`).join('\n')}`)
-
-  const claimed = await mutate($, path, raw => {
-    const current = parseLedger(JSON.stringify(raw)).ledger
-    if (current === undefined || !mergeApproved(current, id, pull.head, base)) return { value: { isChanged: false, isError: true, text: `Main/base merge needs owner approval: /approve-merge ${id} ${pull.head}.` }, isChanged: false }
-    const outcome = startMerge(raw, iso(now), { task: id, pr: asked.pr, head: pull.head, told: asked.told, closes: asked.closes })
-
-    return { value: outcome, isChanged: outcome.isChanged }
-  })
-  seen = undefined
-  await refresh($, false)
-  if (claimed.error !== undefined) return fail(`Nothing was merged. ${claimed.error}`)
-  if (claimed.value.isError) return fail(`Nothing was merged. ${claimed.value.text}`)
-
-  // The merge itself: pinned, so GitHub refuses it if the head moved since it was graded.
-  const sent = await github($, `/pulls/${asked.pr}/merge`, { method: 'PUT', body: JSON.stringify({ sha: pull.head, merge_method: config.method }) })
-  const said = sent.error === undefined ? messageOf(sent.text) : ''
-  const answer = sent.error !== undefined ? sent.error : `HTTP ${sent.status}${said === '' ? '' : `: ${said}`}`
-  // Whatever the call answered, the pull request itself says whether it is merged.
-  const after = await github($, `/pulls/${asked.pr}`)
-  const now2 = iso(await $.clock.now())
-  const settled = after.error !== undefined || after.status !== 200 ? undefined : pullOf(after.json)
-  if (settled?.isMerged === true) {
-    const commit = settled.commit ?? pull.head
-    const done = await settle(settleHost($), path, raw => onMain(raw, now2, commit, base))
-    await retireWorktree($, ledger, id)
-    if (done !== undefined) await issueDone($, path, id)
-
-    return say(done?.text ?? `Merged: PR ${asked.pr} (${id}) is on ${base} as ${short(commit)}, but the board could not be written. Set it right with ${TOOL_MERGE} for ${id} again: it is taken over.`)
-  }
-  if (settled !== undefined) {
-    await mutate($, path, raw => {
-      const outcome = abandoned(raw, `GitHub answered ${answer}`)
-
-      return { value: outcome, isChanged: outcome.isChanged }
-    })
-    seen = undefined
-    await refresh($, false)
-
-    return fail(`Nothing was merged: GitHub did not merge PR ${asked.pr} (${answer}). The claim is let go and ${id} stands where it stood. If its head moved, have it graded again.`)
-  }
-
-  return say(`Not known yet. The merge call for PR ${asked.pr} went out (${answer}), but GitHub could not be asked afterwards whether it merged. The board keeps ${id} as merging, looks again within a few minutes and settles it either way. Merge nothing meanwhile.`)
+  return mergeRun(landHost($), path, call, isCheckOnly)
 }
-
-/** What a merge tool answers. */
-type Said = { result: string; text: string; isError?: true }
 
 /** Claimed Lore work the session's own way runs: a task's merge, the base brought in, or the run merged into the base. */
 type SessionWork = { kind: 'merge'; job: LoreLanding } | { kind: 'sync'; job: SyncJob } | { kind: 'approve'; job: ApproveJob }
@@ -2694,8 +2445,8 @@ let inSession: ((work: SessionWork) => Promise<Said>) | undefined
 /** One piece of claimed Lore work, on the `$` it is handed. */
 async function onSession($: EngineInterface, work: SessionWork): Promise<Said> {
   if (work.kind === 'merge') return landLore($, work.job)
-  if (work.kind === 'sync') return bringBaseIn($, work.job)
-  const text = await landOnBase($, work.job)
+  if (work.kind === 'sync') return bringBaseIn(landHost($), work.job)
+  const text = await landOnBase(landHost($), work.job)
 
   return { result: text, text }
 }
@@ -2756,13 +2507,6 @@ async function underWay<T>(merging: () => Promise<T>): Promise<T> {
     loreMergesUnderWay -= 1
   }
 }
-
-/**
- * A Lore claim older than this was not heard of again: longer than the
- * longest a live merge holds its claim (a switch, a merge and a push of up
- * to LORE_LONG_MS each, then a scan and a removal of up to LONG_MS each).
- */
-const LORE_CLAIM_STALE_MIN = (3 * LORE_LONG_MS + 3 * LONG_MS) / 60_000
 
 /**
  * A Lore merge claim nobody heard back from (the session stopped mid-merge,
@@ -3001,8 +2745,6 @@ async function tick($: EngineInterface): Promise<void> {
     isTicking = false
   }
 }
-
-const because = (cause: unknown): string => (cause instanceof Error ? cause.message : String(cause))
 
 /**
  * Registers a command. A name the engine will not take (it keeps some for
@@ -3805,7 +3547,7 @@ export const register: Register = (on, options) => {
   on('tool.call', { tool: /^mcp__conductor__run_sync_base$/ }, ($, e, next) => runSyncBase($, e as unknown as ToolCall, next.signal)).catch(broke)
   on('tool.call', { tool: /^mcp__conductor__run_merge_main$/ }, async ($, e, next) => {
     if (callerOf((e as unknown as ToolCall).agentId).kind !== 'orchestrator') return { isError: true as const, result: 'Only the orchestrator integrates the approved run.', text: 'Only the orchestrator integrates the approved run.' }
-    const text = await mergeRunMain($, true, next.signal)
+    const text = await mergeRunMain(landHost($), true, next.signal)
     return { result: text, text }
   }).catch(broke)
   on('tool.call', { tool: /^mcp__conductor__run_check$/ }, ($, e) => runCheckTool($, e as unknown as ToolCall)).catch(broke)
