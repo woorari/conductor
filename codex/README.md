@@ -78,8 +78,9 @@ Who may run what with a proven caller (a command not listed here is refused to e
 |---|---|
 | `list`, `board`, `digest` | anyone; no token needed |
 | `init`, `conduct` (its `id` equals the token's run, its `department` the token's), `board_open`, `board_close`, `run_plan`, `worktree`, `merge_check`, `merge`, `run_check`, `run_sync_base`, `handover`, `reconcile`, `task_add`, `board_rule`, `problem_report`, `problem_assign`, `problem_resolve` | the run's orchestrator |
-| `task_update`, `board_post`, `brief` | the run's orchestrator, or a worker for its own task (a worker's `task_update` sets only `review`, `blocked` or `failed`, a note or a revision) |
-| `quarantine` | the worker of the task the call names |
+| `task_update`, `brief` | the run's orchestrator, or a worker for its own task only (a worker's `task_update` may set the status to `review`, `blocked` or `failed` and no other) |
+| `board_post` | the run's orchestrator, or any worker of the run |
+| `quarantine` | a worker (it quarantines in its own task's workspace) |
 | `approve`, `approve_main`, `approve_merge`, `tier`, `model_policy`, `pause`, `unpause` | a decider of the run's department, or a dispatcher |
 | `run_merge_main` | the run's orchestrator, or a dispatcher |
 | `merged` | a dispatcher |
