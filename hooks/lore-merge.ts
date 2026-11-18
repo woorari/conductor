@@ -7,6 +7,7 @@
 
 import type { GateDecision, Ledger, Task } from '../types'
 import type { Flight } from './merge'
+import { planDeliversMain } from './delivery'
 import { REVISION } from './lore'
 import { afterDone, lookLines, named, unsettled } from './problems'
 import { changed, refused } from './signals'
@@ -173,6 +174,23 @@ export function approvedMainAt(raw: Raw, at: string, approval: { revision: strin
   }
 
   return approvedMain(raw, at, approval, decision)
+}
+
+/**
+ * Whether a recorded decision covers the run branch's head going into the
+ * base, as it stands now: a plan decision for complete delivery into this
+ * base, or a `main` decision for this very revision and this very base
+ * revision. Answers why not, or undefined when one does.
+ */
+export function mainDecision(ledger: Ledger, head: string, baseAt: string): string | undefined {
+  const plan = ledger.run.decisions?.plan
+  const base = ledger.run.lore?.base
+  if (plan?.delivery === 'complete' && base !== undefined && planDeliversMain(ledger, base)) return undefined
+  const main = ledger.run.decisions?.main
+  if (main?.revision === head && main.base === baseAt) return undefined
+  const what = main === undefined ? 'no approve_main decision is recorded' : `the approve_main decision covers ${rev7(main.revision)} on a base at ${rev7(main.base)}, not ${rev7(head)} on a base at ${rev7(baseAt)}`
+
+  return `No recorded decision covers ${rev7(head)} for ${base ?? 'the base branch'}: the plan was not decided for complete delivery, and ${what}. A decider approves the plan for complete delivery, or approve_main names this revision and the base's revision.`
 }
 
 /** The run branch is on the base branch: the run is merged. */

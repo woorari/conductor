@@ -39,6 +39,7 @@ export function runProgram(file, args, cwd, ms = 30_000, missingText = `${file} 
   return new Promise(resolve => {
     const [stdout, stderr] = [keeper(), keeper()];
     let isDone = false;
+    let isTimedOut = false;
     let timer;
     let hard;
     const done = (exitCode, extra = '') => {
@@ -47,7 +48,7 @@ export function runProgram(file, args, cwd, ms = 30_000, missingText = `${file} 
       clearTimeout(timer);
       clearTimeout(hard);
       const err = [stderr.text(), extra].filter(one => one !== '').join('\n');
-      resolve({ exitCode, out: `${stdout.text()}${err === '' ? '' : `\n${err}`}`, err });
+      resolve({ exitCode, out: `${stdout.text()}${err === '' ? '' : `\n${err}`}`, err, ...(isTimedOut ? { timedOut: true } : {}) });
     };
     // A token for Conductor's callers never reaches a program it starts.
     const env = { ...process.env };
@@ -66,6 +67,7 @@ export function runProgram(file, args, cwd, ms = 30_000, missingText = `${file} 
     const stopped = `${file === process.execPath ? 'lore' : path.basename(file)} ${args.slice(0, 3).join(' ')} was still running after ${ms >= 60_000 ? `${Math.round(ms / 60_000)} minutes` : `${Math.round(ms / 1000)} seconds`} and was stopped`;
     child.on('close', (code, signal) => done(code ?? 1, signal === null ? '' : `${path.basename(file)} was ended by ${signal}`));
     timer = setTimeout(() => {
+      isTimedOut = true;
       child.kill('SIGTERM');
       // A program that does not end when asked is left behind, and its step is over.
       hard = setTimeout(() => done(1, stopped), 10_000);

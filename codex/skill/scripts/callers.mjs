@@ -86,7 +86,9 @@ function who(command) {
   // A dispatcher's approval is bound to a recorded person decision by a later task; here only kind, department and run are checked.
   if (DECIDER.includes(command)) return ['decider', 'dispatcher'];
   if (command === 'pause' || command === 'unpause') return ['decider', 'dispatcher'];
-  if (command === 'run_merge_main' || command === 'merged') return ['dispatcher'];
+  // The run's orchestrator lands the run on the base under the plan's decision; a dispatcher may too, for a person's go-ahead.
+  if (command === 'run_merge_main') return ['orchestrator', 'dispatcher'];
+  if (command === 'merged') return ['dispatcher'];
   return [];
 }
 

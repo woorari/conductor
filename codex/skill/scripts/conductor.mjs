@@ -20,7 +20,7 @@ import { approvedMainAt } from './core/lore-merge.mjs';
 import { resolveCaller, callerMay, decisionMay, legacyCaller, runCallersOf, callersFolder, callersBound, withAgent } from './callers.mjs';
 import { openBoard, closeBoard } from './board-launcher.mjs';
 import { isLoreLedger } from './lore-host.mjs';
-import { approveLore, worktreeLore } from './lore-commands.mjs';
+import { approveLore, checkLore, mergeLore, mergeMainLore, syncBaseLore, worktreeLore } from './lore-commands.mjs';
 import { issueFromSource, refreshLinear, pendingLinear, linearApiFromEnvironment, synchronizeLinear, acknowledgeLinear } from './linear.mjs';
 
 const now = () => new Date().toISOString();
@@ -85,6 +85,7 @@ export class Conductor {
     this.linearApi = linearApi;
     this.root = fs.realpathSync(root);
     this.isHomeOutside = home !== undefined;
+    this.minuteMs = 60_000;
     this.home = home === undefined ? path.join(this.root, '.codex/conductor') : path.resolve(home);
   }
   ledgerFile(id) { return path.join(this.home, 'runs', validId(id), 'ledger.json'); }
@@ -320,7 +321,11 @@ export class Conductor {
       return ok('Handover saved. Codex manages compaction; this command does not force it.', { file });
     });
   }
+  runCheck(id, input) { return checkLore({ app: this, id, input }); }
+  runSyncBase(id) { return syncBaseLore({ app: this, id }); }
+  runMergeMain(id) { return mergeMainLore({ app: this, id }); }
   async github(id, input, mutate = false) {
+    if (isLoreLedger(this.ledgerFile(id))) return mergeLore({ app: this, id, input, isCheckOnly: !mutate });
     // Hold a repository-wide lock through the live check and optional merge.
     return this.locked(async () => {
       const raw = this.load(id);
@@ -408,7 +413,7 @@ export class Conductor {
 export async function main(argv = process.argv.slice(2)) {
   const command = argv.shift();
   if (!command || command === 'help' || command === '--help') {
-    console.log('conductor.mjs <init|conduct|list|board|board_open|board_close|digest|brief|worktree|handover|task_add|task_update|run_plan|approve|approve_main|approve_merge|quarantine|model_policy|tier|pause|unpause|merged|board_post|board_rule|problem_report|problem_assign|problem_resolve|merge_check|merge|reconcile|linear_sync|linear_ack> --root <project> [--run <id>] [--input <JSON file>] [--caller orchestrator|owner|worker:<task>] [--home <dir>] [--callers <dir>]\nJSON input may also be read from stdin with --input -. Approval commands require --caller owner after the user explicitly requests them.');
+    console.log('conductor.mjs <init|conduct|list|board|board_open|board_close|digest|brief|worktree|handover|task_add|task_update|run_plan|approve|approve_main|approve_merge|quarantine|model_policy|tier|pause|unpause|merged|board_post|board_rule|problem_report|problem_assign|problem_resolve|merge_check|merge|run_check|run_sync_base|run_merge_main|reconcile|linear_sync|linear_ack> --root <project> [--run <id>] [--input <JSON file>] [--caller orchestrator|owner|worker:<task>] [--home <dir>] [--callers <dir>]\nJSON input may also be read from stdin with --input -. Approval commands require --caller owner after the user explicitly requests them.');
     return;
   }
   const options = {};
@@ -458,13 +463,19 @@ export async function main(argv = process.argv.slice(2)) {
       return;
     }
     if (command === 'brief') { console.log(app.brief(id, input.task)); return; }
-    if (['worktree', 'handover', 'merge_check', 'merge', 'reconcile', 'linear_sync', 'linear_ack'].includes(command) && caller.kind !== 'orchestrator') fail('Only the orchestrator performs this action.');
+    if (['worktree', 'handover', 'merge_check', 'merge', 'run_check', 'run_sync_base', 'reconcile', 'linear_sync', 'linear_ack'].includes(command) && caller.kind !== 'orchestrator') fail('Only the orchestrator performs this action.');
     if (command === 'linear_sync') { console.log(JSON.stringify(await app.linearSync(id), null, 2)); return; }
     if (command === 'quarantine') result = await app.quarantine(id, input, caller);
     else if (command === 'linear_ack') result = await app.linearAck(id, input);
     else if (command === 'worktree') result = await app.worktree(id, input);
     else if (command === 'handover') result = await app.handover(id, input.next);
     else if (command === 'merge_check' || command === 'merge') result = await app.github(id, input, command === 'merge');
+    else if (command === 'run_check') result = await app.runCheck(id, input);
+    else if (command === 'run_sync_base') result = await app.runSyncBase(id);
+    else if (command === 'run_merge_main') {
+      if (caller.kind !== 'orchestrator' && caller.kind !== 'owner') fail('Only the orchestrator or a dispatcher performs this action.');
+      result = await app.runMergeMain(id);
+    }
     else if (command === 'reconcile') result = await app.reconcile(id, input);
     else result = await app.apply(id, command, input, caller);
   }

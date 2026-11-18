@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 // A fake `lore` program for node:test. It answers from a JSON table and appends every call to a log.
-//   FAKE_LORE_TABLE  path of a JSON file: a list of rows { match, exit?, out?, err?, answers? }
+//   FAKE_LORE_TABLE  path of a JSON file: a list of rows { match, exit?, exits?, out?, err?, answers? }
 //   FAKE_LORE_LOG    path of the log: one JSON line { args, cwd, row } per call
 // `match` is the call's arguments (after --non-interactive) joined by spaces; a row answers a call whose
 // arguments equal it or continue it after a space. The first row that matches answers. `answers` is a list
-// of outputs given one per call of that row, the last one again and again.
+// of outputs given one per call of that row, the last one again and again; `exits` is the same for exit codes.
 import fs from 'node:fs';
 
 const argv = process.argv.slice(2);
@@ -26,4 +26,5 @@ const answer = table[row];
 const out = answer.answers ? answer.answers[Math.min(earlier, answer.answers.length - 1)] : (answer.out ?? '');
 process.stdout.write(out);
 if (answer.err) process.stderr.write(answer.err);
-process.exit(answer.exit ?? 0);
+const at = Math.min(earlier, (answer.exits?.length ?? 1) - 1);
+process.exit(answer.exits ? answer.exits[at] : (answer.exit ?? 0));

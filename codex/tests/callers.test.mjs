@@ -129,6 +129,7 @@ const rows = [
   ['pause', {}, decider(), orchestrator()],
   ['unpause', {}, dispatcher(), worker('a')],
   ['run_merge_main', {}, dispatcher(), decider()],
+  ['run_merge_main', {}, orchestrator(), worker('a')],
   ['merged', {}, dispatcher(), orchestrator()],
   ['conduct', { id: 'run', department: 'engineering' }, orchestrator(), decider()],
 ];
