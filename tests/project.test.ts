@@ -217,8 +217,8 @@ describe('runSetup: what a run keeps of its home', () => {
 
   test('a repository home keeps its whole config and has no workspace', () => {
     const config = { tickets: 'linear' as const, linear: { team: 'ABC' }, staffing: { agents: [{ id: 'lead-a', about: 'Leads.' }] } }
-    expect(runSetup(config, { base: 'main', look: look('plain') })).toEqual({ config })
-    expect(runSetup({}, { base: 'main', look: look('plain') }), 'an empty config keeps none').toEqual({})
+    expect(runSetup(config, { base: 'main', look: look('plain') })).toEqual({ base: 'main', config })
+    expect(runSetup({}, { base: 'main', look: look('plain') }), 'an empty config keeps none').toEqual({ base: 'main' })
   })
 
   test('a repository home refuses a place', () => {
@@ -238,10 +238,12 @@ describe('runSetup: what a run keeps of its home', () => {
 
   test("a place fixes the workspace and takes the place's settings with its first team", () => {
     expect(runSetup(folderConfig, { place: 'game-code', base: 'main', look: look('git') })).toEqual({
+      base: 'develop',
       config: { tickets: 'linear', linear: { team: 'ABC' }, check: place.check },
       workspace: { kind: 'git', root: '/home/game-code/', place: 'game-code/', base: 'develop' },
     })
     expect(runSetup(folderConfig, { place: 'game-art', base: 'main', look: look('lore') })).toEqual({
+      base: 'main',
       config: { tickets: 'linear', linear: { team: 'ABC' } },
       workspace: { kind: 'lore', root: '/home/game-art', place: 'game-art', base: 'main' },
     })

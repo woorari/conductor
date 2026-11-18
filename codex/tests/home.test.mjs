@@ -69,6 +69,19 @@ test('a folder home needs a place', async t => {
   assert.deepEqual(run.config.linear, { team: 'ABC' });
 });
 
+test("a place's own base is the run's one base", async t => {
+  const { root, state } = project(t, { places: [{ ...place, base: 'develop' }] }, ['game-code']);
+  const app = new Conductor(root, { home: state });
+  await app.conduct({ ...start, place: 'game-code', base: 'ignored' });
+  const raw = app.load('run');
+  assert.equal(raw.run.workspace.base, 'develop');
+  assert.equal(raw.codex.base, 'develop');
+  const plain = project(t, {});
+  const other = new Conductor(plain.root, { home: plain.state });
+  await other.conduct({ ...start, base: 'trunk' });
+  assert.equal(other.load('run').codex.base, 'trunk');
+});
+
 test('a place whose folder is missing is refused', async t => {
   const { root, state } = project(t, { places: [place] });
   const app = new Conductor(root, { home: state });

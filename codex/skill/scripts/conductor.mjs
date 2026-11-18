@@ -132,7 +132,7 @@ export class Conductor {
       const raw = newRun(request.id, request.source, now(), request.title, { ...(issue ? { tickets: 'linear' } : {}), ...(setup.config === undefined ? {} : { config: setup.config }), ...(setup.workspace === undefined ? {} : { workspace: setup.workspace }) });
       if (issue) raw.run.issue = issue;
       raw.run.maxParallel = maxParallel;
-      raw.codex = { adapterVersion: 1, base: input.base ?? 'main', workspaces: {} };
+      raw.codex = { adapterVersion: 1, base: setup.base, workspaces: {} };
       this.save(request.id, raw);
       return ok(`Started run ${request.id}. Read the source and draft tasks; propose the plan before asking for approval.`, { run: request.id });
     });

@@ -216,20 +216,21 @@ export function placeConfig(place: Place, team: string): ProjectConfig {
  * places) the workspace of the named place and that place's settings, with the
  * place's first team as its ticket's team. `look` reads the disk: where the
  * place's folder is, and whether it is there and what it holds (a folder that
- * is no repository yet counts as git). Pure otherwise; answers the error text
+ * is no repository yet counts as git). `base` is the run's one base branch: the
+ * place's own, else the one asked for. Pure otherwise; answers the error text
  * when no run may start.
  */
 export function runSetup(
   config: ProjectConfig,
   ask: { place?: string; base: string; look: (folder: string) => { root: string; kind: 'missing' | 'plain' | 'git' | 'lore' } },
-): { config?: ProjectConfig; workspace?: RunWorkspace } | { error: string } {
+): { base: string; config?: ProjectConfig; workspace?: RunWorkspace } | { error: string } {
   const refused = (reason: string) => ({ error: `No run was started. ${reason}` })
   if (config.places === undefined) {
     if (ask.place !== undefined) return refused('This home is a repository and lists no places: the run works in it, so do not name a place.')
     const problem = homeConfigProblem(config, 'repository')
     if (problem !== undefined) return refused(problem)
 
-    return Object.keys(config).length === 0 ? {} : { config }
+    return Object.keys(config).length === 0 ? { base: ask.base } : { base: ask.base, config }
   }
   const problem = homeConfigProblem(config, 'folder')
   if (problem !== undefined) return refused(problem)
@@ -241,9 +242,12 @@ export function runSetup(
   const found = ask.look(place.folder)
   if (found.kind === 'missing') return refused(`The folder of the place ${bare(place.folder)}, ${place.folder}, is no folder in this home: correct config.json, or make the folder.`)
 
+  const base = place.base ?? ask.base
+
   return {
+    base,
     config: placeConfig(place, place.teams[0] ?? ''),
-    workspace: { kind: found.kind === 'lore' ? 'lore' : 'git', root: found.root, place: place.folder, base: place.base ?? ask.base },
+    workspace: { kind: found.kind === 'lore' ? 'lore' : 'git', root: found.root, place: place.folder, base },
   }
 }
 
