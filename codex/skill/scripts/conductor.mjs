@@ -19,6 +19,7 @@ import { linearKeyOf } from './core/linear.mjs';
 import { approvedMainAt } from './core/lore-merge.mjs';
 import { resolveCaller, callerMay, decisionMay, legacyCaller, runCallersOf } from './callers.mjs';
 import { openBoard, closeBoard } from './board-launcher.mjs';
+import { approveLore, isLoreLedger, worktreeLore } from './lore-host.mjs';
 import { issueFromSource, refreshLinear, pendingLinear, linearApiFromEnvironment, synchronizeLinear, acknowledgeLinear } from './linear.mjs';
 
 const now = () => new Date().toISOString();
@@ -159,6 +160,7 @@ export class Conductor {
     });
   }
   async worktree(id, input) {
+    if (isLoreLedger(this.ledgerFile(id))) return worktreeLore({ app: this, id, taskId: validId(input.task), parsed });
     return this.locked(() => {
       const raw = this.load(id);
       const ledger = parsed(raw);
@@ -201,7 +203,18 @@ export class Conductor {
       return ok(`Workspace ready for ${taskId}. Start its Codex subagent there; on spawn failure set the task returned.`, { workspace: existing ?? workspace, branch: task.branch, tier: task.tier, ...(task.agent ? { agent: task.agent } : {}), ...(task.effort ? { effort: task.effort } : {}), complexity: complexityOf(task.tier), modelSelection, slot: decision.slot });
     });
   }
+  // The owner's checks for an approval, shared by a Git run and a Lore run: the owner, the preflight, the plan's hash.
+  approvalGate(raw, input, caller, at) {
+    if (caller.kind !== 'owner') fail('This action requires the owner’s explicit instruction in this chat.');
+    const ledger = parsed(raw);
+    const issues = preflight(ledger);
+    if (issues.length) fail(issues.join('\n'));
+    const gate = planGate(planHash(ledger, raw.codex.base), input, at);
+    if (gate.error) fail(gate.error);
+    return gate.decision;
+  }
   async apply(id, command, input = {}, caller = { kind: 'orchestrator' }) {
+    if (command === 'approve' && isLoreLedger(this.ledgerFile(id))) return approveLore({ app: this, id, input, gate: (raw, at) => this.approvalGate(raw, input, caller, at) });
     return this.change(id, raw => {
       const at = now();
       const owner = () => { if (caller.kind !== 'owner') fail('This action requires the owner’s explicit instruction in this chat.'); };
@@ -246,13 +259,7 @@ export class Conductor {
           };
         }
         case 'approve': {
-          owner();
-          const ledger = parsed(raw);
-          const issues = preflight(ledger);
-          if (issues.length) fail(issues.join('\n'));
-          const gate = planGate(planHash(ledger, raw.codex.base), input, at);
-          if (gate.error) fail(gate.error);
-          return signals.approvePlan(raw, input.delivery ?? 'complete', raw.codex.base, gate.decision);
+          return signals.approvePlan(raw, input.delivery ?? 'complete', raw.codex.base, this.approvalGate(raw, input, caller, at));
         }
         case 'approve_main': {
           owner();
