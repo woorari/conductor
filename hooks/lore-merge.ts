@@ -5,8 +5,10 @@
  * board then holds.
  */
 
-import type { Ledger, Task } from '../types'
+import type { GateDecision, Ledger, Task } from '../types'
 import type { Flight } from './merge'
+import { planDeliversMain } from './delivery'
+import { REVISION } from './lore'
 import { afterDone, lookLines, named, unsettled } from './problems'
 import { changed, refused } from './signals'
 import type { Caller, Outcome, Raw } from './signals'
@@ -144,11 +146,51 @@ export function readyForBase(ledger: Ledger, head: string | undefined): string[]
 }
 
 /** The owner's approval of the run branch's revision, and where the base stood then. */
-export function approvedMain(raw: Raw, at: string, approval: { revision: string; base: string }): Outcome {
+export function approvedMain(raw: Raw, at: string, approval: { revision: string; base: string }, decision?: GateDecision): Outcome {
   const run = raw.run as Loose
   run.approval = { revision: approval.revision, base: approval.base, at }
+  if (decision !== undefined) run.decisions = { ...(run.decisions as object | undefined), main: { ...decision, revision: approval.revision, base: approval.base } }
 
   return changed(`Approved ${rev7(approval.revision)} for the base branch.`)
+}
+
+/**
+ * `approve_main`: an approval by name, for a revision that is the run branch's
+ * head as the board last left it, and the base it last took in. Refused for a
+ * run with no Lore branch or any other revision; the owner's own approval of
+ * the head the mod just read goes through approvedMain.
+ */
+export function approvedMainAt(raw: Raw, at: string, approval: { revision: string; base: string }, decision?: GateDecision): Outcome {
+  const head = (raw.run as Loose & { lore?: Loose }).lore?.head
+  if ((raw.run as Loose & { lore?: Loose }).lore === undefined) return refused('This run has no Lore branch.')
+  if (!REVISION.test(approval.revision) || !REVISION.test(approval.base)) return refused('revision and base are Lore revisions (64 hex characters).')
+  if (approval.revision !== head) {
+    return refused(`The run branch is at ${head === undefined ? 'no revision the board knows of' : rev7(String(head))}, not ${rev7(approval.revision)}: approve the revision the run branch is at now.`)
+  }
+
+  const baseAt = (raw.run as Loose & { lore?: Loose }).lore?.baseAt
+  if (approval.base !== baseAt) {
+    return refused(`The base branch is at ${baseAt === undefined ? 'no revision the board knows of' : rev7(String(baseAt))}, not ${rev7(approval.base)}: approve the base the run branch took in last.`)
+  }
+
+  return approvedMain(raw, at, approval, decision)
+}
+
+/**
+ * Whether a recorded decision covers the run branch's head going into the
+ * base, as it stands now: a plan decision for complete delivery into this
+ * base, or a `main` decision for this very revision and this very base
+ * revision. Answers why not, or undefined when one does.
+ */
+export function mainDecision(ledger: Ledger, head: string, baseAt: string): string | undefined {
+  const plan = ledger.run.decisions?.plan
+  const base = ledger.run.lore?.base
+  if (plan?.delivery === 'complete' && base !== undefined && planDeliversMain(ledger, base)) return undefined
+  const main = ledger.run.decisions?.main
+  if (main?.revision === head && main.base === baseAt) return undefined
+  const what = main === undefined ? 'no approve_main decision is recorded' : `the approve_main decision covers ${rev7(main.revision)} on a base at ${rev7(main.base)}, not ${rev7(head)} on a base at ${rev7(baseAt)}`
+
+  return `No recorded decision covers ${rev7(head)} for ${base ?? 'the base branch'}: the plan was not decided for complete delivery, and ${what}. A decider approves the plan for complete delivery, or approve_main names this revision and the base's revision.`
 }
 
 /** The run branch is on the base branch: the run is merged. */

@@ -1,4 +1,4 @@
-import type { Activity, ModelTier, ProblemSeverity, Staffing, TaskStatus, Ticket } from '../types'
+import type { Activity, GateDecision, ModelTier, ProblemSeverity, Staffing, TaskStatus, Ticket } from '../types'
 import { LINEAR_KEY, RUN_ID, STATUSES, TIERS } from './ledger'
 import { REVISION } from './lore'
 import { staffLabel } from './models'
@@ -399,7 +399,7 @@ export function proposePlan(raw: Raw, caller: Caller, input: Record<string, unkn
 }
 
 /** `/approve`: the owner lets the workers start. */
-export function approvePlan(raw: Raw, delivery: 'complete' | 'review-only' = 'complete', base = 'main'): Outcome {
+export function approvePlan(raw: Raw, delivery: 'complete' | 'review-only' = 'complete', base = 'main', decision?: GateDecision & { sha256: string }): Outcome {
   const run = planOf(raw)
   if (!['complete', 'review-only'].includes(delivery)) return refused('delivery is complete or review-only, as the owner instructed.')
   if (typeof base !== 'string' || !base.trim()) return refused('Name the base branch covered by the plan approval.')
@@ -409,6 +409,7 @@ export function approvePlan(raw: Raw, delivery: 'complete' | 'review-only' = 'co
   run.plan = 'approved'
   run.delivery = delivery
   run.deliveryBase = base
+  if (decision !== undefined) run.decisions = { ...(run.decisions as object | undefined), plan: { ...decision, delivery } }
 
   return changed(`Plan approved: ${raw.tasks.length} ${raw.tasks.length === 1 ? 'task' : 'tasks'} may start. ${delivery === 'complete' ? `Complete delivery includes reviewed PR merges into ${base}; no further per-task, file or publishing approval is needed within the approved deliverable.` : 'The owner limited delivery to review: main/base merges still need separate consent.'}`)
 }

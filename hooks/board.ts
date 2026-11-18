@@ -1,5 +1,6 @@
 import type { Ledger, Orchestrator, Post, Problem, ProblemSeverity, Task, TaskStatus } from '../types'
 import { staffLabel } from './models'
+import { decisionLines } from './plan'
 import { needsTask, standing, standingText } from './problems'
 import type { Standing } from './problems'
 import { readiness } from './router'
@@ -48,6 +49,8 @@ export type Board = {
   pausedAt?: string
   /** In a home that is not a repository: the workspace the run works in, relative to the home. */
   workspace?: string
+  /** Who decided each gate by a recorded decision, with the ref and the hash or revision; absent when none was. */
+  decisions?: string[]
   building: TaskRow[]
   /** Handed back by their workers and not yet judged by the orchestrator. */
   returned: TaskRow[]
@@ -97,8 +100,11 @@ export function boardView(ledger: Ledger, nowMs: number): Board {
   const open = ledger.problems.filter(one => one.status === 'open').map((one): ProblemRow => ({ ...one, standing: standing(one, ledger.tasks) }))
   const finishedAt = (row: TaskRow): number => (row.finishedAt === undefined ? 0 : Date.parse(row.finishedAt))
 
+  const decided = decisionLines(ledger)
+
   return {
     title: ledger.run.title,
+    ...(decided.length === 0 ? {} : { decisions: decided }),
     ...(ledger.run.workspace === undefined ? {} : { workspace: shownWorkspace(ledger.run.workspace) }),
     total: rows.length,
     problems: [...open].sort((a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity]),

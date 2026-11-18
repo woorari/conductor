@@ -64,6 +64,30 @@ Task complexity survives a handover; provider model assignments do not. The port
 
 On a host takeover, `model_policy` with input `{}` resets future Codex assignments to session inheritance. An explicit owner-supplied mapping is stored with `model_policy --caller owner` and input `{"models":{"sonnet":"<available Codex model>"}}`; unmapped tiers inherit. Workers cannot change this policy. Approval, task progress, existing agents and completed history are preserved. This is model handling, not automatic ledger or workspace migration between the two hosts.
 
+## Runs with no person present
+
+The command interface (`node scripts/conductor.mjs <command> --root <project> ...`) can run a whole run with no person in the session. Three options carry it.
+
+- `--home <dir>` keeps the ledgers, the lock and the brief in `<dir>` instead of `<project>/.codex/conductor`. Without it nothing changes.
+- `--callers <dir>` is the run's trust root: a folder only its owner can write to, holding one `<sha256 of the token>.json` record per caller (kind, department, run, task, expiry; a dispatcher's record may name a `person`). `conduct` records the folder and the department in the run, and the run then accepts only calls from that folder. The caller proves itself with the token in the environment variable `CONDUCTOR_TOKEN` (64 hex characters; only its hash is stored, and no message repeats it). With `--callers`, `--caller` is refused; a missing, unknown, expired or other-run token is refused before anything is read or written. A run made with callers refuses every call that is not a read when `--callers` is missing.
+- Plan and decisions: `run_plan` returns the plan's `planSha256`. A decider's or dispatcher's `approve` names that hash and carries a decision `{by, ref}`: `decider:<department>` for a decider, `person:<id>` for a dispatcher whose record names that person. A hash that no longer matches the plan is refused, naming both, and the plan stays proposed. `approve_main` carries the decision the same way, for an exact revision.
+
+Who may run what with a proven caller (a command not listed here is refused to every caller):
+
+| Command | Who |
+|---|---|
+| `list`, `board`, `digest` | anyone; no token needed |
+| `init`, `conduct` (its `id` equals the token's run, its `department` the token's), `board_open`, `board_close`, `run_plan`, `worktree`, `merge_check`, `merge`, `run_check`, `run_sync_base`, `handover`, `reconcile`, `task_add`, `board_rule`, `problem_report`, `problem_assign`, `problem_resolve` | the run's orchestrator |
+| `task_update`, `brief` | the run's orchestrator, or a worker for its own task only (a worker's `task_update` may set the status to `review`, `blocked` or `failed` and no other) |
+| `board_post` | the run's orchestrator, or any worker of the run |
+| `quarantine` | a worker (it quarantines in its own task's workspace) |
+| `approve`, `approve_main`, `approve_merge`, `tier`, `model_policy`, `pause`, `unpause` | a decider of the run's department, or a dispatcher |
+| `run_merge_main` | the run's orchestrator, or a dispatcher |
+| `merged` | a dispatcher |
+| `linear_sync`, `linear_ack` | no proven caller (they are not open to one) |
+
+For a Lore run the steps are the ones in the skill: `run_check` on each green task, `merge` into the run branch, `run_check` on the run branch's head, then `run_merge_main`. `run_check` runs the project's configured program with no shell and without the token. `run_sync_base` brings a moved base into the run branch. `run_merge_main` needs the plan's complete-delivery decision, or an `approve_main` decision for the head; it re-checks the tasks, the check, the base and the decision at merge time, and protects the base again afterwards (a failed re-protect is a blocker that refuses the next base merge). A session that starts with a place whose folder is missing, or a Lore place with no local workspace, is stopped; nothing is cloned.
+
 ## Live desktop board
 
 Claude and Codex share these HTML assets and the local server; Claude’s entry is `node codex/board.mjs --root <project> --run <id>`. It reads `.claude/conductor/runs/`, uses Claude’s native commands and supports queued-task tier changes through the active Claude session. The Codex view remains backed by `.codex/conductor/runs/`.

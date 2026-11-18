@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import { conducting } from '../hooks/plan'
-import { LORE_DEFAULTS, PLACEHOLDER_SNIPPET, hasPlaceholder, homeConfigProblem, parseConfig, placeConfig, runsIgnored } from '../hooks/project'
+import { LORE_DEFAULTS, PLACEHOLDER_SNIPPET, hasPlaceholder, homeConfigProblem, parseConfig, placeConfig, runSetup, runsIgnored } from '../hooks/project'
 import { runBranchOf, slugOf } from '../hooks/workspace'
 
 const error = (text: string | undefined): string => {
@@ -201,6 +201,77 @@ describe('places: a home that is not a repository', () => {
       tickets: 'linear',
       linear: { team: 'ABC' },
       check: { argv: ['npm', 'test'], timeoutMin: 20 },
+    })
+  })
+})
+
+describe('runSetup: what a run keeps of its home', () => {
+  const place = { folder: 'game-code/', teams: ['ABC', 'DEF'], about: 'The game code.', base: 'develop', check: { argv: ['./check.sh'], timeoutMin: 5 } }
+  const folderConfig = { places: [place, { folder: 'game-art', teams: ['ABC'], about: 'Art.' }] }
+  const seen: string[] = []
+  const look = (kind: 'missing' | 'plain' | 'git' | 'lore') => (folder: string) => {
+    seen.push(folder)
+
+    return { root: `/home/${folder}`, kind }
+  }
+
+  test('a repository home keeps its whole config and has no workspace', () => {
+    const config = { tickets: 'linear' as const, linear: { team: 'ABC' }, staffing: { agents: [{ id: 'lead-a', about: 'Leads.' }] } }
+    expect(runSetup(config, { base: 'main', look: look('plain') })).toEqual({ base: 'main', config })
+    expect(runSetup({}, { base: 'main', look: look('plain') }), 'an empty config keeps none').toEqual({ base: 'main' })
+  })
+
+  test('a base that could pass for an option or leave the branch namespace is refused', () => {
+    for (const base of ['--upload-pack=x', '-x', 'a..b', 'a b', 'a\nb', 'a\tb', '', 'a\u0000b']) {
+      expect(runSetup({}, { base, look: look('plain') }), JSON.stringify(base)).toEqual({ error: expect.stringContaining('No run was started. The base branch') })
+    }
+    expect(runSetup(folderConfig, { place: 'game-art', base: '--x', look: look('git') })).toEqual({ error: expect.stringContaining('The base branch') })
+    expect(runSetup({ places: [{ ...place, base: '--x' }] }, { place: 'game-code', base: 'main', look: look('git') })).toEqual({ error: expect.stringContaining('The base branch') })
+    for (const base of ['main', 'release/1.2', 'feature_x-1.0']) expect(runSetup({}, { base, look: look('plain') })).toEqual({ base })
+  })
+
+  test('a repository home refuses a place', () => {
+    expect(runSetup({}, { place: 'game-code', base: 'main', look: look('git') })).toEqual({
+      error: 'No run was started. This home is a repository and lists no places: the run works in it, so do not name a place.',
+    })
+  })
+
+  test('a folder home needs a place, and names the places', () => {
+    expect(runSetup(folderConfig, { base: 'main', look: look('git') })).toEqual({
+      error: 'No run was started. This home is not a repository: name the place the run works in, one of game-code, game-art.',
+    })
+    expect(runSetup(folderConfig, { place: 'other', base: 'main', look: look('git') })).toEqual({
+      error: 'No run was started. "other" is no place of this home: one of game-code, game-art.',
+    })
+  })
+
+  test("a place fixes the workspace and takes the place's settings with its first team", () => {
+    expect(runSetup(folderConfig, { place: 'game-code', base: 'main', look: look('git') })).toEqual({
+      base: 'develop',
+      config: { tickets: 'linear', linear: { team: 'ABC' }, check: place.check },
+      workspace: { kind: 'git', root: '/home/game-code/', place: 'game-code/', base: 'develop' },
+    })
+    expect(runSetup(folderConfig, { place: 'game-art', base: 'main', look: look('lore') })).toEqual({
+      base: 'main',
+      config: { tickets: 'linear', linear: { team: 'ABC' } },
+      workspace: { kind: 'lore', root: '/home/game-art', place: 'game-art', base: 'main' },
+    })
+    expect(runSetup(folderConfig, { place: 'game-art', base: 'main', look: look('plain') }), 'a folder that is no repository yet counts as git').toMatchObject({ workspace: { kind: 'git' } })
+  })
+
+  test("a place is named by its folder, with or without the trailing slash", () => {
+    expect(runSetup(folderConfig, { place: 'game-code/', base: 'main', look: look('git') })).toMatchObject({ workspace: { place: 'game-code/' } })
+  })
+
+  test('a place whose folder is missing is refused', () => {
+    expect(runSetup(folderConfig, { place: 'game-code', base: 'main', look: look('missing') })).toEqual({
+      error: 'No run was started. The folder of the place game-code, game-code/, is no folder in this home: correct config.json, or make the folder.',
+    })
+  })
+
+  test("a folder home's config problem is the config's own text", () => {
+    expect(runSetup({ ...folderConfig, check: place.check }, { place: 'game-code', base: 'main', look: look('git') })).toEqual({
+      error: `No run was started. ${homeConfigProblem({ ...folderConfig, check: place.check }, 'folder')}`,
     })
   })
 })

@@ -1,27 +1,34 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { approveMerge, mergeApproved, DELIVERY, ORCHESTRATOR_ROLE } from './core/delivery.mjs';
 import { quarantine } from './quarantine.mjs';
 import { complexityOf, selectModel, staffLabel } from './core/models.mjs';
 import { RUN_ID, parseLedger, TIERS } from './core/ledger.mjs';
-import { conducting, newRun } from './core/plan.mjs';
-import { CONFIG_PATH, parseConfig } from './core/project.mjs';
+import { conducting, newRun, canonicalPlan, planGate, mainGate, decisionLines, digestOutput } from './core/plan.mjs';
+import { CONFIG_PATH, parseConfig, runSetup } from './core/project.mjs';
 import * as signals from './core/signals.mjs';
 import { preflight, route } from './core/router.mjs';
 import { post, rule, digest } from './core/posts.mjs';
 import { pauseRun, unpauseRun } from './core/pause.mjs';
 import * as merges from './core/merge.mjs';
 import { linearKeyOf } from './core/linear.mjs';
+import { approvedMainAt } from './core/lore-merge.mjs';
+import { resolveCaller, callerMay, decisionMay, legacyCaller, runCallersOf, callersFolder, callersBound, withAgent } from './callers.mjs';
 import { openBoard, closeBoard } from './board-launcher.mjs';
+import { isLoreLedger } from './lore-host.mjs';
+import { approveLore, checkLore, mergeLore, mergeMainLore, syncBaseLore, worktreeLore } from './lore-commands.mjs';
 import { issueFromSource, refreshLinear, pendingLinear, linearApiFromEnvironment, synchronizeLinear, acknowledgeLinear } from './linear.mjs';
 
 const now = () => new Date().toISOString();
 const fail = message => { throw new Error(message); };
 const ok = (text, more = {}) => ({ isChanged: true, isError: false, text, ...more });
 const validId = value => typeof value === 'string' && RUN_ID.test(value) ? value : fail('Use a run/task id of 1–64 letters, digits, hyphens or underscores.');
+// The hash of what a plan approval covers: sha256 of canonicalPlan, in hex.
+const planHash = (ledger, base) => crypto.createHash('sha256').update(canonicalPlan(ledger, base)).digest('hex');
 const readJSON = file => JSON.parse(fs.readFileSync(file, 'utf8'));
 function parsed(raw) {
   const result = parseLedger(JSON.stringify(raw));
@@ -52,6 +59,7 @@ function sameDirectory(left, right) {
 export function board(raw) {
   const ledger = parsed(raw);
   const lines = [`# ${ledger.run.title} (${ledger.run.id})`, `Plan: ${ledger.run.plan ?? 'approved'}${ledger.run.pausedAt ? ' · PAUSED' : ''}`, '', '| Task | Status | Complexity | Staffing | Next worker model | Depends on | Expected files | Note |', '| --- | --- | --- | --- | --- | --- | --- | --- |'];
+  lines.splice(2, 0, ...decisionLines(ledger));
   lines.splice(2, 0, `Delivery: ${ledger.run.delivery === 'review-only' ? 'review only; base merges reserved' : ledger.run.delivery === 'complete' ? `complete, including reviewed merges into ${ledger.run.deliveryBase}` : ['draft', 'proposed'].includes(ledger.run.plan) ? 'approval will cover complete delivery including reviewed base merges; honor explicit owner limits' : 'legacy approval; retain its recorded limits'}. Expected files may be adjusted to deliver the approved outcome.`);
   const cell = value => String(value ?? '').replaceAll('|', '\\|').replaceAll('\n', ' ');
   for (const task of ledger.tasks) lines.push(`| ${cell(task.id)}: ${cell(task.title)} | ${task.status} | ${complexityOf(task.tier)} | ${cell(staffLabel(task))} | ${task.status === 'done' ? '—' : cell(selectModel('codex', task.tier, raw.codex?.models).label)} | ${(task.dependsOn ?? []).join(', ')} | ${cell((task.files ?? []).join(', '))} | ${cell(task.note)} |`);
@@ -70,11 +78,15 @@ export function board(raw) {
 }
 
 export class Conductor {
-  constructor(root, { githubApi, linearApi = linearApiFromEnvironment() } = {}) {
+  // home: where the ledgers and the lock live, outside the project. callers: the folder of caller records; a run made with it records its department.
+  constructor(root, { githubApi, linearApi = linearApiFromEnvironment(), home, callers } = {}) {
+    this.callers = callers;
     this.githubApi = githubApi;
     this.linearApi = linearApi;
     this.root = fs.realpathSync(root);
-    this.home = path.join(this.root, '.codex/conductor');
+    this.isHomeOutside = home !== undefined;
+    this.minuteMs = 60_000;
+    this.home = home === undefined ? path.join(this.root, '.codex/conductor') : path.resolve(home);
   }
   ledgerFile(id) { return path.join(this.home, 'runs', validId(id), 'ledger.json'); }
   load(id) { const raw = readJSON(this.ledgerFile(id)); parsed(raw); return raw; }
@@ -99,6 +111,7 @@ export class Conductor {
   }
   init() {
     fs.mkdirSync(path.join(this.home, 'runs'), { recursive: true });
+    if (this.isHomeOutside) return ok('Conductor enabled for this home.');
     const ignore = path.join(this.root, '.gitignore');
     const before = fs.existsSync(ignore) ? fs.readFileSync(ignore, 'utf8') : '';
     const additions = ['.codex/conductor/runs/', '.codex/conductor/.adapter.lock/'].filter(line => !before.split('\n').includes(line));
@@ -116,15 +129,20 @@ export class Conductor {
       if (fs.existsSync(this.ledgerFile(request.id))) fail('That run already exists; read its board to resume it.');
       const issue = input.issue ?? issueFromSource(request.source);
       if (issue !== undefined && (typeof issue !== 'string' || !linearKeyOf(issue) || linearKeyOf(issue) !== issue)) fail('issue must be a Linear issue key, such as ABC-12.');
-      // Only the staffing block of the project's config is used here: this interface has no Lore and no places.
       const configFile = path.join(this.root, CONFIG_PATH);
       const project = fs.existsSync(configFile) ? parseConfig(fs.readFileSync(configFile, 'utf8')) : { config: {} };
       if (project.error) fail(project.error);
-      const staffing = project.config.staffing;
-      const raw = newRun(request.id, request.source, now(), request.title, { ...(issue ? { tickets: 'linear' } : {}), ...(staffing === undefined ? {} : { config: { staffing } }) });
+      const look = folder => {
+        const root = path.join(this.root, folder);
+        return { root, kind: !fs.existsSync(root) ? 'missing' : fs.existsSync(path.join(root, '.lore')) ? 'lore' : fs.existsSync(path.join(root, '.git')) ? 'git' : 'plain' };
+      };
+      const setup = runSetup(project.config, { place: input.place, base: input.base ?? 'main', look });
+      if (setup.error) fail(setup.error);
+      const raw = newRun(request.id, request.source, now(), request.title, { ...(issue ? { tickets: 'linear' } : {}), ...(setup.config === undefined ? {} : { config: setup.config }), ...(setup.workspace === undefined ? {} : { workspace: setup.workspace }) });
       if (issue) raw.run.issue = issue;
       raw.run.maxParallel = maxParallel;
-      raw.codex = { adapterVersion: 1, base: input.base ?? 'main', workspaces: {} };
+      if (this.callers !== undefined) { const kept = runCallersOf(input, this.callers); if (kept.refused) fail(kept.refused); raw.run.callers = kept; }
+      raw.codex = { adapterVersion: 1, base: setup.base, workspaces: {} };
       this.save(request.id, raw);
       return ok(`Started run ${request.id}. Read the source and draft tasks; propose the plan before asking for approval.`, { run: request.id });
     });
@@ -144,6 +162,7 @@ export class Conductor {
     });
   }
   async worktree(id, input) {
+    if (isLoreLedger(this.ledgerFile(id))) return worktreeLore({ app: this, id, taskId: validId(input.task), parsed });
     return this.locked(() => {
       const raw = this.load(id);
       const ledger = parsed(raw);
@@ -186,7 +205,18 @@ export class Conductor {
       return ok(`Workspace ready for ${taskId}. Start its Codex subagent there; on spawn failure set the task returned.`, { workspace: existing ?? workspace, branch: task.branch, tier: task.tier, ...(task.agent ? { agent: task.agent } : {}), ...(task.effort ? { effort: task.effort } : {}), complexity: complexityOf(task.tier), modelSelection, slot: decision.slot });
     });
   }
+  // The owner's checks for an approval, shared by a Git run and a Lore run: the owner, the preflight, the plan's hash.
+  approvalGate(raw, input, caller, at) {
+    if (caller.kind !== 'owner') fail('This action requires the owner’s explicit instruction in this chat.');
+    const ledger = parsed(raw);
+    const issues = preflight(ledger);
+    if (issues.length) fail(issues.join('\n'));
+    const gate = planGate(planHash(ledger, raw.codex.base), input, at);
+    if (gate.error) fail(gate.error);
+    return gate.decision;
+  }
   async apply(id, command, input = {}, caller = { kind: 'orchestrator' }) {
+    if (command === 'approve' && isLoreLedger(this.ledgerFile(id))) return approveLore({ app: this, id, input, gate: (raw, at) => this.approvalGate(raw, input, caller, at) });
     return this.change(id, raw => {
       const at = now();
       const owner = () => { if (caller.kind !== 'owner') fail('This action requires the owner’s explicit instruction in this chat.'); };
@@ -226,14 +256,18 @@ export class Conductor {
             ...result,
             text: 'Plan proposed. Explain that approval covers complete delivery, necessary implementation adjustments and reviewed merges into the base, unless the owner limits delivery to review. Render the full board below in your next user-visible reply, outside a code block, then wait for approval. Tool output alone is not the approval presentation.',
             board: board(raw),
+            planSha256: planHash(parsed(raw), raw.codex?.base),
             approvalRequired: true,
           };
         }
         case 'approve': {
+          return signals.approvePlan(raw, input.delivery ?? 'complete', raw.codex.base, this.approvalGate(raw, input, caller, at));
+        }
+        case 'approve_main': {
           owner();
-          const issues = preflight(parsed(raw));
-          if (issues.length) fail(issues.join('\n'));
-          return signals.approvePlan(raw, input.delivery ?? 'complete', raw.codex.base);
+          const gate = mainGate(input, at);
+          if (gate.error) fail(gate.error);
+          return approvedMainAt(raw, at, { revision: input.revision, base: input.base }, gate.decision);
         }
         case 'tier': owner(); if (input.tier !== undefined && !TIERS.includes(input.tier)) fail('tier must be opus, sonnet or haiku (planning labels).'); return signals.ownerStaffs(raw, input.task, { tier: input.tier, agent: input.agent, effort: input.effort });
         case 'pause': owner(); return pauseRun(raw, at);
@@ -287,7 +321,11 @@ export class Conductor {
       return ok('Handover saved. Codex manages compaction; this command does not force it.', { file });
     });
   }
+  runCheck(id, input) { return checkLore({ app: this, id, input }); }
+  runSyncBase(id) { return syncBaseLore({ app: this, id }); }
+  runMergeMain(id) { return mergeMainLore({ app: this, id }); }
   async github(id, input, mutate = false) {
+    if (isLoreLedger(this.ledgerFile(id))) return mergeLore({ app: this, id, input, isCheckOnly: !mutate });
     // Hold a repository-wide lock through the live check and optional merge.
     return this.locked(async () => {
       const raw = this.load(id);
@@ -375,22 +413,34 @@ export class Conductor {
 export async function main(argv = process.argv.slice(2)) {
   const command = argv.shift();
   if (!command || command === 'help' || command === '--help') {
-    console.log('conductor.mjs <init|conduct|list|board|board_open|board_close|digest|brief|worktree|handover|task_add|task_update|run_plan|approve|approve_merge|quarantine|model_policy|tier|pause|unpause|merged|board_post|board_rule|problem_report|problem_assign|problem_resolve|merge_check|merge|reconcile|linear_sync|linear_ack> --root <project> [--run <id>] [--input <JSON file>] [--caller orchestrator|owner|worker:<task>]\nJSON input may also be read from stdin with --input -. Approval commands require --caller owner after the user explicitly requests them.');
+    console.log('conductor.mjs <init|conduct|list|board|board_open|board_close|digest|brief|worktree|handover|task_add|task_update|run_plan|approve|approve_main|approve_merge|quarantine|model_policy|tier|pause|unpause|merged|board_post|board_rule|problem_report|problem_assign|problem_resolve|merge_check|merge|run_check|run_sync_base|run_merge_main|reconcile|linear_sync|linear_ack> --root <project> [--run <id>] [--input <JSON file>] [--caller orchestrator|owner|worker:<task>] [--home <dir>] [--callers <dir>]\nJSON input may also be read from stdin with --input -. Approval commands require --caller owner after the user explicitly requests them.');
     return;
   }
   const options = {};
   while (argv.length) {
     const key = argv.shift();
-    if (!['--root', '--run', '--input', '--caller'].includes(key) || !argv.length) fail('Invalid arguments; see --help.');
+    if (!['--root', '--run', '--input', '--caller', '--home', '--callers'].includes(key) || !argv.length) fail('Invalid arguments; see --help.');
     options[key.slice(2)] = argv.shift();
   }
   if (!options.root) fail('Always provide --root (the original project root).');
-  const app = new Conductor(options.root);
-  const input = options.input ? readJSON(options.input === '-' ? 0 : options.input) : {};
+  const folder = options.callers === undefined ? undefined : callersFolder(options.callers);
+  if (folder?.refused) fail(folder.refused);
+  const app = new Conductor(options.root, { home: options.home, callers: folder?.dir });
+  let input = options.input ? readJSON(options.input === '-' ? 0 : options.input) : {};
   if (!input || typeof input !== 'object' || Array.isArray(input)) fail('Input must be a JSON object.');
+  const proven = folder === undefined ? null : resolveCaller(folder.dir, process.env.CONDUCTOR_TOKEN, new Date());
+  const askedRun = command === 'conduct' ? input.id : options.run;
+  const ledgerFile = typeof askedRun === 'string' && RUN_ID.test(askedRun) ? app.ledgerFile(askedRun) : undefined;
+  const runCallers = ledgerFile && fs.existsSync(ledgerFile) ? readJSON(ledgerFile).run?.callers : undefined;
+  if (folder !== undefined) { const bound = callersBound(folder.dir, runCallers); if (bound !== true) fail(bound.refused); }
+  const verdict = callerMay(proven, command, { run: askedRun, input, callerFlag: options.caller, runCallers });
+  if (verdict !== true) fail(verdict.refused);
+  const bound = decisionMay(proven, command, { input, runCallers });
+  if (bound !== true) fail(bound.refused);
+  input = withAgent(proven, command, input);
   const callerName = options.caller ?? 'orchestrator';
-  const caller = callerName.startsWith('worker:') ? { kind: 'worker', taskId: validId(callerName.slice(7)) } : { kind: callerName };
-  if (!['orchestrator', 'owner', 'worker'].includes(caller.kind)) fail('Invalid caller.');
+  const caller = proven !== null ? legacyCaller(proven) : callerName.startsWith('worker:') ? { kind: 'worker', taskId: validId(callerName.slice(7)) } : { kind: callerName };
+  if (proven === null && !['orchestrator', 'owner', 'worker'].includes(caller.kind)) fail('Invalid caller.');
   let result;
   if (command === 'init') { if (caller.kind !== 'orchestrator') fail('Only the orchestrator initializes.'); result = await app.locked(() => app.init()); }
   else if (command === 'conduct') { if (caller.kind !== 'orchestrator') fail('Only the orchestrator starts a run.'); result = await app.conduct(input); }
@@ -405,15 +455,27 @@ export async function main(argv = process.argv.slice(2)) {
       console.log(JSON.stringify(command === 'board_open' ? { boardView: await openBoard(app.root, id) } : await closeBoard(app.root, id), null, 2)); return;
     }
     if (command === 'board') { console.log(board(app.load(id))); return; }
-    if (command === 'digest') { console.log(digest(parsed(app.load(id)), caller)); return; }
+    if (command === 'digest') {
+      const raw = app.load(id);
+      const ledger = parsed(raw);
+      const text = digest(ledger, caller);
+      console.log(digestOutput(text, ledger, planHash(ledger, raw.codex?.base), proven !== null, caller.kind === 'worker'));
+      return;
+    }
     if (command === 'brief') { console.log(app.brief(id, input.task)); return; }
-    if (['worktree', 'handover', 'merge_check', 'merge', 'reconcile', 'linear_sync', 'linear_ack'].includes(command) && caller.kind !== 'orchestrator') fail('Only the orchestrator performs this action.');
+    if (['worktree', 'handover', 'merge_check', 'merge', 'run_check', 'run_sync_base', 'reconcile', 'linear_sync', 'linear_ack'].includes(command) && caller.kind !== 'orchestrator') fail('Only the orchestrator performs this action.');
     if (command === 'linear_sync') { console.log(JSON.stringify(await app.linearSync(id), null, 2)); return; }
     if (command === 'quarantine') result = await app.quarantine(id, input, caller);
     else if (command === 'linear_ack') result = await app.linearAck(id, input);
     else if (command === 'worktree') result = await app.worktree(id, input);
     else if (command === 'handover') result = await app.handover(id, input.next);
     else if (command === 'merge_check' || command === 'merge') result = await app.github(id, input, command === 'merge');
+    else if (command === 'run_check') result = await app.runCheck(id, input);
+    else if (command === 'run_sync_base') result = await app.runSyncBase(id);
+    else if (command === 'run_merge_main') {
+      if (proven === null) fail('run_merge_main needs --callers and the run\'s orchestrator or a dispatcher.');
+      result = await app.runMergeMain(id);
+    }
     else if (command === 'reconcile') result = await app.reconcile(id, input);
     else result = await app.apply(id, command, input, caller);
   }

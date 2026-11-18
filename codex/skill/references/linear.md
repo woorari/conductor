@@ -11,7 +11,7 @@ Conductor keeps Linear status aligned with the approved run. These are routine l
 
 Drafting a plan does not change Linear. Review and green are not completion. Pausing, failing or blocking a task does not close its ticket. A completed, canceled or duplicate issue is not reopened. Names such as “Doing” or “Shipped” vary between teams, so resolve statuses by their `type` and choose the lowest-position matching status. A task linked directly to the run issue cannot complete the run early.
 
-Claude and Codex share the same issue-completion rule. A warning, blocker or unanswered question attached to a task also keeps that task's ticket open after its code is merged. The parent represents the whole run, including remaining tasks on other tickets. The shared rule requires a Lore parent's approved base merge; this does not add Lore workspace or merge support to the Codex adapter.
+Claude and Codex share the same issue-completion rule. A warning, blocker or unanswered question attached to a task also keeps that task's ticket open after its code is merged. The parent represents the whole run, including remaining tasks on other tickets. The shared rule requires a Lore parent's approved base merge; the command interface merges a Lore run into the base with `run_merge_main`.
 
 A source such as `STU-123` or its Linear URL links the run automatically. For a spec run with an existing parent ticket, pass `issue` to `conduct`, for example `{"args":"docs/spec.md","issue":"STU-123"}`. Link child work with `task_add`/`task_update` using a Linear key in `ticket`. Adding tasks to an already approved plan still requires approval of that changed plan.
 
@@ -32,4 +32,4 @@ When `LINEAR_API_KEY` is set in the CLI's environment, successful mutations auto
 
 The API reads the issue before changing it, selects the team's state by type, and saves only confirmation metadata in the ledger. If the response to a write is lost, the next sync reads the current state before considering another write. Credentials and API response/error bodies are never recorded. API/network errors leave pending intent and a warning; they do not roll back an approved plan, completed board action or verified GitHub merge. Use `linear_sync` to retry or resolve the same transition through the connected plugin.
 
-There is no background timer. Retries happen after later mutations or an explicit `linear_sync`. This adapter still does not file new Linear issues or synchronize Lore merges automatically.
+There is no background timer. Retries happen after later mutations or an explicit `linear_sync`. This adapter still does not file new Linear issues.

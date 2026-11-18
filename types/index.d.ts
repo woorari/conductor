@@ -277,6 +277,18 @@ export type Ruling = {
   deliveredTo?: string[]
 }
 
+/** A gate decided by a recorded decision: who, the decision's id in the decisions log, and when (the CI's own clock). */
+export type GateDecision = {
+  /** `decider:<department>` or `person:<id>`. */
+  by: string
+  /** The decider's agent name. */
+  agent?: string
+  /** The decision id in the decisions log. */
+  ref: string
+  /** ISO 8601. */
+  at: string
+}
+
 /**
  * One run's ledger, `<repo root>/.claude/conductor/runs/<run id>/ledger.json`.
  * Fields this version does not know are kept out of the way, never refused.
@@ -322,6 +334,13 @@ export type Ledger = {
     /** The project's config as it was when the run started: what the run keeps to. */
     config?: ProjectConfig
     /** A Lore run: the repository, the base branch, the run's own branch and its workspace. */
+    /** A run made with proven callers: its department. Every later call that is not a read needs `--callers`. */
+    callers?: { department: string }
+    /** The gates decided by a recorded decision: the plan hash approved, and the run branch revision approved for the base. */
+    decisions?: {
+      plan?: GateDecision & { sha256: string; delivery: 'complete' | 'review-only' }
+      main?: GateDecision & { revision: string; base: string }
+    }
     /** In a home that is not a repository: the workspace the run works in, once fixed. */
     workspace?: RunWorkspace
     /** In a home that is not a repository: the workspaces the orchestrator picks from, while none is fixed. */
