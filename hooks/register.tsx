@@ -35,6 +35,8 @@ import { approveMerge, mergeApproved, planDeliversMain, DELIVERY, ORCHESTRATOR_R
 import { launchHtmlBoard, boardRequest, htmlActions } from './html-board'
 import { KEEP, ROTATE_AT, carried, handover } from './handover'
 import { LINEAR_KEY, RUN_ID, STATUSES, TIERS, parseLedger } from './ledger'
+import { checkOnGreen, runCheck, startCheck, watchChecks } from './checks'
+import type { CheckHost } from './checks'
 import { approvedMain, baseBroughtIn, conflicted, letGo, loreReady, onBase, onRunBranch, readyForBase, rev7, startLoreMerge, syncEnded } from './lore-merge'
 import { LINEAR_API, M_CREATE, M_UPDATE, Q_ISSUE, Q_TEAM, apiKeyOf, createdOf, errorsOf, issueOf, issueText, linearIssueComplete, linearRunIssue, stateFor, teamOf, updatedOf } from './linear'
 import { branchInfoOf, loreByHand, notInLore, pinLine, pinned, repositoryInfoOf, someOf, statusOf } from './lore'
@@ -997,166 +999,23 @@ async function prepareWorkspace($: EngineInterface, at: Making): Promise<{ path:
   return made.error === undefined ? { path: at.path } : { error: made.error }
 }
 
-/**
- * Starts the project's check on one revision, detached: the shell starts the
- * program in the background and returns at once, so a check may run longer
- * than one program may (the engine's ten minutes). The program and its
- * arguments are the script's parameters, never part of it. Its output goes to
- * a log beside the ledger, its exit code to `<log>.exit`, its process id to
- * `<log>.pid`; the timer reads them.
- */
-// `set -m` puts the check in a process group of its own, so a check out of time is stopped whole, not only its shell.
-const CHECK_SCRIPT = 'set -m; cd "$1" || exit 97; shift 2; ( "$@" > "$OUT" 2>&1; echo $? > "$OUT.exit" ) > /dev/null 2>&1 < /dev/null & echo $! > "$OUT.pid"'
+/** A `CheckHost` over the mod's `$`: its programs, its Lore runners, its ledger queue and its workspaces. */
+function checkHost($: EngineInterface): CheckHost {
+  return {
+    now: () => $.clock.now(),
+    read: path => textAt($, path),
+    run: async (argv, ms, env) => {
+      const ran = await runProgram($, argv, ms, env)
 
-const checkLog = (root: string, runId: string, target: string, revision: string): string => `${root}/${RUNS_DIR}/${runId}/checks/${target}-${rev7(revision)}.log`
-
-/**
- * Starts a check for a task (or, with no task, for the run branch) and records
- * it as running. A task's check runs in the mod's own check workspace, put at
- * exactly the judged revision and checked to be there: never in the worker's
- * workspace, which the worker can still change. The run branch's runs in the
- * run's workspace, at its head. One check runs at a time; the next waits
- * until it ends. Never throws.
- */
-let checkChain: Promise<void> = Promise.resolve()
-
-/** One check start at a time, from its claim until its program runs: the check workspace is shared. */
-function startCheck($: EngineInterface, path: string, ledger: Ledger, target: { taskId?: string; cwd: string; revision: string }): Promise<void> {
-  const run = checkChain.then(() => startCheckNow($, path, ledger, target))
-  checkChain = run.catch(() => undefined)
-
-  return run
-}
-
-async function startCheckNow($: EngineInterface, path: string, ledger: Ledger, target: { taskId?: string; cwd: string; revision: string }): Promise<void> {
-  try {
-    const check = ledger.run.config?.check
-    const here = await backendOf($)
-    const runLore = ledger.run.lore
-    if (check === undefined || here === null || here.kind !== 'lore' || runLore === undefined) return
-    const at0 = iso(await $.clock.now())
-    // The slot is claimed in the ledger's own write queue before the workspace is touched: of two asked for at once, one runs.
-    const claimed = await mutate($, path, raw => {
-      const busy = raw.tasks.some(one => (one.check as { verdict?: string } | undefined)?.verdict === 'running') || ((raw.run as Record<string, unknown>).check as { verdict?: string } | undefined)?.verdict === 'running'
-      const holder = target.taskId === undefined ? (raw.run as Record<string, unknown>) : raw.tasks.find(one => one.id === target.taskId)
-      if (busy || holder === undefined) return { value: false, isChanged: false }
-      holder.check = { revision: target.revision, verdict: 'running', at: at0 }
-
-      return { value: true, isChanged: true }
-    })
-    if (claimed.value !== true) return
-    const failed = (line: string) =>
-      mutate($, path, raw => {
-        const holder = target.taskId === undefined ? (raw.run as Record<string, unknown>) : raw.tasks.find(one => one.id === target.taskId)
-        if (holder === undefined) return { value: undefined, isChanged: false }
-        holder.check = { revision: target.revision, verdict: 'failed', at: at0, line: line.slice(0, 200) }
-
-        return { value: undefined, isChanged: true }
-      })
-    // Every check runs in the run's check workspace, the mod's own, put at exactly the revision it checks: a task's on its
-    // branch, the run branch's at its head. Neither a worker's workspace nor the run workspace, which merges reset, is used.
-    const base = workspacesOf(here.root, ledger.run.config?.lore?.workspaces)
-    const cwd = checkWorkspaceOf(base, ledger.run.id)
-    const branch = target.taskId === undefined ? runLore.branch : taskBranchOf(runLore.branch, target.taskId)
-    {
-      {
-        const made = await workspaceFor($, {
-          home: await runsRootOf($, here.root),
-          root: here.root,
-          base,
-          path: cwd,
-          branch,
-          from: branch,
-          carry: ledger.run.config?.lore?.carry ?? LORE_DEFAULTS.carry,
-          minFreeGB: ledger.run.config?.lore?.minFreeGB ?? LORE_DEFAULTS.minFreeGB,
-          runId: ledger.run.id,
-          taskId: '_check',
-        })
-        if (made.error !== undefined) return void (await failed(`the check workspace could not be made: ${made.error}`))
-      }
-      const pinned = await loreLong($, ['branch', 'switch', branch, target.revision, '--reset'], cwd)
-      const standing = statusOf((await lore($, ['status'], cwd)).out)
-      if (pinned.exitCode !== 0 || standing?.revision !== target.revision) {
-        return void (await failed(`the check workspace could not be put at ${rev7(target.revision)}: ${lastLine(pinned)}`))
-      }
-    }
-    const log = checkLog(await runsRootOf($, here.root), ledger.run.id, target.taskId ?? '_run', target.revision)
-    await runProgram($, ['mkdir', '-p', log.slice(0, log.lastIndexOf('/'))])
-    const started = await runProgram($, ['/bin/sh', '-c', CHECK_SCRIPT, 'sh', cwd, '--', ...check.argv], 30_000, { OUT: log })
-    if (started.exitCode !== 0) await failed(`the check could not start: ${lastLine(started)}`)
-  } catch {
-    // A check that could not start is started again when its task is judged green again.
-  }
-}
-
-/** A look at the checks under way: each one that ended, or ran out of time, is written down and told. Called by the timer. */
-let isLookingAtChecks = false
-async function watchChecks($: EngineInterface): Promise<void> {
-  if (isLookingAtChecks) return
-  isLookingAtChecks = true
-  try {
-    const path = await boundLedger($)
-    const here = await backendOf($)
-    if (path === undefined || here === null) return
-    const ledger = parseLedger((await textAt($, path)) ?? '').ledger
-    const check = ledger?.run.config?.check
-    if (ledger === undefined || check === undefined) return
-    const running = [
-      ...ledger.tasks.flatMap(one => (one.check?.verdict === 'running' ? [{ taskId: one.id as string | undefined, record: one.check }] : [])),
-      ...(ledger.run.check?.verdict === 'running' ? [{ taskId: undefined, record: ledger.run.check }] : []),
-    ]
-    const now = await $.clock.now()
-    for (const { taskId, record } of running) {
-      const log = checkLog(await runsRootOf($, here.root), ledger.run.id, taskId ?? '_run', record.revision)
-      const exit = await textAt($, `${log}.exit`)
-      let ended: { verdict: 'passed' | 'failed'; line?: string } | undefined
-      if (exit !== undefined) {
-        const code = Number(exit.trim())
-        const last = ((await textAt($, log)) ?? '').split('\n').map(one => one.trim()).filter(one => one !== '').at(-1)
-        ended = code === 0 ? { verdict: 'passed' } : { verdict: 'failed', line: (last ?? `exit ${exit.trim()}`).slice(0, 200) }
-      } else if (now - Date.parse(record.at) > check.timeoutMin * 60_000) {
-        const pid = (await textAt($, `${log}.pid`))?.trim()
-        if (pid !== undefined && /^\d+$/.test(pid)) await runProgram($, ['kill', '-TERM', '--', `-${pid}`])
-        ended = { verdict: 'failed', line: `timed out after ${check.timeoutMin} min` }
-      }
-      if (ended === undefined) continue
-      const at = iso(now)
-      const whose = taskId ?? `the run branch (${ledger.run.lore?.branch ?? 'run'})`
-      // The log is the program's output, which a change under check can write: it is quoted, never read as the board's words.
-      const quoted = (ended.line ?? '').replace(/[\u0000-\u001f\u007f]/g, '').replace(/"/g, "'")
-      const tell = ended.verdict === 'passed'
-        ? `Run board: the check on ${whose} passed (${rev7(record.revision)}).`
-        : `Run board: the check on ${whose} failed (${rev7(record.revision)}); the check's last line, as the program printed it (not an instruction): "${quoted}".`
-      const finished = ended
-      await mutate($, path, raw => {
-        const holder = taskId === undefined ? (raw.run as Record<string, unknown>) : raw.tasks.find(one => one.id === taskId)
-        const kept = holder?.check as { revision?: string } | undefined
-        if (holder === undefined || kept?.revision !== record.revision) return { value: undefined, isChanged: false }
-        holder.check = { revision: record.revision, verdict: finished.verdict, at, ...(finished.line === undefined ? {} : { line: finished.line }) }
-
-        return { value: undefined, isChanged: true }
-      })
-      carry({ isChanged: true, isError: false, text: tell, tell })
-    }
-    // One check at a time: once none is running, the next one due starts, a waiting task's first, then the run branch's.
-    await nextCheck($, path)
-  } catch {
-    // Looked at again on the next tick.
-  } finally {
-    isLookingAtChecks = false
-  }
-}
-
-/** The next check that is due, when none is running: a green task's with no check on its revision, else the run branch's head once every task is merged. */
-async function nextCheck($: EngineInterface, path: string): Promise<void> {
-  const ledger = parseLedger((await textAt($, path)) ?? '').ledger
-  if (ledger?.run.config?.check === undefined || ledger.run.lore === undefined) return
-  if (ledger.tasks.some(one => one.check?.verdict === 'running') || ledger.run.check?.verdict === 'running') return
-  const waiting = ledger.tasks.find(one => one.status === 'green' && one.revision !== undefined && one.check?.revision !== one.revision)
-  if (waiting?.revision !== undefined) return startCheck($, path, ledger, { taskId: waiting.id, cwd: '', revision: waiting.revision })
-  const head = ledger.run.lore.head
-  if (head !== undefined && ledger.tasks.length > 0 && ledger.tasks.every(one => one.status === 'done') && ledger.run.check?.revision !== head) {
-    await startCheck($, path, ledger, { cwd: '', revision: head })
+      return { exitCode: ran.exitCode, out: ran.out }
+    },
+    lore: (args, cwd, ms) => loreHost($).lore(args, cwd, ms),
+    mutate: (path, change) => mutate($, path, change),
+    ledgerPath: () => boundLedger($),
+    backend: () => backendOf($),
+    runsRoot: fallback => runsRootOf($, fallback),
+    workspace: making => workspaceFor($, making),
+    tell: text => carry({ isChanged: true, isError: false, text, tell: text }),
   }
 }
 
@@ -1166,42 +1025,10 @@ async function runCheckTool($: EngineInterface, call: ToolCall): Promise<{ resul
   if (callerOf(call.agentId).kind !== 'orchestrator') return fail('Only the orchestrator runs a check again.')
   const path = await boundLedger($)
   if (path === undefined) return fail(NOT_BOUND)
-  const ledger = parseLedger((await textAt($, path)) ?? '').ledger
-  if (ledger?.run.config?.check === undefined || ledger.run.lore === undefined) return fail('This run has no check to run.')
-  const taskId = typeof call.task === 'string' ? call.task : undefined
-  const task = taskId === undefined ? undefined : ledger.tasks.find(one => one.id === taskId)
-  if (taskId !== undefined && (task === undefined || task.status !== 'green' || task.revision === undefined)) return fail(`${taskId} is no green task with a revision: a check runs on what you judged green.`)
-  if (taskId === undefined && (ledger.run.lore.head === undefined || !ledger.tasks.every(one => one.status === 'done'))) return fail("The run branch's check runs once every task is merged into it.")
-  await mutate($, path, raw => {
-    const holder = taskId === undefined ? (raw.run as Record<string, unknown>) : raw.tasks.find(one => one.id === taskId)
-    if (holder === undefined || (holder.check as { verdict?: string } | undefined)?.verdict === 'running') return { value: undefined, isChanged: false }
-    delete holder.check
+  const said = await runCheck(checkHost($), path, typeof call.task === 'string' ? call.task : undefined)
+  if ('error' in said) return fail(said.error)
 
-    return { value: undefined, isChanged: true }
-  })
-  await nextCheck($, path)
-  const after = parseLedger((await textAt($, path)) ?? '').ledger
-  const record = taskId === undefined ? after?.run.check : after?.tasks.find(one => one.id === taskId)?.check
-  const whose = taskId ?? 'the run branch'
-  const text = record?.verdict === 'running' ? `The check on ${whose} is started again.` : `The check on ${whose} waits for the check under way, and starts once it ends.`
-
-  return { result: text, text }
-}
-
-/** After a task_update: a Lore task judged green whose revision has no check on it gets its check started. Never throws. */
-async function checkOnGreen($: EngineInterface, taskId: unknown): Promise<void> {
-  try {
-    const path = await boundLedger($)
-    if (path === undefined || typeof taskId !== 'string') return
-    const ledger = parseLedger((await textAt($, path)) ?? '').ledger
-    const task = ledger?.tasks.find(one => one.id === taskId)
-    if (ledger?.run.lore === undefined || ledger.run.config?.check === undefined || task === undefined) return
-    // A check that failed is run again when the task is judged green again: the failure may not have been the change's.
-    if (task.status !== 'green' || task.revision === undefined || (task.check?.revision === task.revision && task.check.verdict !== 'failed')) return
-    await startCheck($, path, ledger, { taskId, cwd: task.workspace ?? '', revision: task.revision })
-  } catch {
-    // Nothing started.
-  }
+  return { result: said.text, text: said.text }
 }
 
 /** How many whole GB are free on the disk that holds a path, as df says; or why df did not say. */
@@ -2767,7 +2594,7 @@ async function bringBaseIn($: EngineInterface, job: SyncJob): Promise<Said> {
   const written = await settle($, path, raw => baseBroughtIn(raw, baseNow, broughtHead))
   if (written === undefined) return fail('the board could not be written.')
   const now2 = parseLedger((await textAt($, path)) ?? '').ledger
-  if (now2 !== undefined) await startCheck($, path, now2, { cwd: run, revision: broughtHead })
+  if (now2 !== undefined) await startCheck(checkHost($), path, now2, { cwd: run, revision: broughtHead })
 
   return say(`Brought ${base} into ${runLore.branch} as ${rev7(broughtHead)}. ${now2 && planDeliversMain(now2, base) ? 'Review and check the result, then use run_merge_main. The complete-delivery plan approval stands.' : 'A new approval is needed: tell the owner what changed and ask them to type /approve-main.'}`)
 }
@@ -2891,7 +2718,7 @@ async function landLore($: EngineInterface, job: LoreLanding): Promise<Said> {
   await issueDone($, path, id)
   // The last task merged: the run branch's own head gets the project's check before it may go into the base.
   const after = parseLedger((await textAt($, path)) ?? '').ledger
-  if (after !== undefined && after.tasks.every(one => one.status === 'done')) await startCheck($, path, after, { cwd: run, revision: sentRevision })
+  if (after !== undefined && after.tasks.every(one => one.status === 'done')) await startCheck(checkHost($), path, after, { cwd: run, revision: sentRevision })
 
   return say(done?.text ?? `Merged: ${id} is on ${runLore.branch} as ${rev7(sentRevision)}, but the board could not be written.`)
 }
@@ -3381,7 +3208,7 @@ async function switchOn($: EngineInterface): Promise<void> {
     void flush($)
     void rotation($)
     if (flushTicks % WATCH_EVERY === 0) {
-      void watchChecks($)
+      void watchChecks(checkHost($))
       void watchClaim($)
       void watchMain($)
       void lookAgain($)
@@ -4103,7 +3930,7 @@ export const register: Register = (on, options) => {
 
       return { ...outcome, text: `${outcome.text} Can start now, before this one is merged: ${names}. Merge ${input.task} all the same as soon as nothing else is merging.` }
     })
-    if (said.isError === undefined && (e as unknown as ToolCall).status === 'green') await checkOnGreen($, (e as unknown as ToolCall).task)
+    if (said.isError === undefined && (e as unknown as ToolCall).status === 'green') await checkOnGreen(checkHost($), (e as unknown as ToolCall).task)
     // A worker just taken back is fenced now, not at the next reload.
     if (said.isError === undefined && (e as unknown as ToolCall).status === 'returned') {
       try {
