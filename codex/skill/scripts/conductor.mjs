@@ -49,6 +49,8 @@ function run(program, args, cwd) {
   return execFileSync(program, args, { cwd, encoding: 'utf8', timeout: 120000, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
 }
 const git = (root, args) => run('git', ['-C', root, ...args], root);
+// A run records its own git repository in run.workspace; --root may be a home that is not one.
+const gitRootOf = (raw, fallback) => raw.run?.workspace?.kind === 'git' ? raw.run.workspace.root : fallback;
 
 // Windows may spell one directory through an 8.3 alias, a long path or a different case.
 // Compare filesystem identity rather than the spelling returned by Git and Node.
@@ -177,9 +179,10 @@ export class Conductor {
       if (decision.kind !== 'worker') return { isError: true, isChanged: false, text: decision.text ?? 'No worker route.' };
       if (!raw.codex) fail('This is not a Codex adapter ledger; do not write Claude run files.');
       const modelSelection = selectModel('codex', ledger.tasks.find(task => task.id === taskId).tier, raw.codex.models);
-      const mainRoot = git(this.root, ['rev-parse', '--show-toplevel']);
-      if (!sameDirectory(mainRoot, this.root)) fail('Use the repository root for --root.');
-      const workspace = path.join(path.dirname(this.root), `${path.basename(this.root)}.conductor-codex`, id, taskId);
+      const gitRoot = gitRootOf(raw, this.root);
+      const mainRoot = git(gitRoot, ['rev-parse', '--show-toplevel']);
+      if (!sameDirectory(mainRoot, gitRoot)) fail('Use the repository root for --root.');
+      const workspace = path.join(path.dirname(gitRoot), `${path.basename(gitRoot)}.conductor-codex`, id, taskId);
       const branch = `conductor/${id}/${taskId}`;
       const task = raw.tasks.find(one => one.id === taskId);
       const existing = raw.codex.workspaces?.[taskId];
@@ -190,17 +193,17 @@ export class Conductor {
         let base;
         if (decision.base) {
           if (!decision.base.branch) fail('A green dependency needs its branch recorded before another task can build on it.');
-          const local = run('git', ['-C', this.root, 'show-ref', '--verify', '--hash', `refs/heads/${decision.base.branch}`], this.root);
+          const local = run('git', ['-C', gitRoot, 'show-ref', '--verify', '--hash', `refs/heads/${decision.base.branch}`], gitRoot);
           base = local;
         } else {
           const baseName = raw.codex.base;
-          git(this.root, ['check-ref-format', '--branch', baseName]);
+          git(gitRoot, ['check-ref-format', '--branch', baseName]);
           // Remote base is preferred after an explicit fetch by the orchestrator.
-          try { base = git(this.root, ['rev-parse', '--verify', `refs/remotes/origin/${baseName}^{commit}`]); }
-          catch { base = git(this.root, ['rev-parse', '--verify', `refs/heads/${baseName}^{commit}`]); }
+          try { base = git(gitRoot, ['rev-parse', '--verify', `refs/remotes/origin/${baseName}^{commit}`]); }
+          catch { base = git(gitRoot, ['rev-parse', '--verify', `refs/heads/${baseName}^{commit}`]); }
         }
         fs.mkdirSync(path.dirname(workspace), { recursive: true });
-        git(this.root, ['worktree', 'add', '-b', branch, workspace, base]);
+        git(gitRoot, ['worktree', 'add', '-b', branch, workspace, base]);
         raw.codex.workspaces ??= {};
         raw.codex.workspaces[taskId] = workspace;
         task.branch = branch;
@@ -341,11 +344,12 @@ export class Conductor {
       const raw = this.load(id);
       if (raw.run.plan !== 'approved') fail('The plan must be approved.');
       if (raw.run.lore) fail('GitHub actions cannot operate on a Lore run.');
-      const repo = merges.githubRepo(git(this.root, ['remote', 'get-url', 'origin'])) ?? fail('Origin is not on github.com.');
+      const gitRoot = gitRootOf(raw, this.root);
+      const repo = merges.githubRepo(git(gitRoot, ['remote', 'get-url', 'origin'])) ?? fail('Origin is not on github.com.');
       const api = this.githubApi ?? (async (endpoint, method = 'GET', body) => {
         const args = ['api', '--hostname', 'github.com', '--method', method, endpoint];
         if (body) args.push('--input', '-');
-        const result = execFileSync('gh', args, { cwd: this.root, encoding: 'utf8', timeout: 30000, input: body ? JSON.stringify(body) : undefined, stdio: ['pipe', 'pipe', 'pipe'] });
+        const result = execFileSync('gh', args, { cwd: gitRoot, encoding: 'utf8', timeout: 30000, input: body ? JSON.stringify(body) : undefined, stdio: ['pipe', 'pipe', 'pipe'] });
         return JSON.parse(result);
       });
       const prefix = `repos/${repo}`;
@@ -400,10 +404,11 @@ export class Conductor {
   async reconcile(id, input) {
     return this.locked(async () => {
       const raw = this.load(id);
-      const repo = () => merges.githubRepo(git(this.root, ['remote', 'get-url', 'origin'])) ?? fail('Origin is not on GitHub.');
+      const gitRoot = gitRootOf(raw, this.root);
+      const repo = () => merges.githubRepo(git(gitRoot, ['remote', 'get-url', 'origin'])) ?? fail('Origin is not on GitHub.');
       const api = endpoint => this.githubApi
         ? this.githubApi(endpoint, 'GET')
-        : JSON.parse(run('gh', ['api', '--hostname', 'github.com', endpoint], this.root));
+        : JSON.parse(run('gh', ['api', '--hostname', 'github.com', endpoint], gitRoot));
       const result = await reconcileRun(githubHost(api, repo), raw, input);
       if (result.isChanged) this.save(id, raw);
       return result;
