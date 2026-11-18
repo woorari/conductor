@@ -238,6 +238,15 @@ export class Conductor {
           return signals.addTask(raw, caller, input);
         }
         case 'task_update': {
+          if (caller.dispatcher) {
+            const held = raw.tasks.find(one => one.id === input.task);
+            if (held) {
+              const no = text => ({ isError: true, isChanged: false, text });
+              if (held.agentId) return no(`A dispatcher may not change a task with a live worker (${held.id} is ${held.status}).`);
+              const from = input.status === 'blocked' ? ['queued', 'building'] : ['building'];
+              if (!from.includes(held.status)) return no(`A dispatcher may not set ${input.status} on a task that is ${held.status}; only ${from.join(' or ')}.`);
+            }
+          }
           if (input.status === 'building') fail('Use worktree to reserve a worker; it enforces approval, pause, dependencies and capacity.');
           if (input.status === 'green' && raw.run.plan !== 'approved') fail('Approve the proposed plan before marking tasks green.');
           const result = signals.updateTask(raw, at, caller, input);

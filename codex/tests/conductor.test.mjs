@@ -200,6 +200,34 @@ test('a dispatcher returned leaves the task startable again', async t => {
   assert.equal(app.load('run').tasks.find(one => one.id === 'one').status, 'blocked');
 });
 
+test('a dispatcher changes only a task that has not started', async t => {
+  const { app } = await started(t);
+  await add(app, 'one'); await propose(app); await approve(app);
+  const dispatcher = { kind: 'owner', dispatcher: true };
+  const put = (status, agentId) => { const raw = app.load('run'); const task = raw.tasks[0]; task.status = status; if (agentId) task.agentId = agentId; else delete task.agentId; app.save('run', raw); };
+  const cases = [
+    ['done', undefined, 'blocked', false], ['green', undefined, 'returned', false], ['review', undefined, 'blocked', false],
+    ['failed', undefined, 'returned', false], ['returned', undefined, 'blocked', false], ['blocked', undefined, 'returned', false],
+    ['building', 'agent-1', 'returned', false], ['building', 'agent-1', 'blocked', false],
+    ['building', undefined, 'returned', true], ['building', undefined, 'blocked', true],
+    ['queued', undefined, 'blocked', true], ['queued', undefined, 'returned', false],
+  ];
+  for (const [from, agentId, status, allowed] of cases) {
+    put(from, agentId);
+    const before = JSON.stringify(app.load('run'));
+    const done = await app.apply('run', 'task_update', { task: 'one', status }, dispatcher);
+    const name = `${from}${agentId ? ' with a worker' : ''} -> ${status}`;
+    if (allowed) { assert.equal(done.isError, false, `${name}: ${done.text}`); assert.equal(app.load('run').tasks[0].status, status, name); }
+    else {
+      assert.equal(done.isError, true, name);
+      assert.match(done.text, /dispatcher/i, name);
+      assert.equal(JSON.stringify(app.load('run')), before, `${name}: nothing written`);
+    }
+  }
+  put('building', 'agent-1');
+  assert.equal((await app.apply('run', 'task_update', { task: 'one', status: 'returned' }, { kind: 'orchestrator' })).isError, false, 'the orchestrator still takes a live worker back');
+});
+
 async function githubFixture(t) {
   const fixtureValue = await started(t);
   const { app, parent, git } = fixtureValue;

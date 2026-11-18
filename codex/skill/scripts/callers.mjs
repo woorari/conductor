@@ -126,7 +126,7 @@ export function callerMay(proven, command, ctx = {}) {
     if ((command === 'task_update' || command === 'brief') && input.task !== proven.task) return { refused: 'A worker uses only its own task.' };
     if (command === 'task_update' && input.status !== undefined && !WORKER_STATUS.includes(input.status)) return { refused: 'A worker sets its task to review, blocked or failed.' };
   }
-  if (proven.kind === 'dispatcher' && command in DISPATCHER_KEYS) {
+  if (proven.kind === 'dispatcher' && Object.hasOwn(DISPATCHER_KEYS, command)) {
     const extra = Object.keys(input).filter(key => !DISPATCHER_KEYS[command].includes(key));
     if (extra.length > 0) return { refused: `A dispatcher's ${command} takes only ${DISPATCHER_KEYS[command].join(', ')}; not ${extra.join(', ')}.` };
     if (!text(input.task)) return { refused: `A dispatcher's ${command} names its task.` };
@@ -165,6 +165,7 @@ export function legacyCaller(proven) {
   if (!proven || proven.refused) return { kind: 'stranger' };
   if (proven.kind === 'orchestrator') return { kind: 'orchestrator' };
   if (proven.kind === 'worker') return { kind: 'worker', taskId: proven.task };
+  // dispatcher:true is for the activity label only; never read it for a permission.
   return proven.kind === 'dispatcher' ? { kind: 'owner', dispatcher: true } : { kind: 'owner' };
 }
 
