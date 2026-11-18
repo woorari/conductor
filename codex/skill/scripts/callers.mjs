@@ -51,8 +51,8 @@ export function revokeCaller(dir, token) {
 
 // The command map: who may run what with a proven caller. Not listed: refused.
 const OPEN = ['list', 'board', 'digest'];
-const ORCHESTRATOR = ['init', 'conduct', 'board_open', 'board_close', 'task_add', 'task_update', 'run_plan', 'worktree', 'merge_check', 'merge', 'run_sync_base', 'run_check', 'handover', 'reconcile', 'quarantine', 'board_rule', 'brief'];
-const WORKER = ['task_update', 'board_post', 'brief'];
+const ORCHESTRATOR = ['init', 'conduct', 'board_open', 'board_close', 'task_add', 'task_update', 'run_plan', 'worktree', 'merge_check', 'merge', 'run_sync_base', 'run_check', 'handover', 'reconcile', 'board_post', 'board_rule', 'brief'];
+const WORKER = ['task_update', 'board_post', 'brief', 'quarantine'];
 const DECIDER = ['approve', 'approve_main', 'approve_merge', 'tier', 'model_policy'];
 const WORKER_STATUS = ['review', 'blocked', 'failed'];
 function who(command) {
