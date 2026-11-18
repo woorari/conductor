@@ -177,6 +177,57 @@ test('maxParallel is enforced and restarting a returned worker retains its works
   assert.equal(resumed.workspace, first.workspace);
 });
 
+test('a dispatcher returned leaves the task startable again', async t => {
+  const { app } = fixture(t);
+  app.init(); await app.conduct({ id: 'run', source: 'Test request', maxParallel: 1 });
+  await add(app, 'one'); await add(app, 'two'); await propose(app); await approve(app);
+  const dispatcher = { kind: 'owner', dispatcher: true };
+  const first = await app.worktree('run', { task: 'one' });
+  assert.equal((await app.worktree('run', { task: 'two' })).isError, true, 'the one slot is taken');
+  const returned = await app.apply('run', 'task_update', { task: 'one', status: 'returned', note: 'Spawn failed' }, dispatcher);
+  assert.equal(returned.isError, false, returned.text);
+  const raw = app.load('run');
+  assert.equal(raw.tasks.find(one => one.id === 'one').status, 'returned');
+  assert.match(raw.tasks.find(one => one.id === 'one').activity.text, /^Dispatcher: Spawn failed/);
+  const two = await app.worktree('run', { task: 'two' });
+  assert.equal(two.isError, false, 'the slot is free again');
+  await app.apply('run', 'task_update', { task: 'two', status: 'returned' }, dispatcher);
+  const resumed = await app.worktree('run', { task: 'one' });
+  assert.equal(resumed.isError, false);
+  assert.equal(resumed.workspace, first.workspace);
+  const blocked = await app.apply('run', 'task_update', { task: 'one', status: 'blocked', note: 'No slot' }, dispatcher);
+  assert.equal(blocked.isError, false, blocked.text);
+  assert.equal(app.load('run').tasks.find(one => one.id === 'one').status, 'blocked');
+});
+
+test('a dispatcher changes only a task that has not started', async t => {
+  const { app } = await started(t);
+  await add(app, 'one'); await propose(app); await approve(app);
+  const dispatcher = { kind: 'owner', dispatcher: true };
+  const put = (status, agentId) => { const raw = app.load('run'); const task = raw.tasks[0]; task.status = status; if (agentId) task.agentId = agentId; else delete task.agentId; app.save('run', raw); };
+  const cases = [
+    ['done', undefined, 'blocked', false], ['green', undefined, 'returned', false], ['review', undefined, 'blocked', false],
+    ['failed', undefined, 'returned', false], ['returned', undefined, 'blocked', false], ['blocked', undefined, 'returned', false],
+    ['building', 'agent-1', 'returned', false], ['building', 'agent-1', 'blocked', false],
+    ['building', undefined, 'returned', true], ['building', undefined, 'blocked', true],
+    ['queued', undefined, 'blocked', true], ['queued', undefined, 'returned', false],
+  ];
+  for (const [from, agentId, status, allowed] of cases) {
+    put(from, agentId);
+    const before = JSON.stringify(app.load('run'));
+    const done = await app.apply('run', 'task_update', { task: 'one', status }, dispatcher);
+    const name = `${from}${agentId ? ' with a worker' : ''} -> ${status}`;
+    if (allowed) { assert.equal(done.isError, false, `${name}: ${done.text}`); assert.equal(app.load('run').tasks[0].status, status, name); }
+    else {
+      assert.equal(done.isError, true, name);
+      assert.match(done.text, /dispatcher/i, name);
+      assert.equal(JSON.stringify(app.load('run')), before, `${name}: nothing written`);
+    }
+  }
+  put('building', 'agent-1');
+  assert.equal((await app.apply('run', 'task_update', { task: 'one', status: 'returned' }, { kind: 'orchestrator' })).isError, false, 'the orchestrator still takes a live worker back');
+});
+
 async function githubFixture(t) {
   const fixtureValue = await started(t);
   const { app, parent, git } = fixtureValue;

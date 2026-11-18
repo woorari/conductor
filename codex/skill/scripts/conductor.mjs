@@ -8,7 +8,7 @@ import { approveMerge, mergeApproved, DELIVERY, ORCHESTRATOR_ROLE } from './core
 import { quarantine } from './quarantine.mjs';
 import { complexityOf, selectModel, staffLabel } from './core/models.mjs';
 import { RUN_ID, parseLedger, TIERS } from './core/ledger.mjs';
-import { conducting, newRun, canonicalPlan, planGate, mainGate, decisionLines, digestOutput } from './core/plan.mjs';
+import { conducting, newRun, canonicalPlan, mainGate, decisionLines, digestOutput } from './core/plan.mjs';
 import { CONFIG_PATH, parseConfig, runSetup } from './core/project.mjs';
 import * as signals from './core/signals.mjs';
 import { preflight, route } from './core/router.mjs';
@@ -18,6 +18,8 @@ import * as merges from './core/merge.mjs';
 import { linearKeyOf } from './core/linear.mjs';
 import { approvedMainAt } from './core/lore-merge.mjs';
 import { resolveCaller, callerMay, decisionMay, legacyCaller, runCallersOf, callersFolder, callersBound, withAgent } from './callers.mjs';
+import { approvalGate } from './core/approvals.mjs';
+import { checksAt, reconcileRun } from './core/github-merge.mjs';
 import { openBoard, closeBoard } from './board-launcher.mjs';
 import { isLoreLedger } from './lore-host.mjs';
 import { approveLore, checkLore, mergeLore, mergeMainLore, syncBaseLore, worktreeLore } from './lore-commands.mjs';
@@ -55,6 +57,9 @@ function sameDirectory(left, right) {
   const b = fs.statSync(right, { bigint: true });
   return a.isDirectory() && b.isDirectory() && a.dev === b.dev && a.ino === b.ino;
 }
+
+// The module's host over the adapter's GitHub function, which answers bare JSON and throws when it fails.
+const githubHost = (api, repo) => ({ github: async path => ({ status: 200, json: await api(`repos/${repo()}${path}`), text: '' }), now: () => Date.now() });
 
 export function board(raw) {
   const ledger = parsed(raw);
@@ -207,11 +212,7 @@ export class Conductor {
   }
   // The owner's checks for an approval, shared by a Git run and a Lore run: the owner, the preflight, the plan's hash.
   approvalGate(raw, input, caller, at) {
-    if (caller.kind !== 'owner') fail('This action requires the owner’s explicit instruction in this chat.');
-    const ledger = parsed(raw);
-    const issues = preflight(ledger);
-    if (issues.length) fail(issues.join('\n'));
-    const gate = planGate(planHash(ledger, raw.codex.base), input, at);
+    const gate = approvalGate(raw, input, caller, at, text => crypto.createHash('sha256').update(text).digest('hex'));
     if (gate.error) fail(gate.error);
     return gate.decision;
   }
@@ -237,12 +238,21 @@ export class Conductor {
           return signals.addTask(raw, caller, input);
         }
         case 'task_update': {
+          if (caller.dispatcher) {
+            const held = raw.tasks.find(one => one.id === input.task);
+            if (held) {
+              const no = text => ({ isError: true, isChanged: false, text });
+              if (held.agentId) return no(`A dispatcher may not change a task with a live worker (${held.id} is ${held.status}).`);
+              const from = input.status === 'blocked' ? ['queued', 'building'] : ['building'];
+              if (!from.includes(held.status)) return no(`A dispatcher may not set ${input.status} on a task that is ${held.status}; only ${from.join(' or ')}.`);
+            }
+          }
           if (input.status === 'building') fail('Use worktree to reserve a worker; it enforces approval, pause, dependencies and capacity.');
           if (input.status === 'green' && raw.run.plan !== 'approved') fail('Approve the proposed plan before marking tasks green.');
           const result = signals.updateTask(raw, at, caller, input);
           if (!result.isError && (input.note || input.status || input.files || input.dependsOn)) {
             const task = raw.tasks.find(one => one.id === input.task);
-            const actor = caller.kind === 'worker' ? 'Worker' : 'Orchestrator';
+            const actor = caller.kind === 'worker' ? 'Worker' : caller.dispatcher ? 'Dispatcher' : 'Orchestrator';
             task.activity = { at, text: `${actor}: ${task.note || `status ${task.status}`}` };
           }
           return result;
@@ -355,13 +365,11 @@ export class Conductor {
         return { ...result, text: `PR ${asked.pr} was already merged; board reconciled. Check the base branch’s CI now.` };
       }
       const baseHead = merges.headOf(await api(`${prefix}/branches/${encodeURIComponent(base)}`)) ?? fail('Cannot read the base head.');
+      const host = githubHost(api, () => repo);
       const checks = async sha => {
-        const [runs, status] = await Promise.all([
-          api(`${prefix}/commits/${sha}/check-runs?per_page=100`),
-          api(`${prefix}/commits/${sha}/status?per_page=100`),
-        ]);
-        const read = merges.checksOf(runs, status) ?? fail('Cannot read all check results.');
-        return merges.judge(read);
+        const verdict = await checksAt(host, sha);
+        if ('error' in verdict) fail('Cannot read all check results.');
+        return verdict;
       };
       const [headChecks, main] = await Promise.all([checks(pull.head), checks(baseHead)]);
       const facts = { pull, checks: headChecks, base, baseHead, main };
@@ -392,20 +400,13 @@ export class Conductor {
   async reconcile(id, input) {
     return this.locked(async () => {
       const raw = this.load(id);
-      const flight = raw.merge ?? fail('No merge claim needs reconciliation.');
-      const repo = merges.githubRepo(git(this.root, ['remote', 'get-url', 'origin'])) ?? fail('Origin is not on GitHub.');
-      const response = this.githubApi
-        ? await this.githubApi(`repos/${repo}/pulls/${flight.pr}`, 'GET')
-        : JSON.parse(run('gh', ['api', '--hostname', 'github.com', `repos/${repo}/pulls/${flight.pr}`], this.root));
-      const pull = merges.pullOf(response) ?? fail('Cannot read the PR.');
-      let result;
-      if (pull.isMerged && pull.commit) result = { ...merges.onMain(raw, now(), pull.commit, raw.codex.base), text: 'Merge verified and board reconciled. Check base-branch CI now.' };
-      else {
-        if (input.release !== true) return { isError: false, isChanged: false, text: 'GitHub does not report it merged. Claim retained. Inspect the PR; reconcile with release:true when the write has definitively settled.' };
-        if (Date.now() - Date.parse(flight.startedAt) < 120000) fail('Wait at least two minutes before releasing an uncertain merge claim.');
-        result = merges.abandoned(raw, 'After inspection, the merge was not applied.');
-      }
-      this.save(id, raw); return result;
+      const repo = () => merges.githubRepo(git(this.root, ['remote', 'get-url', 'origin'])) ?? fail('Origin is not on GitHub.');
+      const api = endpoint => this.githubApi
+        ? this.githubApi(endpoint, 'GET')
+        : JSON.parse(run('gh', ['api', '--hostname', 'github.com', endpoint], this.root));
+      const result = await reconcileRun(githubHost(api, repo), raw, input);
+      if (result.isChanged) this.save(id, raw);
+      return result;
     });
   }
 }
@@ -463,7 +464,7 @@ export async function main(argv = process.argv.slice(2)) {
       return;
     }
     if (command === 'brief') { console.log(app.brief(id, input.task)); return; }
-    if (['worktree', 'handover', 'merge_check', 'merge', 'run_check', 'run_sync_base', 'reconcile', 'linear_sync', 'linear_ack'].includes(command) && caller.kind !== 'orchestrator') fail('Only the orchestrator performs this action.');
+    if (['worktree', 'handover', 'merge_check', 'merge', 'run_check', 'run_sync_base', 'reconcile', 'linear_sync', 'linear_ack'].includes(command) && caller.kind !== 'orchestrator' && !(command === 'worktree' && proven?.kind === 'dispatcher')) fail('Only the orchestrator performs this action.');
     if (command === 'linear_sync') { console.log(JSON.stringify(await app.linearSync(id), null, 2)); return; }
     if (command === 'quarantine') result = await app.quarantine(id, input, caller);
     else if (command === 'linear_ack') result = await app.linearAck(id, input);
