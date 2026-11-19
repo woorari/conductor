@@ -84,12 +84,11 @@ function runLore(args, cwd, ms) {
 }
 
 /** Every folder (a line ending in `/`) and file below a folder. Lore's own state is named but not entered: no rule of the project applies to it. */
-async function walk(folder, at = '') {
-  const lines = [];
+async function walk(folder, at = '', lines = []) {
   for (const entry of await fs.promises.readdir(path.join(folder, at), { withFileTypes: true })) {
     const here = at === '' ? entry.name : `${at}/${entry.name}`;
     lines.push(entry.isDirectory() ? `${here}/` : here);
-    if (entry.isDirectory() && here !== '.lore') lines.push(...(await walk(folder, here)));
+    if (entry.isDirectory() && here !== '.lore') await walk(folder, here, lines);
   }
   return lines;
 }

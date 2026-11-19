@@ -455,3 +455,31 @@ test('a claim left by a crashed call blocks nobody for good', async t => {
   const blocker = after_.problems.find(one => one.severity === 'blocker');
   assert.match(blocker.text, /was let go unheard after 210 minutes/);
 });
+
+test('listTree names every folder and file, enters no .lore, and prefixes each line with the folder', async () => {
+  const { nodeHost } = await import(pathToFileURL(path.join(skillPath, 'scripts', 'lore-host.mjs')).href);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'conductor-tree-'));
+  try {
+    fs.mkdirSync(path.join(dir, 'Source', 'Deep'), { recursive: true });
+    fs.mkdirSync(path.join(dir, '.lore'));
+    fs.writeFileSync(path.join(dir, '.lore', 'state'), 'x');
+    fs.writeFileSync(path.join(dir, 'Source', 'Deep', 'a.cpp'), 'x');
+    fs.writeFileSync(path.join(dir, 'game.cfg'), 'x');
+    const lines = (await nodeHost().listTree(dir)).split('\n');
+    assert.deepEqual([...lines].sort(), [`${dir}/.lore/`, `${dir}/Source/`, `${dir}/Source/Deep/`, `${dir}/Source/Deep/a.cpp`, `${dir}/game.cfg`].sort());
+    assert.ok(lines.indexOf(`${dir}/Source/`) < lines.indexOf(`${dir}/Source/Deep/`) && lines.indexOf(`${dir}/Source/Deep/`) < lines.indexOf(`${dir}/Source/Deep/a.cpp`), 'a folder comes before what is inside it');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('listTree lists a folder of hundreds of thousands of files without overflowing the stack', async () => {
+  const { nodeHost } = await import(pathToFileURL(path.join(skillPath, 'scripts', 'lore-host.mjs')).href);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'conductor-big-tree-'));
+  try {
+    const count = 200_000;
+    fs.mkdirSync(path.join(dir, 'Content'));
+    for (let i = 0; i < count; i++) fs.closeSync(fs.openSync(path.join(dir, 'Content', `f${i}`), 'w'));
+    const lines = (await nodeHost().listTree(dir)).split('\n');
+    assert.equal(lines.length, count + 1);
+    assert.equal(lines.filter(line => line === `${dir}/Content/`).length, 1);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
